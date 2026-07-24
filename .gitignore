@@ -1,0 +1,6 @@
+/target/
+benchmarks/results*.txt
+benchmarks/results*.md
+benchmarks/data/
+benchmarks/*.csv
+__pycache__/

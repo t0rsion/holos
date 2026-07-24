@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+  doc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo package --locked
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --all-targets --locked
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Must match rust-version in Cargo.toml.
+      - uses: dtolnay/rust-toolchain@1.85
+      - run: cargo build --all-targets --locked
+
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked
+
+  exhaustive-oracle:
+    # The `--ignored` exhaustive small-space sweep; release-gating.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release --locked -- --ignored
+
+  ripser-differential:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build ripser at pinned commit
+        run: |
+          git clone https://github.com/Ripser/ripser.git "$RUNNER_TEMP/ripser"
+          # PINNED upstream commit (matches the locally validated reference
+          # build); bump deliberately, never track a branch.
+          git -C "$RUNNER_TEMP/ripser" checkout 01add51ff64aaf40889483260cc5c3b7d0f2a1e7
+          make -C "$RUNNER_TEMP/ripser"
+      - run: RIPSER_BIN="$RUNNER_TEMP/ripser/ripser" cargo test --locked --test ripser_differential
