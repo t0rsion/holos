@@ -43,6 +43,18 @@ fn ripser_bin() -> Option<String> {
     }
 }
 
+// A ripser build with coefficient support (make ripser-coeff); the plain
+// binary rejects --modulus.
+fn ripser_coeff_bin() -> Option<String> {
+    match std::env::var("RIPSER_COEFF_BIN") {
+        Ok(path) if !path.is_empty() => Some(path),
+        _ => {
+            println!("skipping: RIPSER_COEFF_BIN not set");
+            None
+        }
+    }
+}
+
 fn condensed(dist: &DistanceMatrix) -> Vec<f64> {
     let n = dist.len();
     let mut out = Vec::with_capacity(n * (n - 1) / 2);
@@ -74,12 +86,16 @@ fn run_ripser(
     dist: &DistanceMatrix,
     dim: usize,
     threshold: Option<f64>,
+    modulus: u32,
 ) -> Vec<Bar> {
     let path = write_lower_distance_file(name, dist);
     let mut cmd = Command::new(bin);
     cmd.args(["--format", "lower-distance", "--dim", &dim.to_string()]);
     if let Some(t) = threshold {
         cmd.args(["--threshold", &t.to_string()]);
+    }
+    if modulus != 2 {
+        cmd.args(["--modulus", &modulus.to_string()]);
     }
     let output = cmd.arg(&path).output().expect("failed to launch ripser");
     let _ = std::fs::remove_file(&path);
@@ -156,10 +172,21 @@ fn check_against_ripser(
     max_dim: usize,
     threshold: Option<f64>,
 ) {
-    let mut params = RipsParams::new(max_dim);
+    check_against_ripser_mod(bin, name, dist, max_dim, threshold, 2);
+}
+
+fn check_against_ripser_mod(
+    bin: &str,
+    name: &str,
+    dist: &DistanceMatrix,
+    max_dim: usize,
+    threshold: Option<f64>,
+    modulus: u32,
+) {
+    let mut params = RipsParams::new(max_dim).with_modulus(modulus);
     params.threshold = threshold;
     let ours = rips_persistence(dist, &params).unwrap();
-    let theirs = run_ripser(bin, name, dist, max_dim, threshold);
+    let theirs = run_ripser(bin, name, dist, max_dim, threshold, modulus);
     assert_diagrams_close(name, &ours.bars, &theirs, max_dim);
 }
 
@@ -245,6 +272,45 @@ fn random_point_clouds_match_ripser() {
             None
         };
         check_against_ripser(&bin, &format!("cloud_{case}"), &dist, max_dim, threshold);
+    }
+}
+
+// Replays the random_point_clouds_match_ripser stream and reruns a few of
+// the smaller cases at modulus 3 against a coefficient-enabled ripser.
+#[test]
+fn random_point_clouds_match_ripser_mod_3() {
+    let Some(bin) = ripser_coeff_bin() else {
+        return;
+    };
+    let mut rng = Rng::new(0x21b5_ee2d_1ff0_c10d);
+    for case in 0..10 {
+        let max_dim = 1 + case % 2;
+        let n = if max_dim == 2 {
+            10 + rng.below(26)
+        } else {
+            10 + rng.below(51)
+        };
+        let points: Vec<Vec<f64>> = (0..n)
+            .map(|_| (0..3).map(|_| 2.0 * rng.uniform() - 1.0).collect())
+            .collect();
+        let threshold = if case % 3 == 0 {
+            Some(0.8 + rng.uniform())
+        } else {
+            None
+        };
+        // The three smallest clouds: n 23 at dim 1, n 13 and n 15 at dim 2.
+        if !matches!(case, 4 | 5 | 9) {
+            continue;
+        }
+        let dist = DistanceMatrix::from_points(&points).unwrap();
+        check_against_ripser_mod(
+            &bin,
+            &format!("cloud_{case}_mod3"),
+            &dist,
+            max_dim,
+            threshold,
+            3,
+        );
     }
 }
 

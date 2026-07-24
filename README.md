@@ -1,23 +1,32 @@
 # holos
 
-Vietoris-Rips persistent homology in Rust: exact barcodes over Z/2 for point
-clouds and precomputed distance matrices, computed by a ripser-class implicit
-engine and checked against both an independent oracle and
-[ripser](https://github.com/Ripser/ripser) itself.
-Distributed as the crate [`holos-tda`](https://crates.io/crates/holos-tda)
-(library path `holos_tda`, binary `holos`), usable as a library and as a CLI.
+[![CI](https://github.com/t0rsion/holos/actions/workflows/ci.yml/badge.svg)](https://github.com/t0rsion/holos/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/holos-tda)](https://crates.io/crates/holos-tda)
+[![docs.rs](https://img.shields.io/docsrs/holos-tda)](https://docs.rs/holos-tda)
+![MSRV](https://img.shields.io/crates/msrv/holos-tda)
+
+Vietoris-Rips persistent homology in Rust: exact barcodes over a prime
+field Z/p (Z/2 by default) for point clouds and dense or sparse distance
+matrices, computed by a ripser-class implicit engine and checked against
+both an independent oracle and [ripser](https://github.com/Ripser/ripser)
+itself. Distributed as the crate
+[`holos-tda`](https://crates.io/crates/holos-tda) (library path `holos_tda`,
+binary `holos`) and as the Python package
+[`holos-tda`](https://pypi.org/project/holos-tda/) (import `holos_tda`).
 
 ## Status
 
-Early release, work in progress. v0.1 is Rust-only, serial, and aimed at
-dimensions 0 and 1. Higher dimensions run through the same dimension-generic
-core; see "Correctness" for what is actually certified.
+Early release, work in progress. The engine is serial; dimensions 0 and 1
+are the primary target, and higher dimensions run through the same
+dimension-generic core. See "Correctness" for what is actually certified.
 
 ## Install
 
 ```sh
 cargo install holos-tda          # CLI (binary is named `holos`)
-cargo add holos-tda              # library dependency
+cargo add holos-tda              # Rust library
+pip install holos-tda            # Python library + `holos-tda` CLI
+uvx holos-tda points.csv         # run the CLI without installing
 ```
 
 or from a checkout: `cargo install --path .`
@@ -33,13 +42,18 @@ holos points.csv
 # explicit threshold, CSV output:
 holos data.lower --format lower-distance --threshold 0.5 --output csv
 
+# Sparse "i j d" triplets (unlisted pairs never enter the filtration),
+# coefficients in Z/3:
+holos graph.spr --format sparse --modulus 3
+
 # Build identity (version, git commit, profile):
 holos --version
 ```
 
 Input format is inferred from the extension (`.csv`/`.pts`/`.xyz` are point
-clouds, anything else lower-distance); `--format` overrides. The diagram goes
-to stdout, computation metadata to stderr.
+clouds, anything else lower-distance; sparse must be requested explicitly);
+`--format` overrides. The diagram goes to stdout, computation metadata to
+stderr.
 
 ## Library
 
@@ -57,19 +71,41 @@ fn main() -> holos_tda::Result<()> {
 }
 ```
 
+`RipsParams::with_modulus(p)` switches the coefficient field;
+`SparseDistanceMatrix::from_triplets` plus `rips_persistence_sparse` handle
+sparse input.
+
+## Python
+
+```python
+import holos_tda
+
+bars = holos_tda.rips_points([[0, 0], [1, 0], [1, 1], [0, 1]], max_dim=1)
+# [(0, 0.0, 1.0), (0, 0.0, 1.0), (0, 0.0, 1.0), (0, 0.0, inf), (1, 1.0, 1.4142...)]
+```
+
+`rips_condensed` and `rips_sparse` mirror the Rust entry points; all three
+accept `max_dim`, `threshold`, and `modulus`. The `holos-tda` script is the
+same CLI as the Rust binary.
+
 ## Correctness
 
 Tests compare every diagram against an independent oracle (`src/oracle.rs`,
-a textbook boundary-matrix reduction that shares no code with the solver) on
-exhaustive small spaces and randomized inputs, and against ripser on larger
-ones (`RIPSER_BIN=... cargo test --test ripser_differential`; CI pins a
-fixed ripser commit). Property tests cover permutation invariance, scaling
+a textbook boundary-matrix reduction over Z/p that shares no code with the
+solver, down to using a different inverse algorithm) on exhaustive small
+spaces and randomized inputs, and against ripser on larger ones
+(`RIPSER_BIN=... cargo test --test ripser_differential`; CI pins a fixed
+ripser commit and also builds its coefficient-enabled variant for
+`--modulus` runs). Sparse input is checked against the dense engine on the
+same underlying matrix and against ripser's sparse format. A projective
+plane fixture pins the torsion behavior: its H1 and H2 exist over Z/2 and
+vanish over Z/3. Property tests cover permutation invariance, scaling
 equivariance, and that the optimization toggles (clearing, emergent and
 apparent pairs) change nothing.
 
-The oracle and ripser tests certify H0, H1, and H2. Higher dimensions
-compile and run through the same generic code, but they are not part of the
-validated claim.
+The oracle and ripser tests certify H0, H1, and H2, over Z/2 and odd primes.
+Higher dimensions compile and run through the same generic code, but they
+are not part of the validated claim.
 
 ## Benchmarks
 

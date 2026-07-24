@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use crate::{Diagram, DistanceMatrix, Error, Result};
+use crate::{Diagram, DistanceMatrix, Error, Result, SparseDistanceMatrix};
 
 fn read_to_string(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))
@@ -75,6 +75,56 @@ pub fn read_lower_distance_matrix(path: &Path) -> Result<DistanceMatrix> {
         }
     }
     DistanceMatrix::from_condensed(data)
+}
+
+/// Read a sparse distance matrix (ripser's `sparse` format): one `i j d`
+/// triplet per line, separated by commas and/or whitespace. The number of
+/// points is one more than the largest vertex index seen. Blank lines and
+/// lines starting with `#` are skipped.
+pub fn read_sparse_matrix(path: &Path) -> Result<SparseDistanceMatrix> {
+    let text = read_to_string(path)?;
+    let mut triplets: Vec<(usize, usize, f64)> = Vec::new();
+    let mut n = 0usize;
+    for (idx, line) in text.lines().enumerate() {
+        let lineno = idx + 1;
+        if is_skipped(line) {
+            continue;
+        }
+        let fields: Vec<&str> = tokens(line).collect();
+        if fields.len() != 3 {
+            return Err(Error::InvalidInput(format!(
+                "{}:{lineno}: expected 'i j d', got {} fields",
+                path.display(),
+                fields.len()
+            )));
+        }
+        let parse_vertex = |t: &str| {
+            t.parse::<usize>().map_err(|_| {
+                Error::InvalidInput(format!(
+                    "{}:{lineno}: not a vertex index: {t:?}",
+                    path.display()
+                ))
+            })
+        };
+        let i = parse_vertex(fields[0])?;
+        let j = parse_vertex(fields[1])?;
+        if i == usize::MAX || j == usize::MAX {
+            return Err(Error::InvalidInput(format!(
+                "{}:{lineno}: vertex index out of range",
+                path.display()
+            )));
+        }
+        let d = fields[2].parse::<f64>().map_err(|_| {
+            Error::InvalidInput(format!(
+                "{}:{lineno}: not a number: {:?}",
+                path.display(),
+                fields[2]
+            ))
+        })?;
+        n = n.max(i + 1).max(j + 1);
+        triplets.push((i, j, d));
+    }
+    SparseDistanceMatrix::from_triplets(n, &triplets)
 }
 
 /// Diagram serialization format.

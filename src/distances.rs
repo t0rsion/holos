@@ -104,6 +104,139 @@ impl DistanceMatrix {
     }
 }
 
+/// Sparse dissimilarities: only listed pairs have finite distance; every
+/// unlisted pair is an absent edge (+inf) that never enters the filtration.
+/// No metric assumptions, same entry rules as [`DistanceMatrix`].
+#[derive(Debug, Clone)]
+pub struct SparseDistanceMatrix {
+    n: usize,
+    /// Per-vertex neighbor lists, sorted by vertex index.
+    neighbors: Vec<Vec<(usize, f64)>>,
+}
+
+impl SparseDistanceMatrix {
+    /// Build from `(i, j, d)` triplets over `n` points. Each unordered pair
+    /// may appear multiple times only with an identical distance; entries
+    /// must be finite and non-negative (omit a pair to make it absent).
+    pub fn from_triplets(n: usize, triplets: &[(usize, usize, f64)]) -> Result<Self> {
+        let mut neighbors: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        for (idx, &(i, j, d)) in triplets.iter().enumerate() {
+            if i >= n || j >= n {
+                return Err(Error::InvalidInput(format!(
+                    "triplet {idx}: vertex out of range ({i}, {j}) for n = {n}"
+                )));
+            }
+            if i == j {
+                return Err(Error::InvalidInput(format!(
+                    "triplet {idx}: self-distance for vertex {i}"
+                )));
+            }
+            if !d.is_finite() || d < 0.0 {
+                return Err(Error::InvalidDistance(format!(
+                    "triplet {idx}: distance must be finite and non-negative, got {d}"
+                )));
+            }
+            let d = if d == 0.0 { 0.0 } else { d };
+            neighbors[i].push((j, d));
+            neighbors[j].push((i, d));
+        }
+        for (v, list) in neighbors.iter_mut().enumerate() {
+            list.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            for w in list.windows(2) {
+                if w[0].0 == w[1].0 && w[0].1 != w[1].1 {
+                    return Err(Error::InvalidInput(format!(
+                        "conflicting distances for pair ({v}, {}): {} vs {}",
+                        w[0].0, w[0].1, w[1].1
+                    )));
+                }
+            }
+            list.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+        }
+        Ok(Self { n, neighbors })
+    }
+
+    /// Number of points.
+    pub fn len(&self) -> usize {
+        self.n
+    }
+
+    /// True when there are no points.
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
+    }
+
+    /// Number of stored (present) edges.
+    pub fn num_edges(&self) -> usize {
+        self.neighbors.iter().map(Vec::len).sum::<usize>() / 2
+    }
+
+    /// Distance between `i` and `j`; +inf when the pair is not listed.
+    #[inline]
+    pub fn get(&self, i: usize, j: usize) -> f64 {
+        debug_assert!(i < self.n && j < self.n);
+        if i == j {
+            return 0.0;
+        }
+        match self.neighbors[i].binary_search_by(|&(v, _)| v.cmp(&j)) {
+            Ok(pos) => self.neighbors[i][pos].1,
+            Err(_) => f64::INFINITY,
+        }
+    }
+}
+
+/// What the solver needs from a distance source. Dense and sparse inputs
+/// share the whole engine through this trait; an absent pair reads as +inf.
+pub(crate) trait Distances {
+    fn len(&self) -> usize;
+    fn get(&self, i: usize, j: usize) -> f64;
+    /// Threshold to use when the caller gives none.
+    fn default_threshold(&self) -> f64;
+    /// Visit every pair that could be an edge, as (i, j, d) with j < i.
+    fn for_each_edge(&self, f: &mut dyn FnMut(usize, usize, f64));
+}
+
+impl Distances for DistanceMatrix {
+    fn len(&self) -> usize {
+        self.n
+    }
+    fn get(&self, i: usize, j: usize) -> f64 {
+        DistanceMatrix::get(self, i, j)
+    }
+    fn default_threshold(&self) -> f64 {
+        self.enclosing_radius()
+    }
+    fn for_each_edge(&self, f: &mut dyn FnMut(usize, usize, f64)) {
+        for i in 1..self.n {
+            for j in 0..i {
+                f(i, j, DistanceMatrix::get(self, i, j));
+            }
+        }
+    }
+}
+
+impl Distances for SparseDistanceMatrix {
+    fn len(&self) -> usize {
+        self.n
+    }
+    fn get(&self, i: usize, j: usize) -> f64 {
+        SparseDistanceMatrix::get(self, i, j)
+    }
+    /// Sparse input has no enclosing radius: absent edges are absent at
+    /// every scale, so the default is to include all listed edges.
+    fn default_threshold(&self) -> f64 {
+        f64::INFINITY
+    }
+    fn for_each_edge(&self, f: &mut dyn FnMut(usize, usize, f64)) {
+        for (i, list) in self.neighbors.iter().enumerate() {
+            for &(j, d) in list {
+                if j < i {
+                    f(i, j, d);
+                }
+            }
+        }
+    }
+}
+
 /// Scaled two-norm: exact where the naive sum of squares would overflow or
 /// underflow. Finite coordinates whose difference still overflows f64 yield
 /// +inf, which the complex treats as an absent edge.

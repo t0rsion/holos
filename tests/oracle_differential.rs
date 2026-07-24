@@ -2,7 +2,7 @@
 //! Both sides read the same f64 matrix entries and take maxima only, so
 //! births and deaths must agree bit-for-bit.
 
-use holos_tda::oracle::rips_persistence_oracle;
+use holos_tda::oracle::{rips_persistence_oracle, rips_persistence_oracle_mod};
 use holos_tda::{rips_persistence, Diagram, DistanceMatrix, RipsParams};
 
 struct Rng(u64);
@@ -45,11 +45,13 @@ fn assert_same_diagram(a: &Diagram, b: &Diagram) {
 }
 
 fn check(dist: &DistanceMatrix, max_dim: usize, threshold: Option<f64>) {
-    let expected = rips_persistence_oracle(dist, max_dim, threshold);
-    let mut params = RipsParams::new(max_dim);
-    params.threshold = threshold;
-    let got = rips_persistence(dist, &params).unwrap();
-    assert_same_diagram(&got, &expected);
+    for p in [2, 3, 5] {
+        let expected = rips_persistence_oracle_mod(dist, max_dim, threshold, p);
+        let mut params = RipsParams::new(max_dim).with_modulus(p);
+        params.threshold = threshold;
+        let got = rips_persistence(dist, &params).unwrap();
+        assert_eq!(canonical(&got), canonical(&expected), "modulus {p}");
+    }
 }
 
 #[test]
@@ -76,6 +78,24 @@ fn exhaustive_two_valued_matrices() {
 #[test]
 #[ignore = "exhaustive 6-point sweep; run with --ignored, preferably in release"]
 fn exhaustive_six_point_sweep_all_dims_and_toggles() {
+    exhaustive_six_point_sweep(2);
+}
+
+#[test]
+#[ignore = "exhaustive 6-point sweep; run with --ignored, preferably in release"]
+fn exhaustive_six_point_sweep_mod_3() {
+    exhaustive_six_point_sweep(3);
+}
+
+// p = 3 only exercises coefficients +-1; p = 5 is the smallest field where
+// stored pivots and inverses take values other than 1 and p-1.
+#[test]
+#[ignore = "exhaustive 6-point sweep; run with --ignored, preferably in release"]
+fn exhaustive_six_point_sweep_mod_5() {
+    exhaustive_six_point_sweep(5);
+}
+
+fn exhaustive_six_point_sweep(modulus: u32) {
     let threads = std::thread::available_parallelism().map_or(1, |p| p.get());
     let total = 1u32 << 15;
     let chunk = total.div_ceil(threads as u32);
@@ -85,19 +105,19 @@ fn exhaustive_six_point_sweep_all_dims_and_toggles() {
             let hi = total.min(lo + chunk);
             scope.spawn(move || {
                 for mask in lo..hi {
-                    sweep_one_matrix(mask);
+                    sweep_one_matrix(mask, modulus);
                 }
             });
         }
     });
 }
 
-fn sweep_one_matrix(mask: u32) {
+fn sweep_one_matrix(mask: u32, modulus: u32) {
     let data: Vec<f64> = (0..15)
         .map(|k| if mask >> k & 1 == 1 { 2.0 } else { 1.0 })
         .collect();
     let dist = DistanceMatrix::from_condensed(data).unwrap();
-    let full = canonical(&rips_persistence_oracle(&dist, 3, None));
+    let full = canonical(&rips_persistence_oracle_mod(&dist, 3, None, modulus));
     for max_dim in 0..=3usize {
         let expected: Vec<_> = full
             .iter()
@@ -105,18 +125,18 @@ fn sweep_one_matrix(mask: u32) {
             .filter(|&(dim, _, _)| dim <= max_dim)
             .collect();
         for bits in 0..8u8 {
-            let params = RipsParams {
-                max_dim,
-                threshold: None,
-                use_emergent_pairs: bits & 1 != 0,
-                use_apparent_pairs: bits & 2 != 0,
-                use_clearing: bits & 4 != 0,
-            };
+            let mut params = RipsParams::default();
+            params.max_dim = max_dim;
+            params.threshold = None;
+            params.modulus = modulus;
+            params.use_emergent_pairs = bits & 1 != 0;
+            params.use_apparent_pairs = bits & 2 != 0;
+            params.use_clearing = bits & 4 != 0;
             let got = rips_persistence(&dist, &params).unwrap();
             assert_eq!(
                 canonical(&got),
                 expected,
-                "mask {mask:#06x}, max_dim {max_dim}, toggles {bits:03b}"
+                "mask {mask:#06x}, modulus {modulus}, max_dim {max_dim}, toggles {bits:03b}"
             );
         }
     }
@@ -146,13 +166,13 @@ fn regression_emergent_apparent_wrong_vertex_set() {
     let dist = DistanceMatrix::from_condensed(data).unwrap();
     let expected = rips_persistence_oracle(&dist, 2, None);
     for bits in 0..8u8 {
-        let params = RipsParams {
-            max_dim: 2,
-            threshold: None,
-            use_emergent_pairs: bits & 1 != 0,
-            use_apparent_pairs: bits & 2 != 0,
-            use_clearing: bits & 4 != 0,
-        };
+        let mut params = RipsParams::default();
+        params.max_dim = 2;
+        params.threshold = None;
+        params.modulus = 2;
+        params.use_emergent_pairs = bits & 1 != 0;
+        params.use_apparent_pairs = bits & 2 != 0;
+        params.use_clearing = bits & 4 != 0;
         let got = rips_persistence(&dist, &params).unwrap();
         assert_eq!(got.in_dim(1).count(), 0, "toggles {bits:03b}: H1 not empty");
         assert_eq!(got.in_dim(2).count(), 0, "toggles {bits:03b}: H2 not empty");
@@ -169,13 +189,13 @@ fn regression_spurious_h2_bar() {
     let dist = DistanceMatrix::from_condensed(data).unwrap();
     let expected = rips_persistence_oracle(&dist, 2, None);
     for bits in 0..8u8 {
-        let params = RipsParams {
-            max_dim: 2,
-            threshold: None,
-            use_emergent_pairs: bits & 1 != 0,
-            use_apparent_pairs: bits & 2 != 0,
-            use_clearing: bits & 4 != 0,
-        };
+        let mut params = RipsParams::default();
+        params.max_dim = 2;
+        params.threshold = None;
+        params.modulus = 2;
+        params.use_emergent_pairs = bits & 1 != 0;
+        params.use_apparent_pairs = bits & 2 != 0;
+        params.use_clearing = bits & 4 != 0;
         let got = rips_persistence(&dist, &params).unwrap();
         assert_eq!(got.in_dim(2).count(), 0, "toggles {bits:03b}: H2 not empty");
         assert_same_diagram(&got, &expected);
@@ -187,13 +207,13 @@ fn regression_spurious_h2_bar() {
 #[test]
 fn regression_clearing_disabled_no_false_essential_class() {
     let dist = DistanceMatrix::from_condensed(vec![1.0, 1.0, 1.0]).unwrap();
-    let params = RipsParams {
-        max_dim: 2,
-        threshold: None,
-        use_emergent_pairs: false,
-        use_apparent_pairs: false,
-        use_clearing: false,
-    };
+    let mut params = RipsParams::default();
+    params.max_dim = 2;
+    params.threshold = None;
+    params.modulus = 2;
+    params.use_emergent_pairs = false;
+    params.use_apparent_pairs = false;
+    params.use_clearing = false;
     let got = rips_persistence(&dist, &params).unwrap();
     assert_eq!(
         canonical(&got),
@@ -258,17 +278,23 @@ fn optimization_toggles_never_change_the_diagram() {
         } else {
             Some(1.0 + 2.0 * rng.uniform())
         };
-        let expected = rips_persistence_oracle(&dist, max_dim, threshold);
-        for bits in 0..8u8 {
-            let params = RipsParams {
-                max_dim,
-                threshold,
-                use_emergent_pairs: bits & 1 != 0,
-                use_apparent_pairs: bits & 2 != 0,
-                use_clearing: bits & 4 != 0,
-            };
-            let got = rips_persistence(&dist, &params).unwrap();
-            assert_same_diagram(&got, &expected);
+        for p in [2, 3] {
+            let expected = rips_persistence_oracle_mod(&dist, max_dim, threshold, p);
+            for bits in 0..8u8 {
+                let mut params = RipsParams::default();
+                params.max_dim = max_dim;
+                params.threshold = threshold;
+                params.modulus = p;
+                params.use_emergent_pairs = bits & 1 != 0;
+                params.use_apparent_pairs = bits & 2 != 0;
+                params.use_clearing = bits & 4 != 0;
+                let got = rips_persistence(&dist, &params).unwrap();
+                assert_eq!(
+                    canonical(&got),
+                    canonical(&expected),
+                    "modulus {p}, toggles {bits:03b}"
+                );
+            }
         }
     }
 }

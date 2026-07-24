@@ -88,5 +88,8 @@ jobs:
           # PINNED upstream commit (matches the locally validated reference
           # build); bump deliberately, never track a branch.
           git -C "$RUNNER_TEMP/ripser" checkout 01add51ff64aaf40889483260cc5c3b7d0f2a1e7
-          make -C "$RUNNER_TEMP/ripser"
-      - run: RIPSER_BIN="$RUNNER_TEMP/ripser/ripser" cargo test --locked --test ripser_differential
+          make -C "$RUNNER_TEMP/ripser" ripser ripser-coeff
+      - run: >-
+          RIPSER_BIN="$RUNNER_TEMP/ripser/ripser"
+          RIPSER_COEFF_BIN="$RUNNER_TEMP/ripser/ripser-coeff"
+          cargo test --locked

@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - Unreleased
+
+### Added
+
+- Coefficients in a prime field Z/p, p < 32768: `--modulus` on the CLI,
+  `RipsParams::modulus` (and `with_modulus`) in the library. Z/2 stays the
+  default and keeps its exact v0.1 code path and performance. Validated by
+  a mod-p oracle, differential tests against a coefficient-enabled ripser
+  build, and a projective-plane fixture whose H1/H2 differ between Z/2 and
+  Z/3.
+- Sparse distance input: `SparseDistanceMatrix`, `rips_persistence_sparse`,
+  and `--format sparse` (ripser-compatible `i j d` triplets). Pairs not
+  listed are absent at every scale; distance storage is O(n + edges)
+  instead of the dense O(n^2).
+- Python bindings, published as `holos-tda` on PyPI: `import holos_tda` for
+  the library (`rips_points`, `rips_condensed`, `rips_sparse`), and a
+  `holos-tda` console script that is the same CLI (works under `uvx`).
+  abi3 wheels for Linux, macOS, and Windows.
+- The CLI is callable as a library function (`holos_tda::cli::run_cli`).
+
 ## [0.1.0] - 2026-07-24
 
 First public release.

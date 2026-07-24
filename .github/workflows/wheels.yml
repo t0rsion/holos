@@ -1,0 +1,147 @@
+name: wheels
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # On tags, refuse to proceed unless the tag matches every declared version
+  # (root crate, py crate, pyproject); a stray or RC v* tag must not publish.
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          v_root=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          v_py=$(sed -n 's/^version = "\(.*\)"/\1/p' py/Cargo.toml | head -1)
+          v_proj=$(sed -n 's/^version = "\(.*\)"/\1/p' py/pyproject.toml | head -1)
+          echo "root=$v_root py=$v_py pyproject=$v_proj ref=$GITHUB_REF"
+          [ "$v_root" = "$v_py" ] && [ "$v_root" = "$v_proj" ] || { echo "version mismatch"; exit 1; }
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            [ "$GITHUB_REF" = "refs/tags/v$v_root" ] || { echo "tag does not match version v$v_root"; exit 1; }
+          fi
+
+  linux:
+    needs: [version-check]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: py
+          target: ${{ matrix.target }}
+          args: --release --out dist --zig
+          manylinux: "2_17"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: py/dist
+
+  macos:
+    needs: [version-check]
+    runs-on: macos-14
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: py
+          target: ${{ matrix.target }}
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: py/dist
+
+  windows:
+    needs: [version-check]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: py
+          target: x86_64
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x86_64
+          path: py/dist
+
+  sdist:
+    needs: [version-check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: py
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: py/dist
+
+  # Install the built linux x86_64 wheel and run the smoke tests (license
+  # texts present, pdist ordering, sparse, moduli, console script).
+  smoke:
+    needs: [linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-linux-x86_64
+          path: dist
+      - run: |
+          pip install dist/*.whl
+          python py/tests/smoke.py
+          python - <<'EOF'
+          import glob, sys, zipfile
+          whl = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(whl).namelist()
+          licenses = [n for n in names if "licenses/" in n]
+          assert any("LICENSE-MIT" in n for n in licenses), names
+          assert any("LICENSE-APACHE" in n for n in licenses), names
+          print("license files:", licenses)
+          EOF
+
+  # Before the first tagged run, configure a PyPI "pending publisher" for
+  # project holos-tda: repository t0rsion/holos, workflow wheels.yml,
+  # environment blank (https://pypi.org/manage/account/publishing/).
+  publish-pypi:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, macos, windows, sdist, smoke, version-check]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

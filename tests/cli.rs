@@ -70,6 +70,69 @@ fn lower_distance_end_to_end_with_empty_top_dimension() {
     );
 }
 
+// The section printed for one dimension: everything between its header and
+// the next header (or the end of output).
+fn dim_section(text: &str, dim: usize) -> String {
+    let header = format!("persistence intervals in dim {dim}:\n");
+    let rest = text
+        .split_once(&header)
+        .unwrap_or_else(|| panic!("missing dim {dim} header: {text}"))
+        .1;
+    rest.split("persistence intervals")
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn modulus_decides_projective_plane_torsion() {
+    // Ripser's 13-vertex RP^2 triangulation: H1 and H2 exist over Z/2 only.
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/projective_plane.lower_distance_matrix"
+    );
+    let out = run(&[fixture, "--dim", "2", "--modulus", "2"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let text = stdout(&out);
+    assert_eq!(dim_section(&text, 1), " [1,2)\n", "{text}");
+    assert_eq!(dim_section(&text, 2), " [1,2)\n", "{text}");
+
+    let out = run(&[fixture, "--dim", "2", "--modulus", "3"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let text = stdout(&out);
+    assert_eq!(dim_section(&text, 1), "", "{text}");
+    assert_eq!(dim_section(&text, 2), "", "{text}");
+}
+
+#[test]
+fn composite_modulus_is_rejected() {
+    let f = TempFile::new("mod4.lower", "1\n1 1\n");
+    let out = run(&[f.path().to_str().unwrap(), "--modulus", "4"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("prime"), "{}", stderr(&out));
+}
+
+#[test]
+fn sparse_format_end_to_end() {
+    // A 4-cycle with unit edges and no diagonals: three merges at 1, one
+    // essential component, and one essential H1 class (nothing ever fills
+    // the loop).
+    let f = TempFile::new("cycle.sparse", "0 1 1.0\n1 2 1.0\n2 3 1.0\n0 3 1.0\n");
+    let out = run(&[
+        f.path().to_str().unwrap(),
+        "--format",
+        "sparse",
+        "--dim",
+        "1",
+    ]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "persistence intervals in dim 0:\n [0,1)\n [0,1)\n [0,1)\n [0, )\n\
+         persistence intervals in dim 1:\n [1, )\n"
+    );
+}
+
 #[test]
 fn version_reports_build_identity() {
     let out = run(&["--version"]);

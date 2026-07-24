@@ -4,3 +4,10 @@ benchmarks/results*.md
 benchmarks/data/
 benchmarks/*.csv
 __pycache__/
+
+# Python bindings (py/)
+py/target/
+py/dist/
+py/.venv/
+py/python/holos_tda/*.so
+py/python/holos_tda/*.pyd

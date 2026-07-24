@@ -114,8 +114,10 @@ impl<'a> CofacetIter<'a> {
         }
     }
 
-    /// All cofacets. Yields (cofacet_index, added_vertex).
-    pub fn next_all(&mut self) -> Option<(u64, usize)> {
+    /// All cofacets. Yields (cofacet_index, added_vertex, k) where k is the
+    /// enumerator position at yield time; the coboundary coefficient of the
+    /// cofacet is (-1)^k (ripser's `k & 1 ? modulus - 1 : 1`).
+    pub fn next_all(&mut self) -> Option<(u64, usize, usize)> {
         if self.exhausted || self.j < self.k {
             return None;
         }
@@ -130,7 +132,7 @@ impl<'a> CofacetIter<'a> {
         } else {
             self.j -= 1;
         }
-        Some((index, vertex))
+        Some((index, vertex, self.k))
     }
 
     /// Only cofacets whose added vertex exceeds all simplex vertices.
@@ -171,11 +173,13 @@ impl<'a> FacetIter<'a> {
     }
 }
 
-/// Items are (facet_index, removed_vertex).
+/// Items are (facet_index, removed_vertex, k) where k is the removed
+/// vertex's position in the simplex; the boundary coefficient of the facet
+/// is (-1)^k.
 impl Iterator for FacetIter<'_> {
-    type Item = (u64, usize);
+    type Item = (u64, usize, usize);
 
-    fn next(&mut self) -> Option<(u64, usize)> {
+    fn next(&mut self) -> Option<(u64, usize, usize)> {
         if self.k < 0 {
             return None;
         }
@@ -186,7 +190,7 @@ impl Iterator for FacetIter<'_> {
         self.idx_below -= self.bt.get(self.j, k + 1);
         self.idx_above += self.bt.get(self.j, k);
         self.k -= 1;
-        Some((face_index, removed))
+        Some((face_index, removed, k))
     }
 }
 
@@ -266,12 +270,14 @@ mod tests {
                 let idx = bt.rank(&verts);
                 let mut iter = CofacetIter::new(&bt, idx, dim, n);
                 let mut got = Vec::new();
-                while let Some((ci, v)) = iter.next_all() {
+                while let Some((ci, v, k)) = iter.next_all() {
                     assert!(!verts.contains(&v));
                     let mut cv = verts.clone();
                     cv.push(v);
                     cv.sort_unstable();
                     assert_eq!(ci, naive_rank(&cv), "cofacet index mismatch");
+                    // k is the added vertex's position in the cofacet.
+                    assert_eq!(k, cv.iter().position(|&x| x == v).unwrap());
                     got.push((ci, v));
                 }
                 assert_eq!(got.len(), n - (dim + 1));
@@ -310,9 +316,11 @@ mod tests {
                 let idx = bt.rank(&verts);
                 let iter = FacetIter::new(&bt, idx, dim, n);
                 let mut removed_order = Vec::new();
-                for (fi, v) in iter {
+                for (fi, v, k) in iter {
                     let fv: Vec<usize> = verts.iter().copied().filter(|&x| x != v).collect();
                     assert_eq!(fi, naive_rank(&fv), "facet index mismatch");
+                    // k is the removed vertex's position in the simplex.
+                    assert_eq!(k, verts.iter().position(|&x| x == v).unwrap());
                     removed_order.push(v);
                 }
                 let mut expected = verts.clone();
@@ -326,22 +334,28 @@ mod tests {
     }
 
     #[test]
-    fn facets_of_facets_cancel_mod_2() {
+    fn facets_of_facets_cancel_with_signs() {
+        // Signed del o del = 0 over the integers: for every simplex, the
+        // (dim-2)-faces each appear twice with opposite signs (-1)^{k1+k2}.
         let n = 9;
         let bt = BinomialTable::new(n, 6).unwrap();
         for dim in 2..=4 {
             for verts in combinations(n, dim + 1) {
                 let idx = bt.rank(&verts);
+                let mut sums = std::collections::HashMap::new();
                 let mut counts = std::collections::HashMap::new();
-                for (f, _) in FacetIter::new(&bt, idx, dim, n) {
-                    for (ff, _) in FacetIter::new(&bt, f, dim - 1, n) {
+                for (f, _, k1) in FacetIter::new(&bt, idx, dim, n) {
+                    for (ff, _, k2) in FacetIter::new(&bt, f, dim - 1, n) {
+                        let sign: i64 = if (k1 + k2) % 2 == 0 { 1 } else { -1 };
+                        *sums.entry(ff).or_insert(0i64) += sign;
                         *counts.entry(ff).or_insert(0u32) += 1;
                     }
                 }
                 assert_eq!(counts.len(), (dim + 1) * dim / 2);
+                assert!(counts.values().all(|&c| c == 2));
                 assert!(
-                    counts.values().all(|&c| c == 2),
-                    "del o del != 0 at {verts:?}"
+                    sums.values().all(|&s| s == 0),
+                    "signed del o del != 0 at {verts:?}"
                 );
             }
         }

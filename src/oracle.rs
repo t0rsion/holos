@@ -1,6 +1,8 @@
 //! Independent correctness oracle: explicit simplex enumeration and textbook
-//! boundary-matrix reduction over Z/2. Deliberately naive, shares nothing
-//! with the solver path except the input and output types.
+//! boundary-matrix reduction over a prime field. Deliberately naive, shares
+//! nothing with the solver path except the input and output types (down to
+//! the modular inverses: Fermat exponentiation here, a Euclid-style table
+//! there).
 
 use std::collections::HashMap;
 
@@ -11,13 +13,29 @@ struct Simplex {
     diam: f64,
 }
 
-/// Textbook persistence of the Rips filtration; shares no code with the
-/// solver path. Feasible only for small inputs.
+/// Textbook persistence of the Rips filtration over Z/2; shares no code with
+/// the solver path. Feasible only for small inputs.
 pub fn rips_persistence_oracle(
     dist: &DistanceMatrix,
     max_dim: usize,
     threshold: Option<f64>,
 ) -> Diagram {
+    rips_persistence_oracle_mod(dist, max_dim, threshold, 2)
+}
+
+/// Textbook persistence of the Rips filtration over Z/p (p prime).
+pub fn rips_persistence_oracle_mod(
+    dist: &DistanceMatrix,
+    max_dim: usize,
+    threshold: Option<f64>,
+    modulus: u32,
+) -> Diagram {
+    let p = modulus as u64;
+    // Own primality check: composite p makes pivots noninvertible.
+    assert!(
+        p >= 2 && (2..p).take_while(|d| d * d <= p).all(|d| p % d != 0),
+        "oracle modulus must be prime, got {p}"
+    );
     let n = dist.len();
     let threshold = threshold.unwrap_or_else(|| naive_enclosing_radius(dist));
 
@@ -45,27 +63,33 @@ pub fn rips_persistence_oracle(
         .map(|(i, s)| (s.verts.clone(), i))
         .collect();
 
+    // Signed boundary columns: removing the vertex at position k carries
+    // the coefficient (-1)^k, stored as a nonzero residue mod p.
     let m = simplices.len();
-    let mut columns: Vec<Vec<usize>> = Vec::with_capacity(m);
+    let mut columns: Vec<Vec<(usize, u64)>> = Vec::with_capacity(m);
     for s in &simplices {
-        let mut col: Vec<usize> = Vec::new();
+        let mut col: Vec<(usize, u64)> = Vec::new();
         if s.verts.len() > 1 {
             for k in 0..s.verts.len() {
                 let mut face = s.verts.clone();
                 face.remove(k);
-                col.push(position[&face]);
+                let coeff = if k % 2 == 0 { 1 } else { p - 1 };
+                col.push((position[&face], coeff));
             }
         }
-        col.sort_unstable();
+        col.sort_unstable_by_key(|&(row, _)| row);
         columns.push(col);
     }
 
     let mut pivot_of_row: Vec<Option<usize>> = vec![None; m];
     for j in 0..m {
-        while let Some(&low) = columns[j].last() {
+        while let Some(&(low, c)) = columns[j].last() {
             match pivot_of_row[low] {
                 Some(k) => {
-                    let sum = add_mod2(&columns[j], &columns[k]);
+                    let pivot_coeff = columns[k].last().unwrap().1;
+                    // Eliminate the pivot: add -(c / pivot_coeff) * column k.
+                    let factor = (p - c * mod_inverse(pivot_coeff, p) % p) % p;
+                    let sum = add_scaled_mod_p(&columns[j], &columns[k], factor, p);
                     columns[j] = sum;
                 }
                 None => {
@@ -78,7 +102,7 @@ pub fn rips_persistence_oracle(
 
     let mut diagram = Diagram::default();
     for j in 0..m {
-        if let Some(&low) = columns[j].last() {
+        if let Some(&(low, _)) = columns[j].last() {
             let birth = simplices[low].diam;
             let death = simplices[j].diam;
             if death > birth {
@@ -153,28 +177,59 @@ fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
     out
 }
 
-fn add_mod2(a: &[usize], b: &[usize]) -> Vec<usize> {
+/// a + factor * b over Z/p, both columns sorted by row; zero entries drop.
+fn add_scaled_mod_p(
+    a: &[(usize, u64)],
+    b: &[(usize, u64)],
+    factor: u64,
+    p: u64,
+) -> Vec<(usize, u64)> {
     let mut out = Vec::with_capacity(a.len() + b.len());
     let (mut i, mut j) = (0, 0);
+    let mut push = |row: usize, coeff: u64| {
+        if coeff % p != 0 {
+            out.push((row, coeff % p));
+        }
+    };
     while i < a.len() && j < b.len() {
-        match a[i].cmp(&b[j]) {
+        match a[i].0.cmp(&b[j].0) {
             std::cmp::Ordering::Less => {
-                out.push(a[i]);
+                push(a[i].0, a[i].1);
                 i += 1;
             }
             std::cmp::Ordering::Greater => {
-                out.push(b[j]);
+                push(b[j].0, b[j].1 * factor % p);
                 j += 1;
             }
             std::cmp::Ordering::Equal => {
+                push(a[i].0, (a[i].1 + b[j].1 * factor) % p);
                 i += 1;
                 j += 1;
             }
         }
     }
-    out.extend_from_slice(&a[i..]);
-    out.extend_from_slice(&b[j..]);
+    for &(row, coeff) in &a[i..] {
+        push(row, coeff);
+    }
+    for &(row, coeff) in &b[j..] {
+        push(row, coeff * factor % p);
+    }
     out
+}
+
+/// a^(p-2) mod p: the inverse by Fermat's little theorem, valid for prime p.
+fn mod_inverse(a: u64, p: u64) -> u64 {
+    let mut base = a % p;
+    let mut exp = p - 2;
+    let mut acc = 1u64;
+    while exp > 0 {
+        if exp & 1 == 1 {
+            acc = acc * base % p;
+        }
+        base = base * base % p;
+        exp >>= 1;
+    }
+    acc
 }
 
 #[cfg(test)]

@@ -207,6 +207,58 @@ fn sphere_sample_has_one_dominant_h2_class() {
 }
 
 #[test]
+fn projective_plane_torsion() {
+    // Ripser's 13-vertex RP^2 example. H1 = H2 = Z/2, so both are visible
+    // exactly at p = 2 and vanish at any odd prime: the one fixture where
+    // the coefficient field changes the answer.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/projective_plane.lower_distance_matrix");
+    let dist = holos_tda::io::read_lower_distance_matrix(&path).unwrap();
+    let compute_mod =
+        |p: u32| rips_persistence(&dist, &RipsParams::new(2).with_modulus(p)).unwrap();
+    let h = |d: &Diagram, dim: usize| -> Vec<(f64, f64)> {
+        d.in_dim(dim).map(|b| (b.birth, b.death)).collect()
+    };
+
+    let mod2 = compute_mod(2);
+    assert_eq!(h(&mod2, 1), vec![(1.0, 2.0)]);
+    assert_eq!(h(&mod2, 2), vec![(1.0, 2.0)]);
+
+    let h0: Vec<_> = canonical(&mod2).into_iter().filter(|b| b.0 == 0).collect();
+    for p in [3, 5] {
+        let modp = compute_mod(p);
+        assert_eq!(h(&modp, 1), vec![], "H1 must vanish at p = {p}");
+        assert_eq!(h(&modp, 2), vec![], "H2 must vanish at p = {p}");
+        let h0p: Vec<_> = canonical(&modp).into_iter().filter(|b| b.0 == 0).collect();
+        assert_eq!(h0p, h0, "H0 must not depend on p");
+    }
+}
+
+#[test]
+fn projective_plane_torsion_under_every_toggle() {
+    // The optimization toggles must not interact with the coefficient
+    // field: the torsion answer holds for all 8 combinations at each p.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/projective_plane.lower_distance_matrix");
+    let dist = holos_tda::io::read_lower_distance_matrix(&path).unwrap();
+    for p in [2u32, 3, 5] {
+        let baseline = rips_persistence(&dist, &RipsParams::new(2).with_modulus(p)).unwrap();
+        for mask in 0u8..8 {
+            let mut params = RipsParams::new(2).with_modulus(p);
+            params.use_emergent_pairs = mask & 1 != 0;
+            params.use_apparent_pairs = mask & 2 != 0;
+            params.use_clearing = mask & 4 != 0;
+            let d = rips_persistence(&dist, &params).unwrap();
+            assert_eq!(
+                canonical(&d),
+                canonical(&baseline),
+                "toggle mask {mask} changes the diagram at p = {p}"
+            );
+        }
+    }
+}
+
+#[test]
 fn three_clusters_show_two_long_finite_h0_bars() {
     let mut rng = Rng::new(0xc1a5_7e2e_d5ee_d001);
     let centers = [(0.0, 0.0), (10.0, 0.0), (5.0, 8.66)];

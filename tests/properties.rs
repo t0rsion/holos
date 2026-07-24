@@ -85,7 +85,9 @@ fn components(n: usize, dist: &DistanceMatrix, threshold: f64) -> usize {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    // Default reads PROPTEST_CASES from the environment (256 otherwise),
+    // so stress runs can scale the budget without editing this file.
+    #![proptest_config(ProptestConfig::default())]
 
     #[test]
     fn permutation_invariance((n, data, perm, max_dim) in matrix_perm_and_dim()) {

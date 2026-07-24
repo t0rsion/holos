@@ -1,11 +1,13 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-//! Vietoris-Rips persistent homology over Z/2 with an implicit,
-//! ripser-style persistent cohomology engine.
+//! Vietoris-Rips persistent homology over a prime field (Z/2 by default)
+//! with an implicit, ripser-style persistent cohomology engine.
 //!
 //! Tie-breaking and output conventions match ripser exactly; see README.md.
 
+/// The `holos` CLI as a library function (shared with the Python bindings).
+pub mod cli;
 pub(crate) mod combinadic;
 /// Distance-matrix construction and storage.
 pub mod distances;
@@ -18,7 +20,7 @@ mod union_find;
 
 use std::fmt;
 
-pub use distances::DistanceMatrix;
+pub use distances::{DistanceMatrix, SparseDistanceMatrix};
 
 /// Short git commit hash recorded at build time ("unknown" outside a repo).
 pub const GIT_HASH: &str = env!("HOLOS_GIT_HASH");
@@ -75,11 +77,15 @@ impl Diagram {
 /// The engine is dimension-generic; v0.1's differential gates certify
 /// `max_dim <= 2` (review stress-testing extended through dimension 4).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RipsParams {
     /// Highest homology dimension to compute.
     pub max_dim: usize,
-    /// None means the enclosing radius (exactness-preserving default).
+    /// None means the input's default: the enclosing radius for dense
+    /// matrices, no threshold for sparse ones.
     pub threshold: Option<f64>,
+    /// Coefficient field Z/p; must be a prime below 32768. Default 2.
+    pub modulus: u32,
     /// Debug toggle; output is identical with any combination disabled.
     pub use_emergent_pairs: bool,
     /// Debug toggle; output is identical with any combination disabled.
@@ -93,6 +99,7 @@ impl Default for RipsParams {
         Self {
             max_dim: 1,
             threshold: None,
+            modulus: 2,
             use_emergent_pairs: true,
             use_apparent_pairs: true,
             use_clearing: true,
@@ -113,6 +120,13 @@ impl RipsParams {
     /// Truncate the filtration at `threshold`.
     pub fn with_threshold(mut self, threshold: f64) -> Self {
         self.threshold = Some(threshold);
+        self
+    }
+
+    /// Compute over Z/p instead of Z/2. `modulus` must be a prime below
+    /// 32768.
+    pub fn with_modulus(mut self, modulus: u32) -> Self {
+        self.modulus = modulus;
         self
     }
 }
@@ -148,5 +162,15 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Compute the Rips persistence diagram of a distance matrix.
 pub fn rips_persistence(dist: &DistanceMatrix, params: &RipsParams) -> Result<Diagram> {
+    solver::compute(dist, params)
+}
+
+/// Compute the Rips persistence diagram of a sparse distance matrix. Pairs
+/// not listed in the input are absent at every scale; with no threshold set,
+/// all listed edges enter the filtration.
+pub fn rips_persistence_sparse(
+    dist: &SparseDistanceMatrix,
+    params: &RipsParams,
+) -> Result<Diagram> {
     solver::compute(dist, params)
 }
