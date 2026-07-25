@@ -4,7 +4,17 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] - Unreleased
+## [0.2.1] - 2026-07-25
+
+### Fixed
+
+- Packaging: the Python source distribution failed to build because the
+  wrapper crate vendored the root crate through a path dependency, colliding
+  on `README.md` and the license files. The wrapper now depends on the
+  published `holos-tda` crate, so the sdist builds and wheels publish to
+  PyPI. No library, CLI, or Rust API changes.
+
+## [0.2.0] - 2026-07-25
 
 ### Added
 
