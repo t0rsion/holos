@@ -1,4 +1,15 @@
-name: wheels
+# One-tag release pipeline: version gate, preflight (tests at the tag plus a
+# package-extract-retest at the MSRV), wheels and sdist, crates.io, PyPI.
+# cargo-dist's release.yml runs on the same tag and creates the GitHub
+# release with the binary installers; benchmark records are attached to it
+# manually because they are produced on pinned local hardware.
+#
+# The PyPI trusted publisher is registered against this exact workflow file
+# name (wheels.yml); do not rename the file without updating the publisher
+# (https://pypi.org/manage/account/publishing/).
+#
+# crates.io publication needs the CARGO_REGISTRY_TOKEN repository secret.
+name: publish
 
 on:
   push:
@@ -10,20 +21,48 @@ permissions:
 
 jobs:
   # On tags, refuse to proceed unless the tag matches every declared version
-  # (root crate, py crate, pyproject); a stray or RC v* tag must not publish.
+  # (core crate, py crate, pyproject); a stray or RC v* tag must not publish.
   version-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: |
-          v_root=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          v_py=$(sed -n 's/^version = "\(.*\)"/\1/p' py/Cargo.toml | head -1)
-          v_proj=$(sed -n 's/^version = "\(.*\)"/\1/p' py/pyproject.toml | head -1)
-          echo "root=$v_root py=$v_py pyproject=$v_proj ref=$GITHUB_REF"
-          [ "$v_root" = "$v_py" ] && [ "$v_root" = "$v_proj" ] || { echo "version mismatch"; exit 1; }
+          v_core=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/holos-tda/Cargo.toml | head -1)
+          v_py=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/holos-tda-py/Cargo.toml | head -1)
+          v_proj=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/holos-tda-py/pyproject.toml | head -1)
+          echo "core=$v_core py=$v_py pyproject=$v_proj ref=$GITHUB_REF"
+          [ "$v_core" = "$v_py" ] && [ "$v_core" = "$v_proj" ] || { echo "version mismatch"; exit 1; }
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            [ "$GITHUB_REF" = "refs/tags/v$v_root" ] || { echo "tag does not match version v$v_root"; exit 1; }
+            [ "$GITHUB_REF" = "refs/tags/v$v_core" ] || { echo "tag does not match version v$v_core"; exit 1; }
           fi
+
+  # Publication is irreversible, so every fallible build and test job runs
+  # before it. The extracted-package test would have caught the 0.2.1 sdist
+  # bug: it proves the crate builds and passes its tests outside the repo.
+  preflight:
+    needs: [version-check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: On tags, require the tag to lie on the tested main history
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            git fetch origin main:refs/remotes/origin/main
+            git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.85
+      - name: Test the workspace at the tag
+        run: cargo +stable test --workspace --locked
+      - name: Package, extract, and test the package at the MSRV
+        run: |
+          cargo +stable package -p holos-tda --locked
+          mkdir -p "$RUNNER_TEMP/pkg"
+          tar xzf target/package/holos-tda-*.crate -C "$RUNNER_TEMP/pkg"
+          cd "$RUNNER_TEMP"/pkg/holos-tda-*
+          cargo +1.85 test
 
   linux:
     needs: [version-check]
@@ -38,14 +77,14 @@ jobs:
           python-version: "3.12"
       - uses: PyO3/maturin-action@v1
         with:
-          working-directory: py
+          working-directory: crates/holos-tda-py
           target: ${{ matrix.target }}
           args: --release --locked --out dist --zig
           manylinux: "2_17"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.target }}
-          path: py/dist
+          path: crates/holos-tda-py/dist
 
   macos:
     needs: [version-check]
@@ -60,13 +99,13 @@ jobs:
           python-version: "3.12"
       - uses: PyO3/maturin-action@v1
         with:
-          working-directory: py
+          working-directory: crates/holos-tda-py
           target: ${{ matrix.target }}
           args: --release --locked --out dist
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.target }}
-          path: py/dist
+          path: crates/holos-tda-py/dist
 
   windows:
     needs: [version-check]
@@ -78,14 +117,16 @@ jobs:
           python-version: "3.12"
       - uses: PyO3/maturin-action@v1
         with:
-          working-directory: py
+          working-directory: crates/holos-tda-py
           target: x86_64
           args: --release --locked --out dist
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-x86_64
-          path: py/dist
+          path: crates/holos-tda-py/dist
 
+  # maturin sdist has no --locked; the path dependency pins the bundled core
+  # exactly, and the preflight extracted-package test covers buildability.
   sdist:
     needs: [version-check]
     runs-on: ubuntu-latest
@@ -93,16 +134,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: PyO3/maturin-action@v1
         with:
-          working-directory: py
+          working-directory: crates/holos-tda-py
           command: sdist
           args: --out dist
       - uses: actions/upload-artifact@v4
         with:
           name: sdist
-          path: py/dist
+          path: crates/holos-tda-py/dist
 
   # Install the built linux x86_64 wheel and run the smoke tests (license
-  # texts present, pdist ordering, sparse, moduli, console script).
+  # texts present, pdist ordering, sparse, moduli, threads, console script).
   smoke:
     needs: [linux]
     runs-on: ubuntu-latest
@@ -117,7 +158,7 @@ jobs:
           path: dist
       - run: |
           pip install dist/*.whl
-          python py/tests/smoke.py
+          python crates/holos-tda-py/tests/smoke.py
           python - <<'EOF'
           import glob, sys, zipfile
           whl = glob.glob("dist/*.whl")[0]
@@ -128,12 +169,30 @@ jobs:
           print("license files:", licenses)
           EOF
 
-  # Before the first tagged run, configure a PyPI "pending publisher" for
-  # project holos-tda: repository t0rsion/holos, workflow wheels.yml,
-  # environment blank (https://pypi.org/manage/account/publishing/).
+  # A wheel failure must not leave crates.io ahead of PyPI, so this runs
+  # after every build and test job. Idempotent: re-tagging after a partial
+  # failure skips an already-published version.
+  crates-io:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [preflight, linux, macos, windows, sdist, smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish unless this version is already on crates.io
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          if curl -sf -A "holos-release-ci" "https://crates.io/api/v1/crates/holos-tda/$V" > /dev/null; then
+            echo "holos-tda $V already published; skipping"
+          else
+            cargo publish -p holos-tda --locked
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
   publish-pypi:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, macos, windows, sdist, smoke, version-check]
+    needs: [version-check, preflight, crates-io, linux, macos, windows, sdist, smoke]
     runs-on: ubuntu-latest
     permissions:
       id-token: write

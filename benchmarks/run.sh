@@ -155,12 +155,12 @@ EOF
 
 mkdir -p "$DATA"
 
-BUILD_CMD="$CARGO build --release --manifest-path $ROOT/Cargo.toml"
+BUILD_CMD="$CARGO build --release -p holos-tda --manifest-path $ROOT/Cargo.toml"
 $BUILD_CMD
 HOLOS_BIN="$ROOT/target/release/holos"
 # Recorded output shows repo-relative and basename paths only. An absolute
 # path carries no provenance value and leaks the local machine layout.
-BUILD_CMD_DISPLAY="$CARGO build --release"
+BUILD_CMD_DISPLAY="$CARGO build --release -p holos-tda"
 HOLOS_BIN_DISPLAY="target/release/holos"
 RIPSER_BIN_DISPLAY="$(basename "$RIPSER_BIN")"
 

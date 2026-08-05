@@ -1,0 +1,33 @@
+[package]
+name = "holos-tda"
+version = "0.3.1"
+edition = "2021"
+rust-version = "1.85"
+description = "Vietoris-Rips persistent homology with an implicit ripser-class engine"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/t0rsion/holos"
+homepage = "https://github.com/t0rsion/holos"
+documentation = "https://docs.rs/holos-tda"
+keywords = ["topology", "tda", "persistent-homology", "rips"]
+categories = ["science", "mathematics"]
+readme = "../../README.md"
+include = [
+    "src/**",
+    "tests/**",
+    "build.rs",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+]
+
+[dependencies]
+rustc-hash = "2"
+clap = { version = "4", features = ["derive", "string"] }
+rayon = "1"
+dashmap = "6"
+
+[dev-dependencies]
+proptest = "1"
+
+[[bin]]
+name = "holos"
+path = "src/bin/holos.rs"

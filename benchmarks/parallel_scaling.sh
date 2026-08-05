@@ -71,7 +71,7 @@ holos_cmd_base=("$HOLOS_BIN" "$lower" --format lower-distance --dim "$MAXDIM")
     echo
     echo "| threads | wall (s) | speedup | peak RSS (MB) | diagram matches t=1 |"
     echo "|--:|--:|--:|--:|:--|"
-} >>"$RESULTS_MD"
+} >"$RESULTS_MD"
 
 BASE_WALL=""
 BASE_OUT=""

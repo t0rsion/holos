@@ -82,7 +82,7 @@ GPH_VERSION="$(python3 -c 'import gph; print(getattr(gph, "__version__", "unknow
     echo
     echo "| threads | holos wall (s) | giotto-ph wall (s) | diagrams match |"
     echo "|--:|--:|--:|:--|"
-} >>"$RESULTS_MD"
+} >"$RESULTS_MD"
 
 # giotto-ph runner: reduce the cloud at n_threads, write a ripser-format
 # diagram to $2, then print its own wall time as "wall_s=<s>".

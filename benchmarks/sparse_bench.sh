@@ -147,7 +147,7 @@ match="$(compare_diagrams "$sparse_out" "$dense_out")"
     echo "| holos dense (densified) | $dense_wall | $(kb_to_mb "$dense_rss") |"
     echo
     echo "diagrams match: $match"
-} >>"$RESULTS_MD"
+} >"$RESULTS_MD"
 
 echo "sparse wall=${sparse_wall}s rss=$(kb_to_mb "$sparse_rss")MB  dense wall=${dense_wall}s rss=$(kb_to_mb "$dense_rss")MB  match=$match" >&2
 echo "Results written to $RESULTS and $RESULTS_MD." >&2

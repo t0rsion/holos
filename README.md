@@ -154,7 +154,8 @@ runs the diagrams matched at every thread count, at wall-time parity.
 `benchmarks/sparse_bench.sh` benchmarks sparse input against the dense
 path.
 
-Reproduce with the scripts above. Each script writes a full provenance
+Reproduce with the scripts in the repository's `benchmarks/` directory
+(<https://github.com/t0rsion/holos>). Each script writes a full provenance
 record (commit, binary hashes, build flags, CPU, allowed CPUs) beside its
 table. The complete records behind these tables are attached to the
 matching GitHub release.

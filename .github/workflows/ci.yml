@@ -35,14 +35,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc -p holos-tda --no-deps --locked
 
   package:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo package --locked
+      - run: cargo package -p holos-tda --locked
 
   build:
     runs-on: ubuntu-latest
@@ -57,7 +57,7 @@ jobs:
       - uses: actions/checkout@v4
       # Must match rust-version in Cargo.toml.
       - uses: dtolnay/rust-toolchain@1.85
-      - run: cargo build --all-targets --locked
+      - run: cargo build -p holos-tda --all-targets --locked
 
   test:
     strategy:

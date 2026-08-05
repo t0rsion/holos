@@ -119,10 +119,10 @@ EOF
 # Build the release holos binary. Sets HOLOS_BIN plus display strings that
 # carry no absolute path.
 build_holos() {
-    $CARGO build --release --manifest-path "$ROOT/Cargo.toml" >&2
+    $CARGO build --release -p holos-tda --manifest-path "$ROOT/Cargo.toml" >&2
     HOLOS_BIN="$ROOT/target/release/holos"
     HOLOS_BIN_DISPLAY="target/release/holos"
-    BUILD_CMD_DISPLAY="$CARGO build --release"
+    BUILD_CMD_DISPLAY="$CARGO build --release -p holos-tda"
 }
 
 # emit_provenance FILE HEADER : write the provenance block that ties every

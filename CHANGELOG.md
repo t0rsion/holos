@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-08-05
+
+Packaging and release-infrastructure patch. No engine or API changes.
+
+### Changed
+
+- The repository is a cargo workspace: `crates/holos-tda` (the core crate)
+  and `crates/holos-tda-py` (the Python wrapper). The wrapper depends on
+  the core crate by path, so wheels and sdists build without waiting for
+  a crates.io publish. Each crate has its own directory, which removes
+  the file collision behind the 0.2.1 sdist failure.
+- One tag runs the whole release: version gate, a preflight that packages
+  the crate and re-tests it extracted at the MSRV, wheels and sdist,
+  crates.io, PyPI. The GitHub release with installers still comes from
+  the same tag.
+- The crate archive no longer bundles the benchmark scripts; the README
+  points to the repository for them.
+- Benchmark scripts truncate their result tables on rerun instead of
+  appending stale blocks.
+
 ## [0.3.0] - 2026-08-04
 
 ### Added
@@ -75,6 +95,7 @@ First public release.
 - Reproducible benchmark harness (`benchmarks/run.sh`) that refuses dirty
   trees, records full provenance, and fails on any diagram mismatch.
 
+[0.3.1]: https://github.com/t0rsion/holos/releases/tag/v0.3.1
 [0.3.0]: https://github.com/t0rsion/holos/releases/tag/v0.3.0
 [0.2.1]: https://github.com/t0rsion/holos/releases/tag/v0.2.1
 [0.2.0]: https://github.com/t0rsion/holos/releases/tag/v0.2.0
