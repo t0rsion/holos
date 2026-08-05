@@ -1,8 +1,8 @@
 # holos-tda
 
 Vietoris-Rips persistent homology with a ripser-class engine, written in
-Rust. This package ships Python bindings plus the `holos-tda` command-line
-tool (ripser-compatible output).
+Rust. This package ships Python bindings and the `holos-tda` command-line
+tool. The tool prints ripser-compatible output.
 
 ```sh
 pip install holos-tda        # or: uvx holos-tda points.csv

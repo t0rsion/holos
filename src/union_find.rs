@@ -24,7 +24,7 @@ impl UnionFind {
         root
     }
 
-    /// Callers pass roots.
+    /// Callers must pass roots.
     pub fn link(&mut self, x: usize, y: usize) {
         debug_assert!(self.parent[x] == x && self.parent[y] == y);
         if self.rank[x] < self.rank[y] {

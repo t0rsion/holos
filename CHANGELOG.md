@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-08-04
+
+### Added
+
+- Parallel reduction. Set `--threads N` on the CLI, `RipsParams::threads`
+  in the Rust library, or `threads=` in Python. Workers reduce the columns
+  of each dimension concurrently and out of order; pivot ownership follows
+  the column order. The diagram is identical at any thread count. A
+  determinism test enforces bar-for-bar equality.
+- Benchmark scripts for parallel scaling, for sparse input, and for an
+  equal-core comparison against giotto-ph (`benchmarks/`).
+
+### Changed
+
+- Sparse input enumerates cofacets through neighbor-list intersection. A
+  sparse filtration now saves enumeration time as well as memory.
+- The serial engine is faster. Coefficients pack into the entry word. The
+  top dimension is not materialized. The enclosing radius takes one pass
+  over the distances. The reducer allocates less.
+
 ## [0.2.1] - 2026-07-25
 
 ### Fixed
@@ -55,4 +75,7 @@ First public release.
 - Reproducible benchmark harness (`benchmarks/run.sh`) that refuses dirty
   trees, records full provenance, and fails on any diagram mismatch.
 
+[0.3.0]: https://github.com/t0rsion/holos/releases/tag/v0.3.0
+[0.2.1]: https://github.com/t0rsion/holos/releases/tag/v0.2.1
+[0.2.0]: https://github.com/t0rsion/holos/releases/tag/v0.2.0
 [0.1.0]: https://github.com/t0rsion/holos/releases/tag/v0.1.0

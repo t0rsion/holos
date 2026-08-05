@@ -3,8 +3,8 @@
 
 Usage: gen_cloud.py N DIM SEED > cloud.csv
 
-Stdlib only. Same (N, DIM, SEED) always yields byte-identical output:
-Python's Mersenne Twister is stable across versions for random().
+Stdlib only. The same (N, DIM, SEED) always yields byte-identical output:
+Python's Mersenne Twister is stable across releases for random().
 """
 import random
 import sys

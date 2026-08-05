@@ -1,6 +1,6 @@
-//! Aggressive stress gates, all `#[ignore]`: run with
-//! `cargo test --release --test stress -- --ignored` (add
-//! `STRESS_ITERS=...` to scale the fuzz budgets). Deterministic seeds.
+//! Stress gates, all `#[ignore]`: run with
+//! `cargo test --release --test stress -- --ignored` (add `STRESS_ITERS=...`
+//! to scale the fuzz budgets). All seeds are fixed.
 
 use holos_tda::oracle::rips_persistence_oracle_mod;
 use holos_tda::{rips_persistence, Bar, Diagram, DistanceMatrix, RipsParams};
@@ -122,7 +122,7 @@ fn fuzz_random_matrices_all_fields() {
 
 /// All 2^21 seven-point 0/1-weight matrices vs the oracle, dims 0..=2,
 /// at p = 2 and p = 3. The seven-point analogue of the six-point release
-/// gate; roughly two million solver/oracle comparisons per field.
+/// gate. Roughly two million solver/oracle comparisons per field.
 #[test]
 #[ignore = "stress; several minutes in release"]
 fn exhaustive_seven_point_zero_one_sweep() {
@@ -163,16 +163,18 @@ fn all_equal_distances_are_cones() {
 }
 
 /// Ultrametrics: at every scale the neighborhood graph is a disjoint union
-/// of cliques, so the flag complex is a disjoint union of simplices and
-/// H_{>=1} is empty. Structural check to n = 60, oracle check to n = 9.
+/// of cliques, so the flag complex is a disjoint union of simplices.
+/// H_{>=1} is therefore empty. Structural check to n = 60, oracle check to
+/// n = 9.
 #[test]
 #[ignore = "stress; run with --ignored in release"]
 fn ultrametrics_have_no_higher_homology() {
     let mut rng = Rng::new(0x0a17_a3e7);
     for it in 0..iters(20_000).min(2_000) {
         let n = 4 + rng.below(57); // 4..=60
-                                   // Random binary merge tree: assign each point a leaf path; distance
-                                   // is the height of the lowest common ancestor.
+                                   // Random binary merge tree. Each point
+                                   // gets a leaf path. The distance is the
+                                   // height of the lowest common ancestor.
         let depth = 6;
         let labels: Vec<u32> = (0..n)
             .map(|_| rng.next() as u32 & ((1 << depth) - 1))

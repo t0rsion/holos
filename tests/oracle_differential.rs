@@ -72,9 +72,9 @@ fn exhaustive_two_valued_matrices() {
 
 // Release gate: all 2^15 two-valued matrices on 6 points, dims 0..=3, all 8
 // optimization-toggle combinations. The oracle runs once per matrix at
-// max_dim 3; the expectation for a lower max_dim is its restriction to bars
-// of dimension <= max_dim (reduction decomposes by dimension, and essential
-// dim-k classes are settled by the (k+1)-skeleton).
+// max_dim 3. For a lower max_dim, the expectation is that result restricted
+// to bars of dimension <= max_dim. Reduction decomposes by dimension, and
+// the (k+1)-skeleton settles the essential dim-k classes.
 #[test]
 #[ignore = "exhaustive 6-point sweep; run with --ignored, preferably in release"]
 fn exhaustive_six_point_sweep_all_dims_and_toggles() {
@@ -87,7 +87,7 @@ fn exhaustive_six_point_sweep_mod_3() {
     exhaustive_six_point_sweep(3);
 }
 
-// p = 3 only exercises coefficients +-1; p = 5 is the smallest field where
+// p = 3 only exercises coefficients +-1. p = 5 is the smallest field where
 // stored pivots and inverses take values other than 1 and p-1.
 #[test]
 #[ignore = "exhaustive 6-point sweep; run with --ignored, preferably in release"]
@@ -143,7 +143,8 @@ fn sweep_one_matrix(mask: u32, modulus: u32) {
 }
 
 // Regression: emergent/apparent shortcuts once reconstructed the wrong vertex
-// set for a candidate cofacet, inventing spurious H1/H2 bars on this matrix.
+// set for a candidate cofacet. That invented spurious H1/H2 bars on this
+// matrix.
 #[test]
 fn regression_emergent_apparent_wrong_vertex_set() {
     let data = vec![
@@ -180,7 +181,7 @@ fn regression_emergent_apparent_wrong_vertex_set() {
     }
 }
 
-// Regression: the earlier repro for the same bug family; H2 must be empty.
+// Regression: the earlier repro for the same bug family. H2 must be empty.
 #[test]
 fn regression_spurious_h2_bar() {
     let data = vec![

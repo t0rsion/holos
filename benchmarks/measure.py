@@ -3,17 +3,17 @@
 
 Usage: measure.py OUTFILE CMD [ARG...]
 
-Runs CMD with stdout redirected to OUTFILE. The redirection target is a real
-file, never a pipe: a pipe's 64 KB buffer fills up on large diagram outputs
-and deadlocks the child. Stderr is discarded.
+Runs CMD with stdout redirected to OUTFILE. The target is a real file, never
+a pipe: a pipe's 64 KB buffer fills up on a large diagram output and deadlocks
+the child. Stderr is discarded.
 
 Wall time is time.monotonic around the process. Peak RSS is VmHWM from
-/proc/PID/status (the kernel's own high-water mark, in kB), sampled every
-0.5 ms for the first 20 ms and every 10 ms after, so short-lived processes
-are still caught. Samples are only accepted once /proc/PID/cmdline shows the
-target argv[0]: before exec the child still maps the parent's image, and
-ru_maxrss/pre-exec VmHWM would report that instead (measured ~13 MB floor
-here). A sub-millisecond child can report 0. Linux only.
+/proc/PID/status, the kernel's own high-water mark, in kB. The sampling
+interval is 0.5 ms for the first 20 ms and 10 ms after that, so a short-lived
+process is still caught. A sample counts only once /proc/PID/cmdline shows the
+target argv[0]. Before exec the child still maps the parent's image, and
+ru_maxrss or a pre-exec VmHWM would report that image instead (a ~13 MB floor
+as measured here). A sub-millisecond child can report 0. Linux only.
 
 Prints one line: "wall_s=<float> max_rss_kb=<int>". Exits with the child's
 exit code.

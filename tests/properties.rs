@@ -20,8 +20,7 @@ fn compute(dist: &DistanceMatrix, max_dim: usize, threshold: Option<f64>) -> Dia
     rips_persistence(dist, &params).unwrap()
 }
 
-// Discrete values dominate so that ties are common; ties are where ordering
-// bugs hide.
+// Discrete values dominate, so ties are common. Ordering bugs hide in ties.
 fn entry() -> impl Strategy<Value = f64> {
     prop_oneof![
         4 => prop::sample::select(vec![0.5, 1.0, 1.5, 2.0, 2.5]),
@@ -85,8 +84,8 @@ fn components(n: usize, dist: &DistanceMatrix, threshold: f64) -> usize {
 }
 
 proptest! {
-    // Default reads PROPTEST_CASES from the environment (256 otherwise),
-    // so stress runs can scale the budget without editing this file.
+    // The default config reads PROPTEST_CASES from the environment (256
+    // otherwise). Stress runs can scale the budget without editing this file.
     #![proptest_config(ProptestConfig::default())]
 
     #[test]
@@ -138,7 +137,7 @@ proptest! {
         let diagram = compute(&dist, 0, threshold);
         let essential = diagram.in_dim(0).filter(|b| b.is_essential()).count();
         prop_assert_eq!(essential, components(n, &dist, effective));
-        // And every finite dim-0 bar is born at 0.
+        // Every finite dim-0 bar is born at 0.
         prop_assert!(diagram.in_dim(0).all(|b| b.birth == 0.0));
     }
 
@@ -162,10 +161,10 @@ proptest! {
         prop_assert!(essential(t1) >= essential(t2));
     }
 
-    // The solver-facing shape of boundary-of-boundary: build the oracle-style
+    // The solver-facing shape of boundary-of-boundary. Build the oracle-style
     // filtration-ordered Z/2 boundary matrix from explicit vertex lists (no
-    // combinadic code) and check D*D = 0, i.e. every included simplex has all
-    // faces included and each codim-2 face cancels.
+    // combinadic code), then check D*D = 0. That means every included simplex
+    // has all its faces included, and each codim-2 face cancels.
     #[test]
     fn boundary_matrix_squares_to_zero(
         n in 3..=7usize,

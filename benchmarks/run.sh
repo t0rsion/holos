@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Benchmark holos against ripser on identical lower-distance inputs.
 # Methodology: benchmarks/README.md. Results land in benchmarks/results.txt
-# (full log) and benchmarks/results.md (provenance header + table, suitable
-# for pasting into README verbatim).
+# (full log) and benchmarks/results.md (provenance header plus table, ready
+# to paste into README verbatim).
 #
-# Exits nonzero if any run's diagrams disagree; a timing whose diagrams do
+# Exits nonzero if any run's diagrams disagree. A timing whose diagrams do
 # not match is void.
 #
-# Requires RIPSER_BIN pointing at a ripser binary
-# (e.g. a local build such as ../holos/external_ripser/ripser, or build one:
-#   git clone https://github.com/Ripser/ripser && make -C ripser).
+# Requires RIPSER_BIN pointing at a ripser binary, such as a local build at
+# ../holos/external_ripser/ripser. To build one:
+#   git clone https://github.com/Ripser/ripser && make -C ripser
 #
 # CARGO may carry a toolchain, e.g. CARGO="cargo +1.92" ./run.sh.
 set -euo pipefail
@@ -54,9 +54,9 @@ sha256() {
     (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | awk '{print $1}'
 }
 
-# measure OUT CMD... : run CMD with stdout redirected to OUT (a real file,
-# never a pipe -- large outputs deadlock a full pipe buffer), print
-# "wall_s=<s> max_rss_kb=<kb>". See measure.py.
+# measure OUT CMD... : run CMD with stdout redirected to OUT, then print
+# "wall_s=<s> max_rss_kb=<kb>". OUT is a real file, never a pipe: a large
+# output deadlocks on a full pipe buffer. See measure.py.
 measure() {
     local out="$1"
     shift
@@ -68,7 +68,7 @@ kb_to_mb() {
 }
 
 # Point cloud CSV -> ripser lower-distance format (condensed lower triangle,
-# row by row), so both tools consume the exact same distance file.
+# row by row), so both tools read the exact same distance file.
 cloud_to_lower() {
     python3 - "$1" <<'EOF'
 import math
@@ -86,11 +86,11 @@ for i in range(1, len(pts)):
 EOF
 }
 
-# Compare two ripser-format outputs as interval multisets per dimension,
-# endpoints within TOLERANCE. Greedy matching over sorted bars rather than
-# positional zip: ripser prints f32-rounded values, so near-equal births can
-# sort in a different order than holos's f64 output and a positional
-# comparison misaligns from there on. Prints yes/no.
+# Compare two ripser-format outputs as interval multisets per dimension, with
+# endpoints within TOLERANCE. Matching is greedy over sorted bars rather than
+# a positional zip: ripser prints f32-rounded values, so near-equal births can
+# sort in a different order than holos's f64 output. A positional comparison
+# misaligns from there on. Prints yes/no.
 compare_diagrams() {
     python3 - "$1" "$2" "$TOLERANCE" <<'EOF'
 import re
@@ -158,8 +158,8 @@ mkdir -p "$DATA"
 BUILD_CMD="$CARGO build --release --manifest-path $ROOT/Cargo.toml"
 $BUILD_CMD
 HOLOS_BIN="$ROOT/target/release/holos"
-# Recorded output shows repo-relative and basename paths only: absolute
-# paths carry no provenance value and leak the local machine layout.
+# Recorded output shows repo-relative and basename paths only. An absolute
+# path carries no provenance value and leaks the local machine layout.
 BUILD_CMD_DISPLAY="$CARGO build --release"
 HOLOS_BIN_DISPLAY="target/release/holos"
 RIPSER_BIN_DISPLAY="$(basename "$RIPSER_BIN")"
@@ -168,7 +168,7 @@ RIPSER_BIN_DISPLAY="$(basename "$RIPSER_BIN")"
 PROFILE_FLAGS="$(sed -n '/^\[profile\.release\]/,/^\[/{/^\[profile\.release\]/d;/^\[/d;/^[[:space:]]*$/d;p;}' "$ROOT/Cargo.toml" | tr '\n' ';' | sed 's/;$//;s/;/; /g')"
 
 # Ripser compile flags, if a Makefile sits next to the binary (vendored
-# build); otherwise unknowable from here.
+# build). Otherwise they are unknowable from here.
 RIPSER_DIR="$(cd "$(dirname "$RIPSER_BIN")" && pwd)"
 if [[ -f "$RIPSER_DIR/Makefile" ]]; then
     RIPSER_FLAGS="$(awk '/^ripser:/ { getline; sub(/^\t+/, ""); print; exit }' "$RIPSER_DIR/Makefile") [from the Makefile beside the binary]"
@@ -179,8 +179,8 @@ fi
 DATE_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 HOLOS_COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
 # A dirty worktree means the binary may not correspond to the recorded
-# commit: the exact failure mode that produced the predecessor's phantom
-# benchmark win. Refuse unless explicitly overridden (recorded as DIRTY).
+# commit. That failure mode produced the predecessor's phantom benchmark
+# win. Refuse unless explicitly overridden (recorded as DIRTY).
 DIRTY="$(git -C "$ROOT" status --porcelain 2>/dev/null)"
 if [[ -n "$DIRTY" ]]; then
     if [[ "${ALLOW_DIRTY:-}" != "1" ]]; then
@@ -198,6 +198,7 @@ CARGO_VERSION="$($CARGO --version)"
 RUSTC_VERSION="$($RUSTC -V)"
 CC_VERSION="$( (cc --version 2>/dev/null || echo unknown) | head -1)"
 CPU="$( (grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//') 2>/dev/null || sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
+AFFINITY="$( (grep -m1 '^Cpus_allowed_list' /proc/self/status | cut -f2) 2>/dev/null || echo unknown)"
 
 {
     echo "holos benchmark run"
@@ -214,10 +215,11 @@ CPU="$( (grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//') 2>/
     echo "ripser build: $RIPSER_FLAGS"
     echo "cargo: $CARGO_VERSION"
     echo "rustc: $RUSTC_VERSION"
-    # cc version is a proxy only: how RIPSER_BIN was actually built is not
+    # The cc version is a proxy only. How RIPSER_BIN was built is not
     # knowable from here unless it was built on this machine.
     echo "cc: $CC_VERSION"
     echo "cpu: $CPU"
+    echo "cpus allowed: $AFFINITY"
     echo "threads: 1 (both binaries are serial)"
     echo "timing: benchmarks/measure.py (monotonic wall clock; peak RSS = VmHWM sampled at 0.5-10 ms, exec-gated)"
     echo "sizes: ${SIZES[*]}  coord dim: $COORD_DIM  seed: $SEED  maxdim: $MAXDIM"
@@ -237,7 +239,7 @@ CPU="$( (grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//') 2>/
     echo "- rustc: $RUSTC_VERSION ($CARGO_VERSION)"
     echo "- ripser binary: \`$RIPSER_BIN_DISPLAY\` sha256 \`$RIPSER_SHA\`"
     echo "- ripser build: \`$RIPSER_FLAGS\`"
-    echo "- cpu: $CPU; threads: 1 (both binaries are serial)"
+    echo "- cpu: $CPU; cpus allowed: $AFFINITY; threads: 1 (both binaries are serial)"
     echo "- input: uniform unit-cube clouds, coord dim $COORD_DIM, seed $SEED (gen_cloud.py); identical lower-distance file fed to both tools"
     echo "- timing: measure.py (monotonic wall clock; peak RSS = VmHWM sampled at 0.5-10 ms, exec-gated); agreement tolerance $TOLERANCE"
     echo
@@ -248,8 +250,8 @@ CPU="$( (grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//') 2>/
 ANY_MISMATCH=0
 
 # run_case N LABEL THRESHOLD_DESC MAXDIM [THRESHOLD]
-# THRESHOLD absent = no --threshold on either side (both default to the
-# enclosing radius, the fair full-persistence run).
+# THRESHOLD absent = no --threshold on either side. Both tools then fall back
+# to the enclosing radius, the fair full-persistence run.
 run_case() {
     local n="$1" label="$2" tdesc="$3" maxdim="$4" threshold="${5:-}"
     local lower="$DATA/cloud_${n}.lower"

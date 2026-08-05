@@ -40,7 +40,7 @@ jobs:
         with:
           working-directory: py
           target: ${{ matrix.target }}
-          args: --release --out dist --zig
+          args: --release --locked --out dist --zig
           manylinux: "2_17"
       - uses: actions/upload-artifact@v4
         with:
@@ -62,7 +62,7 @@ jobs:
         with:
           working-directory: py
           target: ${{ matrix.target }}
-          args: --release --out dist
+          args: --release --locked --out dist
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.target }}
@@ -80,7 +80,7 @@ jobs:
         with:
           working-directory: py
           target: x86_64
-          args: --release --out dist
+          args: --release --locked --out dist
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-x86_64

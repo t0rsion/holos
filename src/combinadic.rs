@@ -1,6 +1,6 @@
 //! Combinatorial number system: a d-simplex with vertices v0 < ... < vd is
 //! the integer sum C(v_i, i+1). Enumerator state machines follow ripser's
-//! conventions exactly (matching ripser).
+//! conventions exactly.
 
 use crate::{Error, Result};
 
@@ -12,7 +12,7 @@ pub struct BinomialTable {
 
 impl BinomialTable {
     /// Table of C(i, j) for i <= n, j <= k_max. Errors if any entry
-    /// overflows u64, which bounds the representable simplex index space.
+    /// overflows u64. That bound limits the representable simplex indices.
     pub fn new(n: usize, k_max: usize) -> Result<Self> {
         let mut table = vec![0u64; (n + 1) * (k_max + 1)];
         for i in 0..=n {
@@ -81,8 +81,8 @@ impl BinomialTable {
 
 /// Enumerates cofacets of a simplex in decreasing order of the added vertex,
 /// which is decreasing order of cofacet index. `next_upper` restricts to
-/// cofacets whose added vertex exceeds every simplex vertex; over all
-/// d-simplices this generates each (d+1)-simplex exactly once.
+/// cofacets whose added vertex exceeds every simplex vertex. Over all
+/// d-simplices that generates each (d+1)-simplex exactly once.
 pub struct CofacetIter<'a> {
     bt: &'a BinomialTable,
     idx_below: u64,
@@ -115,7 +115,7 @@ impl<'a> CofacetIter<'a> {
     }
 
     /// All cofacets. Yields (cofacet_index, added_vertex, k) where k is the
-    /// enumerator position at yield time; the coboundary coefficient of the
+    /// enumerator position at yield time. The coboundary coefficient of the
     /// cofacet is (-1)^k (ripser's `k & 1 ? modulus - 1 : 1`).
     pub fn next_all(&mut self) -> Option<(u64, usize, usize)> {
         if self.exhausted || self.j < self.k {
@@ -174,7 +174,7 @@ impl<'a> FacetIter<'a> {
 }
 
 /// Items are (facet_index, removed_vertex, k) where k is the removed
-/// vertex's position in the simplex; the boundary coefficient of the facet
+/// vertex's position in the simplex. The boundary coefficient of the facet
 /// is (-1)^k.
 impl Iterator for FacetIter<'_> {
     type Item = (u64, usize, usize);

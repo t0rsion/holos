@@ -1,7 +1,7 @@
 //! Differential gate against an external ripser binary, driven by the
-//! RIPSER_BIN env var. Skips (with a note) when the variable is unset.
-//! Tolerance is 1e-5 absolute: ripser computes and prints in f32
-//! (observed agreement on this corpus is ~5e-7).
+//! RIPSER_BIN env var. Each test skips, with a note, when the variable is
+//! unset. Tolerance is 1e-5 absolute, because ripser computes and prints in
+//! f32. Observed agreement on this corpus is ~5e-7.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -43,7 +43,7 @@ fn ripser_bin() -> Option<String> {
     }
 }
 
-// A ripser build with coefficient support (make ripser-coeff); the plain
+// A ripser build with coefficient support (make ripser-coeff). The plain
 // binary rejects --modulus.
 fn ripser_coeff_bin() -> Option<String> {
     match std::env::var("RIPSER_COEFF_BIN") {
@@ -229,8 +229,8 @@ fn sphere_fixture_matches_ripser() {
     check_against_ripser(&bin, "sphere", &dist, 2, None);
 }
 
-// Torus fixture lives in this suite only: the oracle is far too slow at the
-// sample size a torus needs .
+// The torus fixture lives in this suite only. The oracle is too slow at the
+// sample size a torus needs.
 #[test]
 fn torus_fixture_matches_ripser() {
     let Some(bin) = ripser_bin() else { return };
@@ -244,9 +244,9 @@ fn torus_fixture_matches_ripser() {
         })
         .collect();
     let dist = DistanceMatrix::from_points(&points).unwrap();
-    // Distances span [0, 2*sqrt(2)]; at 2.0 both dominant H1 classes have
+    // Distances span [0, 2*sqrt(2)]. At 2.0 both dominant H1 classes have
     // died (deaths ~1.76, ~1.78) and the H2 class is a finite bar
-    // (~1.51, ~1.93), while the dim-2 reduction stays quick in debug.
+    // (~1.51, ~1.93). The dim-2 reduction also stays quick in debug.
     check_against_ripser(&bin, "torus", &dist, 2, Some(2.0));
 }
 

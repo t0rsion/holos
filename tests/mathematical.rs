@@ -1,5 +1,5 @@
-//! Known-topology fixtures. Betti-style assertions are kept coarse enough to
-//! be robust to sampling; the oracle comparison is the exact check.
+//! Known-topology fixtures. Betti-style assertions stay coarse, so sampling
+//! noise does not break them. The oracle comparison is the exact check.
 
 use std::f64::consts::PI;
 
@@ -107,7 +107,7 @@ fn circle_has_exactly_one_long_h1_class() {
 
 #[test]
 fn two_disjoint_circles_have_two_components_and_two_loops() {
-    // Unit circles centered 10 apart; threshold 2.5 covers each circle's
+    // Unit circles centered 10 apart. Threshold 2.5 covers each circle's
     // full H1 lifetime but stays far below the 8.0 gap between them.
     let mut points = circle_points(16, (0.0, 0.0), 1.0);
     points.extend(circle_points(16, (10.0, 0.0), 1.0));
@@ -128,9 +128,9 @@ fn two_disjoint_circles_have_two_components_and_two_loops() {
 fn circle_betti_numbers_at_prescribed_thresholds() {
     // 20 points on the unit circle: pairwise distances are 2 sin(pi k / 20),
     // k = 1..10, i.e. 0.3129, 0.6180, 0.9080, 1.1756, ... The single H1
-    // class is born with the k=1 edges and dies at 2 sin(7 pi/20) = 1.7820
-    // (steps up to 6 of 20 still yield a circle; 7/20 >= 1/3 fills it).
-    // Probe values sit in the open gaps between those scales.
+    // class is born with the k=1 edges and dies at 2 sin(7 pi/20) = 1.7820.
+    // Steps up to 6 of 20 still yield a circle; 7/20 >= 1/3 fills it.
+    // The probe values sit in the open gaps between those scales.
     let dist = DistanceMatrix::from_points(&circle_points(20, (0.0, 0.0), 1.0)).unwrap();
     let diagram = compute(&dist, 1);
 
@@ -154,10 +154,10 @@ fn circle_betti_numbers_at_prescribed_thresholds() {
 #[test]
 fn figure_eight_has_two_long_h1_classes() {
     // Two unit circles tangent at the origin. The first circle's k=0 sample
-    // is exactly (0, 0); the second circle's k=8 sample is overwritten with
-    // the same exact coordinates, so the cloud contains a bitwise duplicate
-    // of the tangent point (trig roundoff would otherwise leave it off by
-    // ~1e-16 in y).
+    // is exactly (0, 0). The test overwrites the second circle's k=8 sample
+    // with those same coordinates, so the cloud holds a bitwise duplicate of
+    // the tangent point. Trig roundoff would otherwise leave it off by
+    // ~1e-16 in y.
     let mut points = circle_points(16, (-1.0, 0.0), 1.0);
     points.extend(circle_points(16, (1.0, 0.0), 1.0));
     points[16 + 8] = vec![0.0, 0.0];
@@ -209,8 +209,8 @@ fn sphere_sample_has_one_dominant_h2_class() {
 #[test]
 fn projective_plane_torsion() {
     // Ripser's 13-vertex RP^2 example. H1 = H2 = Z/2, so both are visible
-    // exactly at p = 2 and vanish at any odd prime: the one fixture where
-    // the coefficient field changes the answer.
+    // exactly at p = 2 and vanish at any odd prime. This is the one fixture
+    // where the coefficient field changes the answer.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data/projective_plane.lower_distance_matrix");
     let dist = holos_tda::io::read_lower_distance_matrix(&path).unwrap();
@@ -274,7 +274,7 @@ fn three_clusters_show_two_long_finite_h0_bars() {
     let dist = DistanceMatrix::from_points(&points).unwrap();
     let diagram = compute(&dist, 0);
 
-    // Enclosing radius exceeds the merge scale, so exactly one component
+    // The enclosing radius exceeds the merge scale, so exactly one component
     // survives and the two inter-cluster merges are finite bars.
     assert_eq!(essential_count(&diagram, 0), 1);
     let finite: Vec<&Bar> = diagram.in_dim(0).filter(|b| !b.is_essential()).collect();

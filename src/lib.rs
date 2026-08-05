@@ -4,17 +4,21 @@
 //! Vietoris-Rips persistent homology over a prime field (Z/2 by default)
 //! with an implicit, ripser-style persistent cohomology engine.
 //!
-//! Tie-breaking and output conventions match ripser exactly; see README.md.
+//! Tie-breaking and output conventions match ripser exactly. See README.md.
 
 /// The `holos` CLI as a library function (shared with the Python bindings).
 pub mod cli;
 pub(crate) mod combinadic;
 /// Distance-matrix construction and storage.
 pub mod distances;
+pub(crate) mod field;
 /// File formats and diagram output.
 pub mod io;
 /// Independent brute-force reference implementation used by the test gates.
 pub mod oracle;
+pub(crate) mod parallel;
+pub(crate) mod reduce;
+pub(crate) mod simplex;
 pub(crate) mod solver;
 mod union_find;
 
@@ -61,7 +65,8 @@ impl Diagram {
     }
 
     /// Sort bars into the canonical output order: by dimension, then birth,
-    /// then death. Deterministic across runs and point permutations.
+    /// then death. The order is deterministic across runs and point
+    /// permutations.
     pub fn canonicalize(&mut self) {
         self.bars.sort_by(|a, b| {
             a.dim
@@ -74,8 +79,8 @@ impl Diagram {
 
 /// Parameters for [`rips_persistence`].
 ///
-/// The engine is dimension-generic; v0.1's differential gates certify
-/// `max_dim <= 2` (review stress-testing extended through dimension 4).
+/// The engine is dimension-generic. The differential gates certify
+/// `max_dim <= 2`. Stress tests extend through dimension 4.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RipsParams {
@@ -86,11 +91,16 @@ pub struct RipsParams {
     pub threshold: Option<f64>,
     /// Coefficient field Z/p; must be a prime below 32768. Default 2.
     pub modulus: u32,
-    /// Debug toggle; output is identical with any combination disabled.
+    /// Worker threads for the reduction. 0 and 1 (the default) both run the
+    /// serial engine. Higher values reduce each dimension concurrently. The
+    /// diagram is identical at any thread count.
+    pub threads: usize,
+    /// Optimization toggle. The diagram is identical with any combination
+    /// disabled. For differential testing only.
     pub use_emergent_pairs: bool,
-    /// Debug toggle; output is identical with any combination disabled.
+    /// See [`RipsParams::use_emergent_pairs`].
     pub use_apparent_pairs: bool,
-    /// Debug toggle; output is identical with any combination disabled.
+    /// See [`RipsParams::use_emergent_pairs`].
     pub use_clearing: bool,
 }
 
@@ -100,6 +110,7 @@ impl Default for RipsParams {
             max_dim: 1,
             threshold: None,
             modulus: 2,
+            threads: 1,
             use_emergent_pairs: true,
             use_apparent_pairs: true,
             use_clearing: true,
@@ -127,6 +138,13 @@ impl RipsParams {
     /// 32768.
     pub fn with_modulus(mut self, modulus: u32) -> Self {
         self.modulus = modulus;
+        self
+    }
+
+    /// Reduce with `threads` workers. 1 keeps the serial engine. The diagram
+    /// is identical at any thread count.
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads.max(1);
         self
     }
 }
@@ -165,9 +183,10 @@ pub fn rips_persistence(dist: &DistanceMatrix, params: &RipsParams) -> Result<Di
     solver::compute(dist, params)
 }
 
-/// Compute the Rips persistence diagram of a sparse distance matrix. Pairs
-/// not listed in the input are absent at every scale; with no threshold set,
-/// all listed edges enter the filtration.
+/// Compute the Rips persistence diagram of a sparse distance matrix.
+///
+/// Pairs not listed in the input are absent at every scale. With no
+/// threshold set, all listed edges enter the filtration.
 pub fn rips_persistence_sparse(
     dist: &SparseDistanceMatrix,
     params: &RipsParams,

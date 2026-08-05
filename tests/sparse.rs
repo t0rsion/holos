@@ -68,8 +68,8 @@ fn random_pair(rng: &mut Rng, n: usize) -> (SparseDistanceMatrix, DistanceMatrix
     )
 }
 
-// The sparse default is "no threshold": densify with an explicit infinite
-// threshold so the dense side skips its enclosing-radius default too.
+// The sparse default is "no threshold". Densify with an explicit infinite
+// threshold, so the dense side skips its enclosing-radius default too.
 fn dense_threshold(threshold: Option<f64>) -> Option<f64> {
     Some(threshold.unwrap_or(f64::INFINITY))
 }
@@ -163,7 +163,7 @@ fn from_triplets_rejects_invalid_input() {
     assert_eq!(ok.num_edges(), 1);
 }
 
-// --- differential against ripser's sparse format ---------------------------
+// Differential against ripser's sparse format.
 
 fn ripser_bin() -> Option<String> {
     match std::env::var("RIPSER_BIN") {
@@ -248,9 +248,9 @@ fn write_sparse_file(name: &str, triplets: &[(usize, usize, f64)]) -> PathBuf {
 #[test]
 fn random_geometric_graph_matches_ripser_sparse() {
     let Some(bin) = ripser_bin() else { return };
-    // 60 seeded points in the unit square, edges kept at distance <= 0.4:
-    // dense enough that every vertex has a neighbor (ripser sizes a sparse
-    // input purely by the vertex indices it sees) and H1 is nonempty.
+    // 60 seeded points in the unit square, edges kept at distance <= 0.4.
+    // That density gives every vertex a neighbor and leaves H1 nonempty.
+    // Ripser sizes a sparse input purely by the vertex indices it sees.
     let n = 60;
     let mut rng = Rng::new(0x6e0_6e0_6e0);
     let points: Vec<(f64, f64)> = (0..n).map(|_| (rng.uniform(), rng.uniform())).collect();

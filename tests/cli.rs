@@ -43,8 +43,8 @@ fn stderr(out: &Output) -> String {
 
 #[test]
 fn point_cloud_end_to_end() {
-    // Unit square: sides 1, diagonals sqrt(2); enclosing-radius default
-    // threshold, so H1 is the finite bar (1, sqrt(2)).
+    // Unit square: sides 1, diagonals sqrt(2). The default threshold is the
+    // enclosing radius, so H1 is the finite bar (1, sqrt(2)).
     let f = TempFile::new("square.csv", "0 0\n1 0\n1 1\n0 1\n");
     let out = run(&[f.path().to_str().unwrap(), "--dim", "1"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
@@ -58,8 +58,8 @@ fn point_cloud_end_to_end() {
 
 #[test]
 fn lower_distance_end_to_end_with_empty_top_dimension() {
-    // Unit triangle: H1 and H2 both empty; their headers must still print,
-    // in ripser-compatible syntax.
+    // Unit triangle: H1 and H2 are both empty. Their headers must still
+    // print, in ripser-compatible syntax.
     let f = TempFile::new("triangle.lower", "1\n1 1\n");
     let out = run(&[f.path().to_str().unwrap(), "--dim", "2"]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
@@ -71,7 +71,7 @@ fn lower_distance_end_to_end_with_empty_top_dimension() {
 }
 
 // The section printed for one dimension: everything between its header and
-// the next header (or the end of output).
+// the next header, or the end of output.
 fn dim_section(text: &str, dim: usize) -> String {
     let header = format!("persistence intervals in dim {dim}:\n");
     let rest = text
@@ -115,8 +115,8 @@ fn composite_modulus_is_rejected() {
 #[test]
 fn sparse_format_end_to_end() {
     // A 4-cycle with unit edges and no diagonals: three merges at 1, one
-    // essential component, and one essential H1 class (nothing ever fills
-    // the loop).
+    // essential component, one essential H1 class. Nothing ever fills the
+    // loop.
     let f = TempFile::new("cycle.sparse", "0 1 1.0\n1 2 1.0\n2 3 1.0\n0 3 1.0\n");
     let out = run(&[
         f.path().to_str().unwrap(),

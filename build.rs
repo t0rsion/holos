@@ -11,8 +11,8 @@ fn main() {
     println!("cargo:rustc-env=HOLOS_BUILD_PROFILE={profile}");
 }
 
-/// Packaged crates carry the source commit in .cargo_vcs_info.json; prefer it
-/// so builds outside a git checkout still report real provenance.
+/// Read the source commit from .cargo_vcs_info.json, which packaged crates
+/// carry. Builds outside a git checkout still report real provenance.
 fn vcs_info_hash(manifest: &str) -> Option<String> {
     let text = std::fs::read_to_string(Path::new(manifest).join(".cargo_vcs_info.json")).ok()?;
     let i = text.find("\"sha1\":")? + "\"sha1\":".len();
@@ -28,13 +28,13 @@ fn git_hash(manifest: &str) -> Option<String> {
         .ok()
         .filter(|o| o.status.success())?;
     let top = String::from_utf8_lossy(&top.stdout).trim().to_string();
-    // A crate unpacked inside some unrelated repository must not report that
+    // A crate unpacked inside an unrelated repository must not report that
     // repository's commit as its own.
     if Path::new(&top).canonicalize().ok()? != Path::new(manifest).canonicalize().ok()? {
         return None;
     }
-    // Watch the resolved ref, not just HEAD: same-branch commits and amends
-    // update the ref file, which HEAD alone does not reflect.
+    // Watch the resolved ref, not just HEAD. Commits and amends on the same
+    // branch update the ref file, but leave HEAD unchanged.
     println!("cargo:rerun-if-changed={top}/.git/HEAD");
     if let Ok(head) = std::fs::read_to_string(format!("{top}/.git/HEAD")) {
         if let Some(r) = head.trim().strip_prefix("ref: ") {

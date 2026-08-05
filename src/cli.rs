@@ -21,8 +21,8 @@ enum DiagramFormat {
 
 fn version_string() -> &'static str {
     let profile = crate::BUILD_PROFILE;
-    // clap without its "string" feature wants &'static str; the one-time leak
-    // lives for the whole process anyway.
+    // clap without its "string" feature wants &'static str. The one-time
+    // leak lives for the whole process anyway.
     Box::leak(format!("{} ({}, {profile})", crate::VERSION, crate::GIT_HASH).into_boxed_str())
 }
 
@@ -37,9 +37,9 @@ struct Cli {
     /// "i j d" triplets
     input: PathBuf,
 
-    /// Input format; inferred from the extension when omitted
-    /// (.csv/.pts/.xyz: point-cloud, otherwise lower-distance; sparse is
-    /// never inferred)
+    /// Input format. Inferred from the extension when omitted: .csv, .pts,
+    /// and .xyz select point-cloud, anything else selects lower-distance.
+    /// Sparse is never inferred
     #[arg(long, value_enum)]
     format: Option<InputFormat>,
 
@@ -47,8 +47,8 @@ struct Cli {
     #[arg(long, value_name = "D", default_value_t = 1)]
     dim: usize,
 
-    /// Filtration threshold; defaults to the enclosing radius (dense input)
-    /// or to no threshold (sparse input)
+    /// Filtration threshold. Defaults to the enclosing radius for dense
+    /// input, and to no threshold for sparse input
     #[arg(long, value_name = "T")]
     threshold: Option<f64>,
 
@@ -56,12 +56,17 @@ struct Cli {
     #[arg(long, value_name = "P", default_value_t = 2)]
     modulus: u32,
 
+    /// Reduction worker threads (1 = serial). The diagram is identical at
+    /// any thread count
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    threads: usize,
+
     /// Output format
     #[arg(long, value_enum, default_value_t = DiagramFormat::Ripser)]
     output: DiagramFormat,
 
-    // Debug toggles: each disables one pure optimization; barcodes must be
-    // identical either way (tested), so they are hidden from help.
+    // Debug toggles. Each flag disables one pure optimization. Barcodes must
+    // be identical either way (tested), so the flags are hidden from help.
     #[arg(long, hide = true)]
     no_emergent_pairs: bool,
 
@@ -92,6 +97,7 @@ fn run(cli: Cli) -> crate::Result<()> {
         // None lets the library apply the input's own default.
         threshold: cli.threshold,
         modulus: cli.modulus,
+        threads: cli.threads.max(1),
         use_emergent_pairs: !cli.no_emergent_pairs,
         use_apparent_pairs: !cli.no_apparent_pairs,
         use_clearing: !cli.no_clearing,
@@ -148,9 +154,10 @@ fn run(cli: Cli) -> crate::Result<()> {
     )
 }
 
-/// Run the `holos` CLI on the given arguments (`argv[0]` is the program
-/// name) and return the process exit code. The binary and the Python
-/// bindings both enter here, so the CLI behaves the same either way.
+/// Run the `holos` CLI on `argv` and return the process exit code.
+///
+/// `argv[0]` is the program name. The binary and the Python bindings both
+/// enter here, so the CLI behaves the same either way.
 pub fn run_cli<I, T>(argv: I) -> i32
 where
     I: IntoIterator<Item = T>,
@@ -159,8 +166,8 @@ where
     let cli = match Cli::try_parse_from(argv) {
         Ok(cli) => cli,
         Err(e) => {
-            // clap handles --help/--version here; both are "errors" with
-            // exit code 0 and preformatted output.
+            // clap handles --help and --version here. Both arrive as
+            // "errors" with exit code 0 and preformatted output.
             let code = e.exit_code();
             let _ = e.print();
             return code;

@@ -1,5 +1,5 @@
 //! Python bindings for holos-tda. The Python-facing API lives in
-//! `python/holos_tda/__init__.py`; this module stays a thin shim.
+//! `python/holos_tda/__init__.py`. This module stays a thin shim.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -10,9 +10,10 @@ use holos_tda::{
 
 type Bars = Vec<(usize, f64, f64)>;
 
-fn params(max_dim: usize, threshold: Option<f64>, modulus: u32) -> RipsParams {
+fn params(max_dim: usize, threshold: Option<f64>, modulus: u32, threads: usize) -> RipsParams {
     let mut p = RipsParams::new(max_dim).with_modulus(modulus);
     p.threshold = threshold;
+    p.threads = threads.max(1);
     p
 }
 
@@ -20,7 +21,7 @@ fn to_err(e: holos_tda::Error) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
 
-/// Essential bars keep death = f64::INFINITY, which pyo3 converts to math.inf.
+/// Essential bars keep death = f64::INFINITY. pyo3 converts it to math.inf.
 fn to_bars(mut diagram: holos_tda::Diagram) -> Bars {
     diagram.canonicalize();
     diagram
@@ -31,25 +32,28 @@ fn to_bars(mut diagram: holos_tda::Diagram) -> Bars {
 }
 
 #[pyfunction]
-#[pyo3(signature = (points, max_dim=1, threshold=None, modulus=2))]
+#[pyo3(signature = (points, max_dim=1, threshold=None, modulus=2, threads=1))]
 fn rips_points(
     py: Python<'_>,
     points: Vec<Vec<f64>>,
     max_dim: usize,
     threshold: Option<f64>,
     modulus: u32,
+    threads: usize,
 ) -> PyResult<Bars> {
     py.detach(|| {
         let dist = DistanceMatrix::from_points(&points).map_err(to_err)?;
-        rips_persistence(&dist, &params(max_dim, threshold, modulus))
+        rips_persistence(&dist, &params(max_dim, threshold, modulus, threads))
             .map(to_bars)
             .map_err(to_err)
     })
 }
 
+/// Reorder a `pdist` layout into the layout the core constructor wants.
+///
 /// SciPy's `pdist` emits the upper triangle row by row (d01, d02, ..., d12,
-/// ...); the core constructor wants the lower triangle (d10, d20, d21, ...).
-/// Reorder so the Python contract is the pdist one.
+/// ...). The core constructor wants the lower triangle (d10, d20, d21, ...).
+/// The Python contract is the pdist one.
 fn pdist_to_lower(data: Vec<f64>) -> Result<Vec<f64>, holos_tda::Error> {
     let m = data.len();
     let n = ((1.0 + 8.0 * m as f64).sqrt() as usize).div_ceil(2);
@@ -70,25 +74,26 @@ fn pdist_to_lower(data: Vec<f64>) -> Result<Vec<f64>, holos_tda::Error> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (data, max_dim=1, threshold=None, modulus=2))]
+#[pyo3(signature = (data, max_dim=1, threshold=None, modulus=2, threads=1))]
 fn rips_condensed(
     py: Python<'_>,
     data: Vec<f64>,
     max_dim: usize,
     threshold: Option<f64>,
     modulus: u32,
+    threads: usize,
 ) -> PyResult<Bars> {
     py.detach(|| {
         let lower = pdist_to_lower(data).map_err(to_err)?;
         let dist = DistanceMatrix::from_condensed(lower).map_err(to_err)?;
-        rips_persistence(&dist, &params(max_dim, threshold, modulus))
+        rips_persistence(&dist, &params(max_dim, threshold, modulus, threads))
             .map(to_bars)
             .map_err(to_err)
     })
 }
 
 #[pyfunction]
-#[pyo3(signature = (n, triplets, max_dim=1, threshold=None, modulus=2))]
+#[pyo3(signature = (n, triplets, max_dim=1, threshold=None, modulus=2, threads=1))]
 fn rips_sparse(
     py: Python<'_>,
     n: usize,
@@ -96,10 +101,11 @@ fn rips_sparse(
     max_dim: usize,
     threshold: Option<f64>,
     modulus: u32,
+    threads: usize,
 ) -> PyResult<Bars> {
     py.detach(|| {
         let dist = SparseDistanceMatrix::from_triplets(n, &triplets).map_err(to_err)?;
-        rips_persistence_sparse(&dist, &params(max_dim, threshold, modulus))
+        rips_persistence_sparse(&dist, &params(max_dim, threshold, modulus, threads))
             .map(to_bars)
             .map_err(to_err)
     })

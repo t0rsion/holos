@@ -1,5 +1,5 @@
 """Smoke tests for the built holos-tda wheel. Plain asserts, no test
-framework; run as `python py/tests/smoke.py` in an env with the wheel
+framework. Run as `python py/tests/smoke.py` in an env with the wheel
 installed."""
 
 import math
@@ -25,7 +25,7 @@ assert close(h1[1], 1.0) and close(h1[2], SQRT2)
 # Condensed input follows SciPy pdist (upper-triangle) order. This n=4
 # asymmetric matrix distinguishes pdist order from lower-triangle order:
 # pdist [d01, d02, d03, d12, d13, d23] = [0.5, 0.5, 1, 10, 5, 6] gives H0
-# finite deaths [0.5, 0.5, 1]; a lower-triangle misread gives [0.5, 0.5, 5].
+# finite deaths [0.5, 0.5, 1]. A lower-triangle misread gives [0.5, 0.5, 5].
 bars = holos_tda.rips_condensed([0.5, 0.5, 1.0, 10.0, 5.0, 6.0], max_dim=0)
 deaths = sorted(b[2] for b in bars if b[2] != math.inf)
 assert deaths == [0.5, 0.5, 1.0], deaths
@@ -40,6 +40,17 @@ assert holos_tda.rips_condensed(pd, max_dim=1) == holos_tda.rips_points(
 bars = holos_tda.rips_sparse(4, [(0, 1, 1.0), (1, 2, 1.0), (2, 3, 1.0), (0, 3, 1.0)])
 (h1,) = [b for b in bars if b[0] == 1]
 assert close(h1[1], 1.0) and h1[2] == math.inf
+
+# threads=2 yields the identical diagram through every entry point.
+sq = [[0, 0], [1, 0], [1, 1], [0, 1]]
+assert holos_tda.rips_points(sq, max_dim=1, threads=2) == holos_tda.rips_points(
+    sq, max_dim=1
+)
+assert holos_tda.rips_condensed(pd, max_dim=1, threads=2) == holos_tda.rips_condensed(
+    pd, max_dim=1
+)
+cyc = [(0, 1, 1.0), (1, 2, 1.0), (2, 3, 1.0), (0, 3, 1.0)]
+assert holos_tda.rips_sparse(4, cyc, threads=2) == holos_tda.rips_sparse(4, cyc)
 
 # Coefficients: valid odd prime works, composite raises.
 holos_tda.rips_points([[0, 0], [1, 0]], modulus=3)

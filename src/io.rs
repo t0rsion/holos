@@ -38,7 +38,7 @@ pub fn read_point_cloud(path: &Path) -> Result<Vec<Vec<f64>>> {
             })
             .collect::<Result<Vec<f64>>>()?;
         if point.is_empty() {
-            // Separators only; treat like a blank line.
+            // Separators only. Treat the line as blank.
             continue;
         }
         if let Some(first) = points.first() {
@@ -137,10 +137,12 @@ pub enum OutputFormat {
     Csv,
 }
 
+/// Write a diagram to `w` in the given format.
+///
 /// `max_dim` fixes how many dimension headers the ripser format prints, so
-/// empty top dimensions still appear. Syntax matches ripser; the header
-/// count follows holos's effective dimension (ripser clamps at n-2, holos
-/// at n-1), which never affects the bars themselves.
+/// empty top dimensions still appear. The syntax matches ripser. The header
+/// count follows holos's effective dimension (ripser clamps at n-2, holos at
+/// n-1). The bars themselves are the same either way.
 pub fn write_diagram<W: Write>(
     w: &mut W,
     diagram: &Diagram,
@@ -164,8 +166,8 @@ pub fn write_diagram<W: Write>(
         OutputFormat::Csv => {
             writeln!(w, "dim,birth,death").map_err(io_err)?;
             for bar in &diagram.bars {
-                // f64 Display renders infinity as "inf", which is the documented
-                // essential-death marker.
+                // f64 Display renders infinity as "inf". That string is the
+                // documented essential-death marker.
                 writeln!(w, "{},{},{}", bar.dim, bar.birth, bar.death).map_err(io_err)?;
             }
         }

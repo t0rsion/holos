@@ -1,8 +1,8 @@
 //! Independent correctness oracle: explicit simplex enumeration and textbook
-//! boundary-matrix reduction over a prime field. Deliberately naive, shares
-//! nothing with the solver path except the input and output types (down to
-//! the modular inverses: Fermat exponentiation here, a Euclid-style table
-//! there).
+//! boundary-matrix reduction over a prime field. Deliberately naive. It
+//! shares nothing with the solver path except the input and output types,
+//! down to the modular inverses (Fermat exponentiation here, a Euclid-style
+//! table there).
 
 use std::collections::HashMap;
 
@@ -13,8 +13,8 @@ struct Simplex {
     diam: f64,
 }
 
-/// Textbook persistence of the Rips filtration over Z/2; shares no code with
-/// the solver path. Feasible only for small inputs.
+/// Textbook persistence of the Rips filtration over Z/2. It shares no code
+/// with the solver path. Feasible only for small inputs.
 pub fn rips_persistence_oracle(
     dist: &DistanceMatrix,
     max_dim: usize,
@@ -127,8 +127,8 @@ pub fn rips_persistence_oracle_mod(
     diagram
 }
 
-// min over i of max over j != i of d(i, j); own loop rather than
-// DistanceMatrix::enclosing_radius so the oracle shares no derived
+// min over i of max over j != i of d(i, j). This is its own loop rather than
+// DistanceMatrix::enclosing_radius, so the oracle shares no derived
 // quantities with the solver path.
 fn naive_enclosing_radius(dist: &DistanceMatrix) -> f64 {
     let n = dist.len();
@@ -177,7 +177,8 @@ fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
     out
 }
 
-/// a + factor * b over Z/p, both columns sorted by row; zero entries drop.
+/// a + factor * b over Z/p. Both columns are sorted by row. Zero entries
+/// drop.
 fn add_scaled_mod_p(
     a: &[(usize, u64)],
     b: &[(usize, u64)],
@@ -244,8 +245,9 @@ mod tests {
     fn unit_triangle() {
         let dist = DistanceMatrix::from_condensed(vec![1.0, 1.0, 1.0]).unwrap();
         let d = rips_persistence_oracle(&dist, 1, None);
-        // Two components die when the first two edges arrive; the loop is
-        // filled by the triangle at the same scale it forms (suppressed).
+        // Two components die when the first two edges arrive. The triangle
+        // fills the loop at the same scale it forms, so the bar is
+        // suppressed.
         assert_eq!(
             bars(&d, 0),
             vec![(0.0, 1.0), (0.0, 1.0), (0.0, f64::INFINITY)]
