@@ -1651,7 +1651,7 @@ fn reference_collapse(n: usize, all_edges: &[(usize, usize, f64)], resolved: f64
         .filter(|(_, &live)| live)
         .map(|(&e, _)| e)
         .collect();
-    survivors.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    survivors.sort_by_key(|&(u, v, _)| (u, v));
     RefRun {
         steps,
         survivors,

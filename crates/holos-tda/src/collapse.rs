@@ -360,14 +360,11 @@ fn test_edge(
                     break;
                 }
             }
-            match found {
-                Some(p) => {
-                    fill_row(adj, cands, p, &mut s.apex_row);
-                    segments.push((t, cands[p].0));
-                    apex = Some(p);
-                }
-                None => return None,
-            }
+            // No candidate dominates at this level, so the edge stays.
+            let p = found?;
+            fill_row(adj, cands, p, &mut s.apex_row);
+            segments.push((t, cands[p].0));
+            apex = Some(p);
         }
         run = run_end;
     }
