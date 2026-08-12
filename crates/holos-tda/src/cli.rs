@@ -61,6 +61,11 @@ struct Cli {
     #[arg(long, value_name = "N", default_value_t = 1)]
     threads: usize,
 
+    /// Collapse dominated edges before the engine runs. The diagram is
+    /// identical either way; collapse statistics go to stderr
+    #[arg(long)]
+    collapse_edges: bool,
+
     /// Output format
     #[arg(long, value_enum, default_value_t = DiagramFormat::Ripser)]
     output: DiagramFormat,
@@ -90,6 +95,28 @@ fn infer_format(path: &Path) -> InputFormat {
     }
 }
 
+// Collapse through the standalone API so the statistics are available,
+// then hand the engine the reduced graph directly.
+fn collapse_and_run(
+    collapsed: crate::collapse::CollapsedRips,
+    params: &RipsParams,
+) -> crate::Result<crate::Diagram> {
+    let s = &collapsed.stats;
+    eprintln!(
+        "collapse: kept {} of {} edges, removed {}, {} passes",
+        s.output_edges, s.input_edges, s.removed_edges, s.passes
+    );
+    eprintln!(
+        "collapse detail: {} edge tests, {} witness segments, \
+         max common neighborhood {}",
+        s.edge_tests, s.witness_segments, s.max_common_neighborhood
+    );
+    let mut inner = params.clone();
+    inner.collapse_edges = false;
+    inner.threshold = Some(collapsed.certificate.terminal_level());
+    crate::rips_persistence_sparse(&collapsed.matrix, &inner)
+}
+
 fn run(cli: Cli) -> crate::Result<()> {
     let format = cli.format.unwrap_or_else(|| infer_format(&cli.input));
     let params = RipsParams {
@@ -101,6 +128,7 @@ fn run(cli: Cli) -> crate::Result<()> {
         use_emergent_pairs: !cli.no_emergent_pairs,
         use_apparent_pairs: !cli.no_apparent_pairs,
         use_clearing: !cli.no_clearing,
+        collapse_edges: false,
     };
     let (mut diagram, n_points) = match format {
         InputFormat::Sparse => {
@@ -118,7 +146,13 @@ fn run(cli: Cli) -> crate::Result<()> {
                 ),
             }
             let n = dist.len();
-            (crate::rips_persistence_sparse(&dist, &params)?, n)
+            let diagram = if cli.collapse_edges {
+                let collapsed = crate::collapse::collapse_sparse(&dist, cli.threshold)?;
+                collapse_and_run(collapsed, &params)?
+            } else {
+                crate::rips_persistence_sparse(&dist, &params)?
+            };
+            (diagram, n)
         }
         _ => {
             let dist = match format {
@@ -137,7 +171,13 @@ fn run(cli: Cli) -> crate::Result<()> {
                 ),
             }
             let n = dist.len();
-            (crate::rips_persistence(&dist, &params)?, n)
+            let diagram = if cli.collapse_edges {
+                let collapsed = crate::collapse::collapse_dense(&dist, cli.threshold)?;
+                collapse_and_run(collapsed, &params)?
+            } else {
+                crate::rips_persistence(&dist, &params)?
+            };
+            (diagram, n)
         }
     };
     diagram.canonicalize();

@@ -104,6 +104,67 @@ fn modulus_decides_projective_plane_torsion() {
     assert_eq!(dim_section(&text, 2), "", "{text}");
 }
 
+// The unsigned integers of a stderr line, in order.
+fn numbers(line: &str) -> Vec<usize> {
+    line.split_whitespace()
+        .filter_map(|word| {
+            word.trim_matches(|c: char| !c.is_ascii_digit())
+                .parse::<usize>()
+                .ok()
+        })
+        .collect()
+}
+
+fn line_starting(text: &str, prefix: &str) -> String {
+    text.lines()
+        .find(|l| l.starts_with(prefix))
+        .unwrap_or_else(|| panic!("no line starting with {prefix:?}: {text}"))
+        .to_string()
+}
+
+#[test]
+fn collapse_edges_keeps_the_diagram_and_reports_stats() {
+    // Nine points on a 3x3 grid: dense enough that the collapse removes
+    // edges, small enough to stay a quick run. The diagram may not move.
+    let f = TempFile::new("grid.csv", "0 0\n1 0\n2 0\n0 1\n1 1\n2 1\n0 2\n1 2\n2 2\n");
+    let path = f.path().to_str().unwrap();
+    let plain = run(&[path, "--dim", "2"]);
+    let collapsed = run(&[path, "--dim", "2", "--collapse-edges"]);
+    assert!(plain.status.success(), "stderr: {}", stderr(&plain));
+    assert!(collapsed.status.success(), "stderr: {}", stderr(&collapsed));
+    assert_eq!(
+        stdout(&plain),
+        stdout(&collapsed),
+        "--collapse-edges changed the diagram"
+    );
+    assert!(
+        !stderr(&plain).contains("collapse:"),
+        "collapse statistics without the flag: {}",
+        stderr(&plain)
+    );
+
+    let err = stderr(&collapsed);
+    let kept = line_starting(&err, "collapse: kept");
+    let n = numbers(&kept);
+    assert_eq!(n.len(), 4, "unexpected statistics line: {kept}");
+    assert_eq!(
+        n[0] + n[2],
+        n[1],
+        "kept plus removed must be the input: {kept}"
+    );
+    assert!(n[2] > 0, "the grid must yield removals: {kept}");
+    assert!(n[3] >= 2, "a removal needs a following empty pass: {kept}");
+
+    let detail = line_starting(&err, "collapse detail:");
+    assert!(detail.contains("edge tests"), "{detail}");
+    assert!(detail.contains("witness segments"), "{detail}");
+    assert_eq!(
+        numbers(&detail).len(),
+        3,
+        "unexpected detail line: {detail}"
+    );
+}
+
 #[test]
 fn composite_modulus_is_rejected() {
     let f = TempFile::new("mod4.lower", "1\n1 1\n");

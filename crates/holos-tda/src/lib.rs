@@ -8,6 +8,7 @@
 
 /// The `holos` CLI as a library function (shared with the Python bindings).
 pub mod cli;
+pub mod collapse;
 pub(crate) mod combinadic;
 /// Distance-matrix construction and storage.
 pub mod distances;
@@ -102,6 +103,10 @@ pub struct RipsParams {
     pub use_apparent_pairs: bool,
     /// See [`RipsParams::use_emergent_pairs`].
     pub use_clearing: bool,
+    /// Collapse dominated edges before the engine runs. Off by default.
+    /// The diagram is identical either way; the collapse trades a serial
+    /// preprocessing pass for a smaller complex. See [`collapse`].
+    pub collapse_edges: bool,
 }
 
 impl Default for RipsParams {
@@ -114,6 +119,7 @@ impl Default for RipsParams {
             use_emergent_pairs: true,
             use_apparent_pairs: true,
             use_clearing: true,
+            collapse_edges: false,
         }
     }
 }
@@ -145,6 +151,13 @@ impl RipsParams {
     /// is identical at any thread count.
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads.max(1);
+        self
+    }
+
+    /// Collapse dominated edges before the engine runs. The diagram is
+    /// identical either way. See [`collapse`].
+    pub fn with_edge_collapse(mut self) -> Self {
+        self.collapse_edges = true;
         self
     }
 }
@@ -180,6 +193,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Compute the Rips persistence diagram of a distance matrix.
 pub fn rips_persistence(dist: &DistanceMatrix, params: &RipsParams) -> Result<Diagram> {
+    if params.collapse_edges {
+        let collapsed = collapse::collapse_dense(dist, params.threshold)?;
+        return run_collapsed(collapsed, params);
+    }
     solver::compute(dist, params)
 }
 
@@ -191,5 +208,19 @@ pub fn rips_persistence_sparse(
     dist: &SparseDistanceMatrix,
     params: &RipsParams,
 ) -> Result<Diagram> {
+    if params.collapse_edges {
+        let collapsed = collapse::collapse_sparse(dist, params.threshold)?;
+        return run_collapsed(collapsed, params);
+    }
     solver::compute(dist, params)
+}
+
+/// Run the engine on a collapsed graph. Every surviving edge lies at or
+/// below the terminal level, so the terminal level is the exact threshold
+/// for the reduced complex.
+fn run_collapsed(collapsed: collapse::CollapsedRips, params: &RipsParams) -> Result<Diagram> {
+    let mut inner = params.clone();
+    inner.collapse_edges = false;
+    inner.threshold = Some(collapsed.certificate.terminal_level());
+    solver::compute(&collapsed.matrix, &inner)
 }

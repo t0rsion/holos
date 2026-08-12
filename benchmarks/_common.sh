@@ -30,6 +30,74 @@ measure() {
     python3 "$HERE/measure.py" "$out" "$@"
 }
 
+# measure_err OUT ERR CMD... : measure, keeping the child's stderr in ERR.
+# Collapse statistics arrive that way.
+measure_err() {
+    local out="$1" err="$2"
+    shift 2
+    MEASURE_STDERR="$err" python3 "$HERE/measure.py" "$out" "$@"
+}
+
+# median_iqr : read one sample per line on stdin, print
+# "median=<x> iqr=<x> q1=<x> q3=<x> min=<x> max=<x>". Quantiles interpolate
+# linearly between the two neighbouring order statistics, the rule numpy uses
+# by default.
+median_iqr() {
+    sort -g | awk '
+        { v[NR] = $1 }
+        function q(p,   h, lo, fr) {
+            h = (NR - 1) * p
+            lo = int(h)
+            fr = h - lo
+            if (lo + 2 > NR) return v[NR]
+            return v[lo + 1] + fr * (v[lo + 2] - v[lo + 1])
+        }
+        END {
+            if (NR == 0) {
+                print "median=0 iqr=0 q1=0 q3=0 min=0 max=0"
+                exit
+            }
+            printf "median=%.4f iqr=%.4f q1=%.4f q3=%.4f min=%.4f max=%.4f\n",
+                q(0.5), q(0.75) - q(0.25), q(0.25), q(0.75), v[1], v[NR]
+        }
+    '
+}
+
+# measure_repeat OUT ERR REPS CMD... : one warm-up run, then REPS timed runs.
+# Prints "median_s=<s> iqr_s=<s> q1_s=<s> q3_s=<s> min_s=<s> max_s=<s>
+# max_rss_kb=<kb> runs=<n>". Peak RSS is the largest of the timed runs. OUT
+# and ERR hold the last run's output.
+measure_repeat() {
+    local out="$1" err="$2" reps="$3"
+    shift 3
+    measure_err "$out" "$err" "$@" >/dev/null
+    local walls=() rss_peak=0 line wall rss r
+    for ((r = 0; r < reps; r++)); do
+        line="$(measure_err "$out" "$err" "$@")"
+        wall="${line#wall_s=}"
+        wall="${wall%% *}"
+        rss="${line##*max_rss_kb=}"
+        walls+=("$wall")
+        if ((rss > rss_peak)); then
+            rss_peak="$rss"
+        fi
+    done
+    local stats med iqr q1 q3 lo hi
+    stats="$(printf '%s\n' "${walls[@]}" | median_iqr)"
+    med="${stats#median=}"
+    med="${med%% *}"
+    iqr="${stats#* iqr=}"
+    iqr="${iqr%% *}"
+    q1="${stats#* q1=}"
+    q1="${q1%% *}"
+    q3="${stats#* q3=}"
+    q3="${q3%% *}"
+    lo="${stats#* min=}"
+    lo="${lo%% *}"
+    hi="${stats##* max=}"
+    echo "median_s=$med iqr_s=$iqr q1_s=$q1 q3_s=$q3 min_s=$lo max_s=$hi max_rss_kb=$rss_peak runs=$reps"
+}
+
 # speedup BASE_WALL WALL -> BASE_WALL / WALL, "n/a" if either is zero.
 speedup() {
     awk -v b="$1" -v w="$2" 'BEGIN { if (w+0 == 0 || b+0 == 0) print "n/a"; else printf "%.2f", b / w }'
@@ -127,16 +195,17 @@ build_holos() {
 
 # emit_provenance FILE HEADER : write the provenance block that ties every
 # timing below it to an exact build. Refuses a dirty worktree unless
-# ALLOW_DIRTY=1 (recorded as -DIRTY), as run.sh does.
+# ALLOW_DIRTY=1 (recorded as -DIRTY), as run.sh does. The fields stay
+# readable afterwards in PROV_*, so a second results file can carry the same
+# header without probing the machine twice.
 emit_provenance() {
     local file="$1" header="$2"
 
-    local profile_flags
-    profile_flags="$(sed -n '/^\[profile\.release\]/,/^\[/{/^\[profile\.release\]/d;/^\[/d;/^[[:space:]]*$/d;p;}' "$ROOT/Cargo.toml" | tr '\n' ';' | sed 's/;$//;s/;/; /g')"
+    PROV_PROFILE_FLAGS="$(sed -n '/^\[profile\.release\]/,/^\[/{/^\[profile\.release\]/d;/^\[/d;/^[[:space:]]*$/d;p;}' "$ROOT/Cargo.toml" | tr '\n' ';' | sed 's/;$//;s/;/; /g')"
 
-    local date_utc commit dirty
-    date_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    commit="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+    local dirty
+    PROV_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    PROV_COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
     dirty="$(git -C "$ROOT" status --porcelain 2>/dev/null)"
     if [[ -n "$dirty" ]]; then
         if [[ "${ALLOW_DIRTY:-}" != "1" ]]; then
@@ -144,30 +213,58 @@ emit_provenance() {
             git -C "$ROOT" status --porcelain >&2
             exit 1
         fi
-        commit="$commit-DIRTY"
+        PROV_COMMIT="$PROV_COMMIT-DIRTY"
     fi
 
-    local cpu ncpu affinity
-    cpu="$( (grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//') 2>/dev/null || sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
-    ncpu="$( (nproc) 2>/dev/null || echo unknown)"
-    affinity="$( (grep -m1 '^Cpus_allowed_list' /proc/self/status | cut -f2) 2>/dev/null || echo unknown)"
+    PROV_CPU="$( (grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//') 2>/dev/null || sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
+    PROV_NCPU="$( (nproc) 2>/dev/null || echo unknown)"
+    PROV_AFFINITY="$( (grep -m1 '^Cpus_allowed_list' /proc/self/status | cut -f2) 2>/dev/null || echo unknown)"
+    PROV_HOLOS_SHA="$(sha256 "$HOLOS_BIN")"
+    PROV_HOLOS_VERSION="$("$HOLOS_BIN" --version)"
+    PROV_CARGO_VERSION="$($CARGO --version)"
+    PROV_RUSTC_VERSION="$($RUSTC -V)"
 
     {
         echo "$header"
-        echo "date: $date_utc"
-        echo "holos commit: $commit"
+        echo "date: $PROV_DATE"
+        echo "holos commit: $PROV_COMMIT"
         echo "holos binary: $HOLOS_BIN_DISPLAY"
-        echo "holos sha256: $(sha256 "$HOLOS_BIN")"
-        echo "holos version: $("$HOLOS_BIN" --version)"
+        echo "holos sha256: $PROV_HOLOS_SHA"
+        echo "holos version: $PROV_HOLOS_VERSION"
         echo "build command: $BUILD_CMD_DISPLAY"
-        echo "[profile.release]: $profile_flags"
+        echo "[profile.release]: $PROV_PROFILE_FLAGS"
         echo "RUSTFLAGS: ${RUSTFLAGS:-<unset>}"
-        echo "cargo: $($CARGO --version)"
-        echo "rustc: $($RUSTC -V)"
-        echo "cpu: $cpu ($ncpu logical; cpus allowed: $affinity)"
+        echo "cargo: $PROV_CARGO_VERSION"
+        echo "rustc: $PROV_RUSTC_VERSION"
+        echo "cpu: $PROV_CPU ($PROV_NCPU logical; cpus allowed: $PROV_AFFINITY)"
         echo "timing: benchmarks/measure.py (monotonic wall clock; peak RSS = VmHWM, exec-gated)"
         echo
     } >"$file"
+}
+
+# emit_provenance_md : the same identity as the text header, as markdown
+# bullets on stdout. emit_provenance must run first.
+emit_provenance_md() {
+    echo "- date: $PROV_DATE"
+    echo "- holos commit: $PROV_COMMIT"
+    echo "- holos binary: \`$HOLOS_BIN_DISPLAY\` sha256 \`$PROV_HOLOS_SHA\`"
+    echo "- holos version: $PROV_HOLOS_VERSION"
+    echo "- build: \`$BUILD_CMD_DISPLAY\` with \`[profile.release]\` $PROV_PROFILE_FLAGS; RUSTFLAGS \`${RUSTFLAGS:-<unset>}\`"
+    echo "- rustc: $PROV_RUSTC_VERSION ($PROV_CARGO_VERSION)"
+    echo "- cpu: $PROV_CPU ($PROV_NCPU logical); cpus allowed: $PROV_AFFINITY"
+    echo "- timing: measure.py (monotonic wall clock; peak RSS = VmHWM, exec-gated)"
+}
+
+# field KEY LINE : print the value of KEY in a "k=v k=v" line, empty if absent.
+field() {
+    awk -v key="$1" '{
+        for (i = 1; i <= NF; i++) {
+            if (index($i, key "=") == 1) {
+                print substr($i, length(key) + 2)
+                exit
+            }
+        }
+    }' <<<"$2"
 }
 
 require_proc() {

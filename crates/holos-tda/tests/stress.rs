@@ -42,17 +42,20 @@ fn oracle_bars(dist: &DistanceMatrix, max_dim: usize, threshold: Option<f64>, p:
 }
 
 fn check(dist: &DistanceMatrix, max_dim: usize, threshold: Option<f64>, p: u32, ctx: &str) {
-    let mut params = RipsParams::new(max_dim).with_modulus(p);
-    params.threshold = threshold;
-    let solver = rips_persistence(dist, &params).unwrap();
     let oracle = Diagram {
         bars: oracle_bars(dist, max_dim, threshold, p),
     };
-    assert_eq!(
-        canonical(&solver),
-        canonical(&oracle),
-        "solver != oracle: {ctx}"
-    );
+    for collapse in [false, true] {
+        let mut params = RipsParams::new(max_dim).with_modulus(p);
+        params.threshold = threshold;
+        params.collapse_edges = collapse;
+        let solver = rips_persistence(dist, &params).unwrap();
+        assert_eq!(
+            canonical(&solver),
+            canonical(&oracle),
+            "solver != oracle: {ctx} collapse={collapse}"
+        );
+    }
 }
 
 fn iters(default: usize) -> usize {
@@ -104,6 +107,7 @@ fn fuzz_random_matrices_all_fields() {
         params.use_emergent_pairs = rng.below(2) == 0;
         params.use_apparent_pairs = rng.below(2) == 0;
         params.use_clearing = rng.below(2) == 0;
+        params.collapse_edges = rng.below(2) == 0;
         let solver = rips_persistence(&dist, &params).unwrap();
         let oracle = Diagram {
             bars: oracle_bars(&dist, max_dim, threshold, p),
@@ -112,10 +116,11 @@ fn fuzz_random_matrices_all_fields() {
             canonical(&solver),
             canonical(&oracle),
             "iter {it}: n={n} regime={regime} max_dim={max_dim} p={p} \
-             threshold={threshold:?} toggles=({},{},{})",
+             threshold={threshold:?} toggles=({},{},{}) collapse={}",
             params.use_emergent_pairs,
             params.use_apparent_pairs,
-            params.use_clearing
+            params.use_clearing,
+            params.collapse_edges
         );
     }
 }

@@ -4,6 +4,45 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-08-12
+
+### Added
+
+- Filtered edge collapse. Set `--collapse-edges` on the CLI,
+  `RipsParams::collapse_edges` (or `with_edge_collapse()`) in the Rust
+  library, or `collapse_edges=` in Python. The collapse removes edges whose
+  absence cannot change any bar, and the engine then runs on the smaller
+  graph. The diagram is unchanged in every dimension: the test battery
+  requires bar-for-bar equality against the uncollapsed run across a range
+  of moduli, thresholds, and thread counts, and every optimization-toggle
+  combination. Collapse is off by default.
+- Standalone collapse API: `collapse::collapse_dense` and
+  `collapse::collapse_sparse` return the reduced `SparseDistanceMatrix`, a
+  `CollapseCertificate`, and run counters. The reduction does not depend on
+  the coefficient field, the homology dimension, the optimization toggles,
+  or the thread count, so one collapsed graph serves many runs.
+- `CollapseCertificate`: a replayable record of every removal, with the
+  edge, its value, the pass, and the witness data that certifies it. The
+  certificate and the reduced graph reconstruct the thresholded input.
+- An independent certificate verifier, `collapse::verify::verify_dense` and
+  `verify_sparse`. It rebuilds the graph, re-derives the criterion from the
+  specification, checks every recorded witness directly at every scale
+  where the edge's neighborhood changes, and confirms that no further edge
+  is removable. It shares no code with the collapse itself.
+- `SparseDistanceMatrix::edges()`: every stored edge once, as endpoints and
+  value.
+- A preregistered break-even study for the collapse
+  (`benchmarks/collapse_bench.sh`, `benchmarks/collapse_corpus.toml`). The
+  families, the parameter grid, the sampling rule, and the decision rule
+  were written down before the measurements. See `benchmarks/README.md`.
+
+### Changed
+
+- With collapse enabled, dense input runs through the sparse enumerator,
+  because the reduced graph is sparse. The diagram is identical either way.
+- The collapse resolves the threshold before it runs, by the same rule the
+  engine uses. Surviving edge values are the input values, bit for bit.
+
 ## [0.3.1] - 2026-08-05
 
 Packaging and release-infrastructure patch. No engine or API changes.
@@ -95,6 +134,7 @@ First public release.
 - Reproducible benchmark harness (`benchmarks/run.sh`) that refuses dirty
   trees, records full provenance, and fails on any diagram mismatch.
 
+[0.4.0]: https://github.com/t0rsion/holos/releases/tag/v0.4.0
 [0.3.1]: https://github.com/t0rsion/holos/releases/tag/v0.3.1
 [0.3.0]: https://github.com/t0rsion/holos/releases/tag/v0.3.0
 [0.2.1]: https://github.com/t0rsion/holos/releases/tag/v0.2.1

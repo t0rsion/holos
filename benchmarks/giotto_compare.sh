@@ -5,7 +5,19 @@
 # time. If giotto-ph is absent, print a note and exit 0. This script never
 # fails because the optional dependency is missing.
 #
+# A second section compares the two products around edge collapse, on one
+# thresholded graph built from the same cloud:
+#   arm a  both collapse-free, one precomputed graph
+#   arm b  both reducers on one externally collapsed graph, collapse-free
+#          on both sides; GUDHI does the collapse once, so the arm measures
+#          the reducers and nothing else
+#   arm c  end to end, each product running its own collapse
+# Every arm records the giotto-ph version, both collapse settings, and the
+# edge counts. An arm whose module is missing prints a skip line; it does not
+# fail the script.
+#
 # giotto-ph: https://github.com/giotto-ai/giotto-ph  (pip install giotto-ph)
+# GUDHI: https://gudhi.inria.fr  (pip install gudhi), arm b only.
 #
 # Results: benchmarks/results_giotto.txt (log) and .md (table), gitignored.
 #
@@ -17,18 +29,23 @@ usage() {
 Usage: giotto_compare.sh [-h]
 
 Compare holos against giotto-ph's ripser_parallel on identical seeded clouds
-at matched thread counts (wall time + diagram agreement). Skips cleanly with
-exit 0 if giotto-ph is not importable.
+at matched thread counts (wall time + diagram agreement), then compare the
+two products around edge collapse on one thresholded graph. Skips cleanly
+with exit 0 if giotto-ph is not importable.
 
 Environment:
-  CARGO        cargo invocation (may carry a toolchain), default "cargo"
-  N            cloud size (points), default 300
-  COORD_DIM    coordinate dimension, default 3
-  SEED         cloud seed, default 42
-  MAXDIM       max homology dimension, default 2
-  THRESHOLD    filtration threshold, default 0.6
-  THREADS      space-separated thread counts, default "1 2 4 8"
-  ALLOW_DIRTY  set to 1 to benchmark a dirty worktree (recorded as -DIRTY)
+  CARGO             cargo invocation (may carry a toolchain), default "cargo"
+  N                 cloud size (points), default 300
+  COORD_DIM         coordinate dimension, default 3
+  SEED              cloud seed, default 42
+  MAXDIM            max homology dimension, default 2
+  THRESHOLD         filtration threshold, default 0.6
+  THREADS           space-separated thread counts, default "1 2 4 8"
+  COLLAPSE_TAU      collapse-section threshold, as a fraction of the
+                    enclosing radius, default 0.5
+  COLLAPSE_THREADS  thread count for the collapse section, default 8
+  REPS              timed runs per arm, default 5
+  ALLOW_DIRTY       set to 1 to benchmark a dirty worktree (recorded -DIRTY)
 EOF
 }
 
@@ -50,6 +67,9 @@ COORD_DIM="${COORD_DIM:-3}"
 SEED="${SEED:-42}"
 MAXDIM="${MAXDIM:-2}"
 THRESHOLD="${THRESHOLD:-0.6}"
+COLLAPSE_TAU="${COLLAPSE_TAU:-0.5}"
+COLLAPSE_THREADS="${COLLAPSE_THREADS:-8}"
+REPS="${REPS:-5}"
 read -r -a THREAD_LIST <<<"${THREADS:-1 2 4 8}"
 
 RESULTS="$HERE/results_giotto.txt"
@@ -142,9 +162,236 @@ for t in "${THREAD_LIST[@]}"; do
     echo "threads=$t holos=${holos_wall}s giotto=${giotto_wall}s match=$match" >&2
 done
 
+# One thresholded graph for the whole collapse section. Both products read
+# the same triplets, so no distance is recomputed on either side.
+graph_sparse="$DATA/giotto_${N}_tau${COLLAPSE_TAU}.sparse"
+GRAPH="$(python3 "$HERE/densify_to_sparse.py" "$cloud" "$COLLAPSE_TAU" "$graph_sparse")"
+GRAPH_N="$(field n "$GRAPH")"
+GRAPH_EDGES="$(field edges "$GRAPH")"
+GRAPH_THRESHOLD="$(field threshold "$GRAPH")"
+GUDHI_VERSION="$(python3 -c 'import gudhi; print(gudhi.__version__)' 2>/dev/null || echo absent)"
+
+# run_gph FILE N THRESH THREADS COLLAPSE OUT : reduce the triplet file with
+# giotto-ph, write a ripser-format diagram to OUT, print
+# "median_s=<s> iqr_s=<s> runs=<n>". One warm-up run precedes the timed runs.
+# Quantiles use the inclusive method, the same rule as median_iqr.
+run_gph() {
+    python3 - "$1" "$2" "$3" "$4" "$5" "$6" "$MAXDIM" "$REPS" <<'EOF'
+import statistics
+import sys
+import time
+
+from gph import ripser_parallel
+from scipy.sparse import coo_matrix
+
+path, n, thresh, threads, collapse, out, maxdim, reps = (
+    sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), int(sys.argv[4]),
+    sys.argv[5] == "on", sys.argv[6], int(sys.argv[7]), int(sys.argv[8]),
+)
+
+rows, cols, data = [], [], []
+with open(path) as f:
+    for line in f:
+        i, j, d = line.split()
+        rows.append(int(i))
+        cols.append(int(j))
+        data.append(float(d))
+# A zero-length edge would be an explicit zero in the sparse matrix, which
+# scipy may drop. The benchmark clouds hold no duplicate point.
+graph = coo_matrix((data, (rows, cols)), shape=(n, n))
+
+
+def once():
+    start = time.monotonic()
+    res = ripser_parallel(
+        graph, metric="precomputed", maxdim=maxdim, thresh=thresh,
+        n_threads=threads, collapse_edges=collapse,
+    )
+    return time.monotonic() - start, res
+
+
+_, res = once()
+walls = []
+for _ in range(reps):
+    wall, res = once()
+    walls.append(wall)
+
+with open(out, "w") as f:
+    for dim, dgm in enumerate(res["dgms"]):
+        f.write(f"persistence intervals in dim {dim}:\n")
+        for birth, death in dgm:
+            d = "" if death == float("inf") else repr(float(death))
+            f.write(f" [{repr(float(birth))},{d})\n")
+
+if len(walls) > 1:
+    q1, _, q3 = statistics.quantiles(walls, n=4, method="inclusive")
+    iqr = q3 - q1
+else:
+    iqr = 0.0
+print(f"median_s={statistics.median(walls):.4f} iqr_s={iqr:.4f} runs={reps}")
+EOF
+}
+
+# collapse_with_gudhi IN OUT : collapse the triplet file once with GUDHI and
+# write the reduced graph to OUT, so both reducers can consume it. Prints
+# "api=<name> edges_in=<x> edges_out=<y>". Exits nonzero when GUDHI cannot
+# emit a graph here; the caller then skips the arm.
+collapse_with_gudhi() {
+    python3 - "$1" "$2" "$GRAPH_N" <<'EOF'
+import sys
+
+path, out, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+edges = []
+with open(path) as f:
+    for line in f:
+        i, j, d = line.split()
+        edges.append((int(i), int(j), float(d)))
+
+
+def by_reduce_graph():
+    from gudhi.flag_filtration.edge_collapse import reduce_graph
+
+    reduced = reduce_graph(edges)
+    try:
+        return [(int(i), int(j), float(w)) for i, j, w in reduced]
+    except (TypeError, ValueError):
+        # Some releases return endpoint arrays and filtration values apart.
+        (rows, cols), values = reduced
+        return [(int(i), int(j), float(w)) for i, j, w in zip(rows, cols, values)]
+
+
+def by_simplex_tree():
+    import gudhi
+
+    st = gudhi.SimplexTree()
+    for v in range(n):
+        st.insert([v], 0.0)
+    for i, j, d in edges:
+        st.insert([i, j], d)
+    st.collapse_edges()
+    return [(s[0], s[1], f) for s, f in st.get_skeleton(1) if len(s) == 2]
+
+
+failure = "no API tried"
+for api, collapse in (
+    ("gudhi.flag_filtration.edge_collapse.reduce_graph", by_reduce_graph),
+    ("gudhi.SimplexTree.collapse_edges", by_simplex_tree),
+):
+    try:
+        collapsed = collapse()
+        break
+    except Exception as exc:
+        failure = f"{api}: {exc}"
+else:
+    sys.exit(f"GUDHI cannot emit a collapsed graph here ({failure})")
+
+if not collapsed:
+    sys.exit("GUDHI returned an empty graph")
+top = max(max(i, j) for i, j, _ in collapsed)
+if top != n - 1:
+    sys.exit(f"the collapsed graph ends at vertex {top}, not {n - 1}; point counts would differ")
+
+collapsed.sort(key=lambda e: (max(e[0], e[1]), min(e[0], e[1])))
+with open(out, "w") as f:
+    for i, j, d in collapsed:
+        a, b = (i, j) if i > j else (j, i)
+        f.write(f"{a} {b} {d!r}\n")
+print(f"api={api} edges_in={len(edges)} edges_out={len(collapsed)}")
+EOF
+}
+
+# run_arm LABEL FILE HOLOS_COLLAPSE GPH_COLLAPSE : time both products on one
+# triplet file. HOLOS_COLLAPSE and GPH_COLLAPSE are "on" or "off". Appends
+# the log block and the table row.
+run_arm() {
+    local label="$1" file="$2" holos_collapse="$3" gph_collapse="$4"
+    local holos_out="$DATA/giotto_arm_${label}_holos.out"
+    local holos_err="$DATA/giotto_arm_${label}_holos.err"
+    local gph_out="$DATA/giotto_arm_${label}_gph.out"
+    local edges_in
+    edges_in="$(wc -l <"$file")"
+
+    local cmd=("$HOLOS_BIN" "$file" --format sparse --dim "$MAXDIM"
+        --threshold "$GRAPH_THRESHOLD" --threads "$COLLAPSE_THREADS")
+    if [[ "$holos_collapse" == on ]]; then
+        cmd+=(--collapse-edges)
+    fi
+
+    local holos_stats gph_stats
+    holos_stats="$(measure_repeat "$holos_out" "$holos_err" "$REPS" "${cmd[@]}")"
+    gph_stats="$(run_gph "$file" "$GRAPH_N" "$GRAPH_THRESHOLD" "$COLLAPSE_THREADS" "$gph_collapse" "$gph_out")"
+
+    local holos_edges_out="n/a"
+    if [[ "$holos_collapse" == on ]]; then
+        holos_edges_out="$(grep -m1 '^collapse:' "$holos_err" | awk '{print $3}' || echo n/a)"
+    fi
+
+    local match
+    match="$(compare_diagrams "$holos_out" "$gph_out")"
+    if [[ "$match" != yes ]]; then
+        ANY_MISMATCH=1
+    fi
+
+    {
+        echo "== arm $label  holos collapse=$holos_collapse  gph collapse=$gph_collapse"
+        echo "graph: $(basename "$file")  edges in=$edges_in  vertices=$GRAPH_N  threshold=$GRAPH_THRESHOLD"
+        echo "holos cmd: ${cmd[*]//$ROOT\//}"
+        echo "holos  $holos_stats  edges_out=$holos_edges_out"
+        echo "gph    $gph_stats  edges_out=n/a (giotto-ph does not report them)"
+        echo "DIAGRAMS_MATCH $match"
+        echo
+    } >>"$RESULTS"
+
+    echo "| $label | $edges_in | $holos_collapse | $gph_collapse | $holos_edges_out | n/a | $(field median_s "$holos_stats") | $(field iqr_s "$holos_stats") | $(field median_s "$gph_stats") | $(field iqr_s "$gph_stats") | $match |" >>"$RESULTS_MD"
+    echo "arm $label holos=$(field median_s "$holos_stats")s gph=$(field median_s "$gph_stats")s match=$match" >&2
+}
+
+{
+    echo "== collapse section"
+    echo "graph: densify_to_sparse.py on the same cloud, tau=$COLLAPSE_TAU"
+    echo "graph: $GRAPH"
+    echo "threads: $COLLAPSE_THREADS  repeats: 1 warm-up + $REPS timed runs per arm"
+    echo "giotto-ph version: $GPH_VERSION  gudhi version: $GUDHI_VERSION"
+    echo
+} >>"$RESULTS"
+
+{
+    echo
+    echo "### Collapse comparison"
+    echo
+    echo "- graph: $GRAPH_EDGES edges over $GRAPH_N points, tau $COLLAPSE_TAU, threshold $GRAPH_THRESHOLD"
+    echo "- threads: $COLLAPSE_THREADS; 1 warm-up + $REPS timed runs per arm; times in seconds"
+    echo "- giotto-ph: $GPH_VERSION; gudhi: $GUDHI_VERSION"
+    echo "- arm a: both collapse-free. arm b: both on one GUDHI-collapsed graph, the equal-core reducer comparison. arm c: end to end, each product collapsing for itself."
+    echo
+    echo "| arm | edges in | holos collapse | gph collapse | holos edges out | gph edges out | holos median | holos IQR | gph median | gph IQR | diagrams match |"
+    echo "|:--|--:|:--|:--|--:|--:|--:|--:|--:|--:|:--|"
+} >>"$RESULTS_MD"
+
+if ! python3 -c 'import scipy.sparse' 2>/dev/null; then
+    echo "scipy is missing, skipping the collapse section" | tee -a "$RESULTS" >&2
+    echo "| a, b, c | $GRAPH_EDGES | skipped | skipped | n/a | n/a | n/a | n/a | n/a | n/a | scipy missing |" >>"$RESULTS_MD"
+else
+    run_arm a "$graph_sparse" off off
+
+    collapsed_sparse="$DATA/giotto_${N}_tau${COLLAPSE_TAU}_gudhi.sparse"
+    if gudhi_stats="$(collapse_with_gudhi "$graph_sparse" "$collapsed_sparse" 2>&1)"; then
+        {
+            echo "external collapse: $gudhi_stats"
+            echo
+        } >>"$RESULTS"
+        run_arm b "$collapsed_sparse" off off
+    else
+        echo "arm b skipped: $gudhi_stats" | tee -a "$RESULTS" >&2
+        echo "| b | $GRAPH_EDGES | off | off | n/a | n/a | n/a | n/a | n/a | n/a | skipped, no external collapser |" >>"$RESULTS_MD"
+    fi
+
+    run_arm c "$graph_sparse" on on
+fi
+
 echo "Results written to $RESULTS and $RESULTS_MD." >&2
 
 if [[ "$ANY_MISMATCH" -ne 0 ]]; then
-    echo "FAILURE: holos and giotto-ph diagrams disagree at some thread count; timings void." >&2
+    echo "FAILURE: holos and giotto-ph diagrams disagree somewhere; timings void." >&2
     exit 1
 fi

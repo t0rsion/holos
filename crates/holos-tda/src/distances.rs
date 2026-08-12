@@ -191,6 +191,16 @@ impl SparseDistanceMatrix {
             Err(_) => f64::INFINITY,
         }
     }
+
+    /// Visit every stored edge once, as `(u, v, value)` with `u < v`, in
+    /// ascending `u` then `v` order.
+    pub fn edges(&self) -> impl Iterator<Item = (usize, usize, f64)> + '_ {
+        self.neighbors.iter().enumerate().flat_map(|(u, list)| {
+            list.iter()
+                .filter(move |&&(v, _)| u < v)
+                .map(move |&(v, d)| (u, v, d))
+        })
+    }
 }
 
 /// A cofacet produced during enumeration: its combinadic index, the position

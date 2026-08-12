@@ -52,6 +52,15 @@ assert holos_tda.rips_condensed(pd, max_dim=1, threads=2) == holos_tda.rips_cond
 cyc = [(0, 1, 1.0), (1, 2, 1.0), (2, 3, 1.0), (0, 3, 1.0)]
 assert holos_tda.rips_sparse(4, cyc, threads=2) == holos_tda.rips_sparse(4, cyc)
 
+# collapse_edges=True yields the identical diagram through every entry point.
+assert holos_tda.rips_points(sq, max_dim=1, collapse_edges=True) == holos_tda.rips_points(
+    sq, max_dim=1
+)
+assert holos_tda.rips_condensed(
+    pd, max_dim=1, collapse_edges=True
+) == holos_tda.rips_condensed(pd, max_dim=1)
+assert holos_tda.rips_sparse(4, cyc, collapse_edges=True) == holos_tda.rips_sparse(4, cyc)
+
 # Coefficients: valid odd prime works, composite raises.
 holos_tda.rips_points([[0, 0], [1, 0]], modulus=3)
 try:

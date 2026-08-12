@@ -21,7 +21,8 @@ __all__ = [
 ]
 
 
-def rips_points(points, max_dim=1, threshold=None, modulus=2, threads=1):
+def rips_points(points, max_dim=1, threshold=None, modulus=2, threads=1,
+                collapse_edges=False):
     """Compute Rips persistence of a Euclidean point cloud.
 
     Args:
@@ -33,15 +34,19 @@ def rips_points(points, max_dim=1, threshold=None, modulus=2, threads=1):
         modulus: coefficient field Z/p; must be a prime below 32768.
         threads: reduction worker threads. 1 runs the serial engine. The
             diagram is identical at any thread count.
+        collapse_edges: collapse dominated edges before the engine runs.
+            The diagram is identical either way.
 
     Returns:
         List of ``(dim, birth, death)`` tuples.
     """
     return _core.rips_points([list(map(float, p)) for p in points],
-                             max_dim, threshold, modulus, threads)
+                             max_dim, threshold, modulus, threads,
+                             collapse_edges)
 
 
-def rips_condensed(data, max_dim=1, threshold=None, modulus=2, threads=1):
+def rips_condensed(data, max_dim=1, threshold=None, modulus=2, threads=1,
+                   collapse_edges=False):
     """Compute Rips persistence of a condensed distance matrix.
 
     The layout is upper-triangular and row-major, as produced by
@@ -55,15 +60,19 @@ def rips_condensed(data, max_dim=1, threshold=None, modulus=2, threads=1):
         modulus: coefficient field Z/p; must be a prime below 32768.
         threads: reduction worker threads. 1 runs the serial engine. The
             diagram is identical at any thread count.
+        collapse_edges: collapse dominated edges before the engine runs.
+            The diagram is identical either way.
 
     Returns:
         List of ``(dim, birth, death)`` tuples.
     """
     return _core.rips_condensed(list(map(float, data)),
-                                max_dim, threshold, modulus, threads)
+                                max_dim, threshold, modulus, threads,
+                                collapse_edges)
 
 
-def rips_sparse(n, triplets, max_dim=1, threshold=None, modulus=2, threads=1):
+def rips_sparse(n, triplets, max_dim=1, threshold=None, modulus=2, threads=1,
+                collapse_edges=False):
     """Compute Rips persistence of a sparse distance matrix.
 
     Pairs not listed are absent at every scale. With ``threshold=None``, all
@@ -77,12 +86,15 @@ def rips_sparse(n, triplets, max_dim=1, threshold=None, modulus=2, threads=1):
         modulus: coefficient field Z/p; must be a prime below 32768.
         threads: reduction worker threads. 1 runs the serial engine. The
             diagram is identical at any thread count.
+        collapse_edges: collapse dominated edges before the engine runs.
+            The diagram is identical either way.
 
     Returns:
         List of ``(dim, birth, death)`` tuples.
     """
     return _core.rips_sparse(n, [(int(i), int(j), float(d)) for i, j, d in triplets],
-                             max_dim, threshold, modulus, threads)
+                             max_dim, threshold, modulus, threads,
+                             collapse_edges)
 
 
 def main(argv=None):

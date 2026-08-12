@@ -1,0 +1,675 @@
+# Preregistered corpus for the edge-collapse break-even study.
+#
+# Written and frozen before any run of this corpus, screen or confirmation.
+# Informal exploratory timings came first and shaped it; [meta.amendments]
+# names them. benchmarks/collapse_bench.sh reads this file;
+# benchmarks/README.md holds the protocol and the decision rule. The corpus
+# does not change in response to a result. A later version bumps [meta]
+# version and states what changed and why.
+
+[meta]
+version = 3
+date = "2026-08-05"
+supersedes = "versions 1 and 2, 2026-08-05, amended before any protocol run"
+study = "edge-collapse break-even"
+runner = "benchmarks/collapse_bench.sh"
+decision_rule = "benchmarks/README.md, section 'Preregistration: edge-collapse break-even study'"
+threshold_rule = """
+T = tau * R, where R is the enclosing radius of the cloud, the minimum over i
+of the maximum over j of d(i, j). tau = 1.0 reproduces the dense default
+threshold exactly. Every mode of an entry gets the same explicit T.
+"""
+sampling_rule = """
+One cloud per entry, from gen_cloud.py N COORD_DIM SEED FAMILY. Screen
+entries use seed 4201. Confirmation entries use seeds 9137, 9138, and 9139,
+which no screen entry uses. No entry is resampled: a rerun of the script
+regenerates the same cloud.
+"""
+modes = """
+mode 1: the dense path on the condensed lower-distance file, threshold T.
+mode 2: the same distances thresholded at T and converted to sparse
+        triplets, --format sparse, no collapse. Isolates the gain of the
+        sparse enumerator over the dense one.
+mode 3: the same triplets with --collapse-edges. The difference against
+        mode 2 is the collapse gain alone.
+"""
+cost_note = """
+Sizes are chosen so one run stays in the seconds-to-minutes range on eight
+pinned cores. n falls as tau rises, because the complex grows with both.
+"""
+
+[meta.amendments]
+v3 = """
+2026-08-05. Version 3 amends version 2 of the same date. Still no entry of
+this corpus has run under the protocol. One change: the enumerator-positive
+grade now fixes the collapse wording by sub-band. Version 2 called collapse
+"neutral" whenever mode3-vs-mode2 fell below 1.05, which would mislabel a
+real slowdown. Now 0.95 to 1.05 over mode 2 reads as neutral within the
+band, and below 0.95 reads as a measured collapse slowdown, quoted. The
+grade's claim is "does not establish a material collapse win", not "the
+gain is not the collapse".
+"""
+v2 = """
+2026-08-05. Version 2 amends version 1 of the same date. No entry of this
+corpus had run under the protocol, screen or confirmation, so no result
+depends on version 1. Four changes:
+
+1. Disclosure. Version 1 claimed the protocol was written before any collapse
+   timing existed. That was false. Informal exploratory timings came first:
+   torus n = 400, clusters n = 300, and sphere n = 300, each at the enclosing
+   radius, plus cube n = 800 at tau 0.3 from one smoke run that tested the
+   runner's plumbing. Those timings guided the collapser's optimization and
+   the choice of families, sizes, and tau values here. They carry no
+   evidentiary weight: the decision rule reads confirmation entries only.
+2. Decision rule. A positive result now needs both a mode3-vs-mode1 median of
+   at least 1.15 and a mode3-vs-mode2 median of at least 1.05. The case that
+   passes on mode 1 alone has its own name, enumerator-positive, and credits
+   the sparse enumerator instead of the collapse.
+3. Regions. Confirmation entries now carry chain and chain_index, and a
+   qualifying region is two or more consecutive entries of one chain. Version
+   1 asked for entries "adjacent on one axis", which no pair here can satisfy:
+   the confirmation entries move tau and n together.
+4. Held-out enforcement. A complete screen run now writes
+   results_collapse_manifest.txt, carrying this file's version and sha256 and
+   one line per finished screen entry. --confirm verifies it before it runs.
+"""
+midpoints = """
+None yet. Every densify-near-boundary midpoint added before the confirmation
+set runs gets a dated line here, naming the pair it straddles and the chain
+and chain_index it takes. A midpoint missing from this list is not part of
+the confirmation set.
+"""
+
+[meta.grid]
+family = ["cube", "sphere", "clusters", "torus"]
+tau = [0.3, 0.5, 0.8, 1.0]
+modulus = [2, 5]
+threads = [1, 8]
+max_dim = [1, 2]
+coord_dim = [3, 5]
+
+[meta.design]
+block_a = "family x tau, at modulus 2, threads 1, max_dim 2, coord_dim 3. The main grid."
+block_b = "the modulus and thread axes, one at a time, at the tau = 0.5 cell of every family."
+block_c = "modulus 5 and threads 8 together, at the tau = 0.8 cell of cube and torus."
+block_d = "the max_dim and ambient-dimension axes, at low tau and larger n."
+note = """
+The design is fractional, not a full factorial. A full crossing of six axes
+costs more than the screen is worth: the screen only decides whether the
+optimization deserves further effort, and the confirmation set is what any
+public claim rests on.
+"""
+
+[meta.densify_near_boundary]
+rule = """
+Predeclared before the screen runs. If the screen shows a sign change of the
+mode3-vs-mode1 speedup between two adjacent grid points on one ordered axis,
+that is one entry at or above 1.0 and its neighbour below 1.0, then the
+midpoint configuration is added to the confirmation set. Midpoints are added
+before any confirmation entry runs, and never after.
+"""
+ordered_axes = ["tau", "n", "threads"]
+unordered_axes = ["family", "modulus"]
+tau_midpoint = "arithmetic mean of the two tau values, rounded to two decimals"
+n_midpoint = "geometric mean of the two n values, rounded to the nearest 10"
+threads_midpoint = "geometric mean rounded to the nearest integer; 1 and 8 give 3"
+seed = "the confirmation seed of the family, as listed in the confirmation entries"
+limit = """
+At most six midpoint entries. If more pairs qualify, keep the six that
+straddle 1.0 most tightly, ranked by max(|ln s_low|, |ln s_high|) ascending,
+ties broken by entry id in ASCII order.
+"""
+record = """
+Each added midpoint is listed in [meta.amendments] midpoints, with its date,
+the pair it straddles, and the chain and chain_index it takes.
+"""
+
+[meta.confirm_chains]
+rule = """
+Every confirmation entry carries chain and chain_index. A chain is the
+ordered sweep of one family at modulus 2 and threads 1. chain_index runs 1,
+2, 3, ... with no gaps, and file order matches it. The decision rule in
+benchmarks/README.md reads a qualifying region as two or more consecutive
+entries of one chain, so this ordering is what "consecutive" means. An entry
+with chain = "none" varies one axis off its family baseline, stands alone,
+and belongs to no region. A midpoint from the densify-near-boundary rule
+joins the chain of the pair it straddles, and that chain renumbers so
+chain_index stays consecutive.
+"""
+cube = ["k-cube-t03", "k-cube-t05", "k-cube-t08", "k-cube-t10"]
+sphere = ["k-sphere-t05", "k-sphere-t08"]
+clusters = ["k-clusters-t05", "k-clusters-t08"]
+torus = ["k-torus-t05", "k-torus-t08"]
+none = ["k-cube-t05-th8", "k-clusters-t05-p5"]
+
+[[screen]]
+id = "a-cube-t03"
+family = "cube"
+n = 800
+coord_dim = 3
+max_dim = 2
+tau = 0.3
+modulus = 2
+threads = 1
+seed = 4201
+block = "a"
+
+[[screen]]
+id = "a-cube-t05"
+family = "cube"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+threads = 1
+seed = 4201
+block = "a"
+
+[[screen]]
+id = "a-cube-t08"
+family = "cube"
+n = 300
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 2
+threads = 1
+seed = 4201
+block = "a"
+
+[[screen]]
+id = "a-cube-t10"
+family = "cube"
+n = 200
+coord_dim = 3
+max_dim = 2
+tau = 1.0
+modulus = 2
+threads = 1
+seed = 4201
+block = "a"
+
+[[screen]]
+id = "a-sphere-t03"
+family = "sphere"
+n = 800
+coord_dim = 3
+max_dim = 2
+tau = 0.3
+modulus = 2
+threads = 1
+seed = 4201
+block = "a"
+
+[[screen]]
+id = "a-sphere-t05"
+family = "sphere"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+threads = 1
+seed = 4201
+block = "a"
+
+[[screen]]
+id = "a-sphere-t08"
+family = "sphere"
+n = 300
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 2
+threads = 1
+seed = 4201
+block = "a"
+
+[[screen]]
+id = "a-sphere-t10"
+family = "sphere"
+n = 200
+coord_dim = 3
+max_dim = 2
+tau = 1.0
+modulus = 2
+threads = 1
+seed = 4201
+block = "a"
+
+[[screen]]
+id = "a-clusters-t03"
+family = "clusters"
+n = 800
+coord_dim = 3
+max_dim = 2
+tau = 0.3
+modulus = 2
+threads = 1
+seed = 4201
+block = "a"
+
+[[screen]]
+id = "a-clusters-t05"
+family = "clusters"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+threads = 1
+seed = 4201
+block = "a"
+
+[[screen]]
+id = "a-clusters-t08"
+family = "clusters"
+n = 300
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 2
+threads = 1
+seed = 4201
+block = "a"
+
+[[screen]]
+id = "a-clusters-t10"
+family = "clusters"
+n = 200
+coord_dim = 3
+max_dim = 2
+tau = 1.0
+modulus = 2
+threads = 1
+seed = 4201
+block = "a"
+
+[[screen]]
+id = "a-torus-t03"
+family = "torus"
+n = 800
+coord_dim = 3
+max_dim = 2
+tau = 0.3
+modulus = 2
+threads = 1
+seed = 4201
+block = "a"
+
+[[screen]]
+id = "a-torus-t05"
+family = "torus"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+threads = 1
+seed = 4201
+block = "a"
+
+[[screen]]
+id = "a-torus-t08"
+family = "torus"
+n = 300
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 2
+threads = 1
+seed = 4201
+block = "a"
+
+[[screen]]
+id = "a-torus-t10"
+family = "torus"
+n = 200
+coord_dim = 3
+max_dim = 2
+tau = 1.0
+modulus = 2
+threads = 1
+seed = 4201
+block = "a"
+
+[[screen]]
+id = "b-cube-p5"
+family = "cube"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 5
+threads = 1
+seed = 4201
+block = "b"
+
+[[screen]]
+id = "b-cube-t8"
+family = "cube"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+threads = 8
+seed = 4201
+block = "b"
+
+[[screen]]
+id = "b-sphere-p5"
+family = "sphere"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 5
+threads = 1
+seed = 4201
+block = "b"
+
+[[screen]]
+id = "b-sphere-t8"
+family = "sphere"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+threads = 8
+seed = 4201
+block = "b"
+
+[[screen]]
+id = "b-clusters-p5"
+family = "clusters"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 5
+threads = 1
+seed = 4201
+block = "b"
+
+[[screen]]
+id = "b-clusters-t8"
+family = "clusters"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+threads = 8
+seed = 4201
+block = "b"
+
+[[screen]]
+id = "b-torus-p5"
+family = "torus"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 5
+threads = 1
+seed = 4201
+block = "b"
+
+[[screen]]
+id = "b-torus-t8"
+family = "torus"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+threads = 8
+seed = 4201
+block = "b"
+
+[[screen]]
+id = "c-cube-p5t8"
+family = "cube"
+n = 300
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 5
+threads = 8
+seed = 4201
+block = "c"
+
+[[screen]]
+id = "c-torus-p5t8"
+family = "torus"
+n = 300
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 5
+threads = 8
+seed = 4201
+block = "c"
+
+[[screen]]
+id = "d-cube-md1"
+family = "cube"
+n = 1500
+coord_dim = 3
+max_dim = 1
+tau = 0.3
+modulus = 2
+threads = 1
+seed = 4201
+block = "d"
+
+[[screen]]
+id = "d-sphere-md1"
+family = "sphere"
+n = 1500
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 2
+threads = 1
+seed = 4201
+block = "d"
+
+[[screen]]
+id = "d-cube5-md1"
+family = "cube"
+n = 1000
+coord_dim = 5
+max_dim = 1
+tau = 0.5
+modulus = 2
+threads = 1
+seed = 4201
+block = "d"
+
+[[screen]]
+id = "d-sphere5-md2"
+family = "sphere"
+n = 400
+coord_dim = 5
+max_dim = 2
+tau = 0.5
+modulus = 2
+threads = 1
+seed = 4201
+block = "d"
+
+# Held out. Do not run until the screen is complete and any
+# densify-near-boundary midpoints are appended. The chain and chain_index
+# fields declare the order the decision rule reads: see [meta.confirm_chains].
+
+[[confirm]]
+id = "k-cube-t03"
+family = "cube"
+n = 1200
+coord_dim = 3
+max_dim = 2
+tau = 0.3
+modulus = 2
+threads = 1
+seed = 9137
+block = "confirm"
+chain = "cube"
+chain_index = 1
+
+[[confirm]]
+id = "k-cube-t05"
+family = "cube"
+n = 750
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+threads = 1
+seed = 9137
+block = "confirm"
+chain = "cube"
+chain_index = 2
+
+[[confirm]]
+id = "k-cube-t08"
+family = "cube"
+n = 400
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 2
+threads = 1
+seed = 9137
+block = "confirm"
+chain = "cube"
+chain_index = 3
+
+[[confirm]]
+id = "k-cube-t10"
+family = "cube"
+n = 260
+coord_dim = 3
+max_dim = 2
+tau = 1.0
+modulus = 2
+threads = 1
+seed = 9137
+block = "confirm"
+chain = "cube"
+chain_index = 4
+
+[[confirm]]
+id = "k-cube-t05-th8"
+family = "cube"
+n = 750
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+threads = 8
+seed = 9137
+block = "confirm"
+chain = "none"
+chain_index = 0
+
+[[confirm]]
+id = "k-sphere-t05"
+family = "sphere"
+n = 750
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+threads = 1
+seed = 9138
+block = "confirm"
+chain = "sphere"
+chain_index = 1
+
+[[confirm]]
+id = "k-sphere-t08"
+family = "sphere"
+n = 400
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 2
+threads = 1
+seed = 9138
+block = "confirm"
+chain = "sphere"
+chain_index = 2
+
+[[confirm]]
+id = "k-clusters-t05"
+family = "clusters"
+n = 750
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+threads = 1
+seed = 9138
+block = "confirm"
+chain = "clusters"
+chain_index = 1
+
+[[confirm]]
+id = "k-clusters-t08"
+family = "clusters"
+n = 400
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 2
+threads = 1
+seed = 9138
+block = "confirm"
+chain = "clusters"
+chain_index = 2
+
+[[confirm]]
+id = "k-clusters-t05-p5"
+family = "clusters"
+n = 750
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 5
+threads = 1
+seed = 9138
+block = "confirm"
+chain = "none"
+chain_index = 0
+
+[[confirm]]
+id = "k-torus-t05"
+family = "torus"
+n = 750
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+threads = 1
+seed = 9139
+block = "confirm"
+chain = "torus"
+chain_index = 1
+
+[[confirm]]
+id = "k-torus-t08"
+family = "torus"
+n = 400
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 2
+threads = 1
+seed = 9139
+block = "confirm"
+chain = "torus"
+chain_index = 2

@@ -47,10 +47,17 @@ fn assert_same_diagram(a: &Diagram, b: &Diagram) {
 fn check(dist: &DistanceMatrix, max_dim: usize, threshold: Option<f64>) {
     for p in [2, 3, 5] {
         let expected = rips_persistence_oracle_mod(dist, max_dim, threshold, p);
-        let mut params = RipsParams::new(max_dim).with_modulus(p);
-        params.threshold = threshold;
-        let got = rips_persistence(dist, &params).unwrap();
-        assert_eq!(canonical(&got), canonical(&expected), "modulus {p}");
+        for collapse in [false, true] {
+            let mut params = RipsParams::new(max_dim).with_modulus(p);
+            params.threshold = threshold;
+            params.collapse_edges = collapse;
+            let got = rips_persistence(dist, &params).unwrap();
+            assert_eq!(
+                canonical(&got),
+                canonical(&expected),
+                "modulus {p}, collapse {collapse}"
+            );
+        }
     }
 }
 
@@ -70,8 +77,9 @@ fn exhaustive_two_valued_matrices() {
     }
 }
 
-// Release gate: all 2^15 two-valued matrices on 6 points, dims 0..=3, all 8
-// optimization-toggle combinations. The oracle runs once per matrix at
+// Release gate: all 2^15 two-valued matrices on 6 points, dims 0..=3, all 16
+// combinations of the three optimization toggles and edge collapse. The
+// oracle runs once per matrix at
 // max_dim 3. For a lower max_dim, the expectation is that result restricted
 // to bars of dimension <= max_dim. Reduction decomposes by dimension, and
 // the (k+1)-skeleton settles the essential dim-k classes.
@@ -124,7 +132,7 @@ fn sweep_one_matrix(mask: u32, modulus: u32) {
             .copied()
             .filter(|&(dim, _, _)| dim <= max_dim)
             .collect();
-        for bits in 0..8u8 {
+        for bits in 0..16u8 {
             let mut params = RipsParams::default();
             params.max_dim = max_dim;
             params.threshold = None;
@@ -132,11 +140,12 @@ fn sweep_one_matrix(mask: u32, modulus: u32) {
             params.use_emergent_pairs = bits & 1 != 0;
             params.use_apparent_pairs = bits & 2 != 0;
             params.use_clearing = bits & 4 != 0;
+            params.collapse_edges = bits & 8 != 0;
             let got = rips_persistence(&dist, &params).unwrap();
             assert_eq!(
                 canonical(&got),
                 expected,
-                "mask {mask:#06x}, modulus {modulus}, max_dim {max_dim}, toggles {bits:03b}"
+                "mask {mask:#06x}, modulus {modulus}, max_dim {max_dim}, toggles {bits:04b}"
             );
         }
     }

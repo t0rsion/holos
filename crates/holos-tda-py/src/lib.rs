@@ -10,10 +10,17 @@ use holos_tda::{
 
 type Bars = Vec<(usize, f64, f64)>;
 
-fn params(max_dim: usize, threshold: Option<f64>, modulus: u32, threads: usize) -> RipsParams {
+fn params(
+    max_dim: usize,
+    threshold: Option<f64>,
+    modulus: u32,
+    threads: usize,
+    collapse_edges: bool,
+) -> RipsParams {
     let mut p = RipsParams::new(max_dim).with_modulus(modulus);
     p.threshold = threshold;
     p.threads = threads.max(1);
+    p.collapse_edges = collapse_edges;
     p
 }
 
@@ -32,7 +39,7 @@ fn to_bars(mut diagram: holos_tda::Diagram) -> Bars {
 }
 
 #[pyfunction]
-#[pyo3(signature = (points, max_dim=1, threshold=None, modulus=2, threads=1))]
+#[pyo3(signature = (points, max_dim=1, threshold=None, modulus=2, threads=1, collapse_edges=false))]
 fn rips_points(
     py: Python<'_>,
     points: Vec<Vec<f64>>,
@@ -40,12 +47,16 @@ fn rips_points(
     threshold: Option<f64>,
     modulus: u32,
     threads: usize,
+    collapse_edges: bool,
 ) -> PyResult<Bars> {
     py.detach(|| {
         let dist = DistanceMatrix::from_points(&points).map_err(to_err)?;
-        rips_persistence(&dist, &params(max_dim, threshold, modulus, threads))
-            .map(to_bars)
-            .map_err(to_err)
+        rips_persistence(
+            &dist,
+            &params(max_dim, threshold, modulus, threads, collapse_edges),
+        )
+        .map(to_bars)
+        .map_err(to_err)
     })
 }
 
@@ -74,7 +85,7 @@ fn pdist_to_lower(data: Vec<f64>) -> Result<Vec<f64>, holos_tda::Error> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (data, max_dim=1, threshold=None, modulus=2, threads=1))]
+#[pyo3(signature = (data, max_dim=1, threshold=None, modulus=2, threads=1, collapse_edges=false))]
 fn rips_condensed(
     py: Python<'_>,
     data: Vec<f64>,
@@ -82,18 +93,24 @@ fn rips_condensed(
     threshold: Option<f64>,
     modulus: u32,
     threads: usize,
+    collapse_edges: bool,
 ) -> PyResult<Bars> {
     py.detach(|| {
         let lower = pdist_to_lower(data).map_err(to_err)?;
         let dist = DistanceMatrix::from_condensed(lower).map_err(to_err)?;
-        rips_persistence(&dist, &params(max_dim, threshold, modulus, threads))
-            .map(to_bars)
-            .map_err(to_err)
+        rips_persistence(
+            &dist,
+            &params(max_dim, threshold, modulus, threads, collapse_edges),
+        )
+        .map(to_bars)
+        .map_err(to_err)
     })
 }
 
+// The argument list mirrors the Python keyword signature one-to-one.
+#[allow(clippy::too_many_arguments)]
 #[pyfunction]
-#[pyo3(signature = (n, triplets, max_dim=1, threshold=None, modulus=2, threads=1))]
+#[pyo3(signature = (n, triplets, max_dim=1, threshold=None, modulus=2, threads=1, collapse_edges=false))]
 fn rips_sparse(
     py: Python<'_>,
     n: usize,
@@ -102,12 +119,16 @@ fn rips_sparse(
     threshold: Option<f64>,
     modulus: u32,
     threads: usize,
+    collapse_edges: bool,
 ) -> PyResult<Bars> {
     py.detach(|| {
         let dist = SparseDistanceMatrix::from_triplets(n, &triplets).map_err(to_err)?;
-        rips_persistence_sparse(&dist, &params(max_dim, threshold, modulus, threads))
-            .map(to_bars)
-            .map_err(to_err)
+        rips_persistence_sparse(
+            &dist,
+            &params(max_dim, threshold, modulus, threads, collapse_edges),
+        )
+        .map(to_bars)
+        .map_err(to_err)
     })
 }
 

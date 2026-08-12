@@ -22,32 +22,53 @@ fn vcs_info_hash(manifest: &str) -> Option<String> {
 }
 
 fn git_hash(manifest: &str) -> Option<String> {
-    let top = Command::new("git")
-        .args(["-C", manifest, "rev-parse", "--show-toplevel"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
-    let top = String::from_utf8_lossy(&top.stdout).trim().to_string();
-    // A crate unpacked inside an unrelated repository must not report that
-    // repository's commit as its own.
-    if Path::new(&top).canonicalize().ok()? != Path::new(manifest).canonicalize().ok()? {
-        return None;
-    }
-    // Watch the resolved ref, not just HEAD. Commits and amends on the same
-    // branch update the ref file, but leave HEAD unchanged.
-    println!("cargo:rerun-if-changed={top}/.git/HEAD");
-    if let Ok(head) = std::fs::read_to_string(format!("{top}/.git/HEAD")) {
-        if let Some(r) = head.trim().strip_prefix("ref: ") {
-            println!("cargo:rerun-if-changed={top}/.git/{r}");
+    // The crate sits below the workspace root, so the repository root is
+    // never the manifest directory. Ask git whether it tracks this crate's
+    // manifest instead. Sources extracted from a .crate archive are
+    // untracked, so a crate unpacked inside an unrelated repository still
+    // reports no hash.
+    git_run(manifest, &["ls-files", "--error-unmatch", "Cargo.toml"])?;
+    watch_head(manifest);
+    let hash = git_run(manifest, &["rev-parse", "--short=12", "HEAD"])?;
+    (!hash.is_empty()).then_some(hash)
+}
+
+/// Rerun the script when the checked-out commit changes. Watch the resolved
+/// ref, not just HEAD. Commits and amends on the same branch update the ref
+/// file, but leave HEAD unchanged.
+fn watch_head(manifest: &str) {
+    let Some(head) = git_file(manifest, "HEAD") else {
+        return;
+    };
+    if let Ok(text) = std::fs::read_to_string(&head) {
+        if let Some(r) = text.trim().strip_prefix("ref: ") {
+            if let Some(reference) = git_file(manifest, r) {
+                println!("cargo:rerun-if-changed={reference}");
+            }
         }
     }
-    if Path::new(&top).join(".git/packed-refs").exists() {
-        println!("cargo:rerun-if-changed={top}/.git/packed-refs");
+    println!("cargo:rerun-if-changed={head}");
+    if let Some(packed) = git_file(manifest, "packed-refs") {
+        println!("cargo:rerun-if-changed={packed}");
     }
-    let out = Command::new("git")
-        .args(["-C", manifest, "rev-parse", "--short=12", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
+}
+
+/// Locate a file in the git directory. `rev-parse --git-path` resolves it
+/// for linked worktrees too, where HEAD and packed-refs live apart. Returns
+/// None when the file is absent, because cargo reruns the script forever on
+/// a watched path that does not exist.
+fn git_file(manifest: &str, name: &str) -> Option<String> {
+    let path = git_run(manifest, &["rev-parse", "--git-path", name])?;
+    let path = Path::new(manifest).join(path);
+    if !path.is_file() {
+        return None;
+    }
+    Some(path.to_str()?.to_string())
+}
+
+fn git_run(dir: &str, args: &[&str]) -> Option<String> {
+    let mut cmd = Command::new("git");
+    cmd.args(["-C", dir]).args(args);
+    let out = cmd.output().ok().filter(|o| o.status.success())?;
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }

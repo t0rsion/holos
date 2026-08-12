@@ -92,8 +92,56 @@ bars = holos_tda.rips_points([[0, 0], [1, 0], [1, 1], [0, 1]], max_dim=1)
 ```
 
 `rips_condensed` and `rips_sparse` mirror the Rust entry points. All
-three accept `max_dim`, `threshold`, `modulus`, and `threads`. The
-`holos-tda` script is the same CLI as the Rust binary.
+three accept `max_dim`, `threshold`, `modulus`, `threads`, and
+`collapse_edges`. The `holos-tda` script is the same CLI as the Rust
+binary.
+
+## Edge collapse
+
+Edge collapse is optional preprocessing. It removes edges whose absence
+cannot change any bar, then the engine runs on the smaller graph. An edge
+qualifies only when, at every scale from the edge's own value to the end of
+the filtration, some common neighbor of its endpoints is joined to every
+other common neighbor at that scale. Removing such an edge leaves the
+persistent homology of the flag filtration unchanged in every dimension.
+The tests require bar-for-bar equality with the uncollapsed run, with no
+tolerance, across a battery of coefficient fields, thresholds, and thread
+counts, and every optimization-toggle combination.
+
+Every removal is recorded. The standalone API returns a certificate that
+lists each removed edge, its value, and the witnesses that justify it,
+together with the reduced graph. An independent verifier replays the
+certificate: it rebuilds the graph, checks each recorded witness directly at
+every scale where the edge's neighborhood changes (between those scales the
+checks carry over unchanged), and confirms that the reduced graph has no
+removable edge left.
+The verifier shares no code with the collapse, so a certificate that passes
+has been checked twice by different means.
+
+```sh
+holos points.csv --collapse-edges       # collapse statistics go to stderr
+```
+
+```rust
+let params = RipsParams::new(1).with_edge_collapse();
+```
+
+```python
+bars = holos_tda.rips_points(points, max_dim=1, collapse_edges=True)
+```
+
+For the certificate itself, use `collapse::collapse_dense` or
+`collapse::collapse_sparse`. They return the reduced matrix, the
+certificate, and run counters. The reduced graph does not depend on the
+coefficient field, the homology dimension, or the thread count, so one
+collapse can serve many runs.
+
+Collapse is off by default. It costs time to find the removable edges and it
+saves time only when it finds enough of them, so whether it pays depends on
+the input. Some graphs lose most of their edges and some lose none. Measure
+it on your own data with `benchmarks/collapse_bench.sh` in the repository's
+`benchmarks/` directory: it reports edge counts, wall time, and peak memory,
+and it validates the diagrams before it reports any timing.
 
 ## Correctness
 
