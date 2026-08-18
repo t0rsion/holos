@@ -10,17 +10,18 @@ barcodes over a prime field Z/p, with Z/2 as the default. It reads point
 clouds and dense or sparse distance matrices. The engine is implicit, in
 the same class as [ripser](https://github.com/Ripser/ripser). An
 independent oracle and ripser itself check every diagram in the test
-suite. The Rust crate
-is [`holos-tda`](https://crates.io/crates/holos-tda) (library path
-`holos_tda`, binary `holos`); the Python package is
+suite. The Rust crate is [`holos-tda`](https://crates.io/crates/holos-tda)
+(library path `holos_tda`, binary `holos`). The Python package is
 [`holos-tda`](https://pypi.org/project/holos-tda/) (import `holos_tda`).
 
 ## Status
 
-Work in progress. Dimensions 0 and 1 are the primary target. Higher
+Work in progress. Dimensions 0 and 1 are the primary target, and higher
 dimensions run through the same dimension-generic core. The engine runs
-serial by default; `--threads` enables parallel reduction. The diagram is
-identical at any thread count. See "Correctness" for the certified claims.
+serial by default. `--threads` sets the worker budget for the parallel
+reducer. With a parallel collapse schedule selected, `--threads` is the
+budget for the edge collapse as well. The diagram is identical at any
+thread count. See "Correctness" for what the release gates cover.
 
 ## Install
 
@@ -36,8 +37,8 @@ or from a checkout: `cargo install --path .`
 ## CLI
 
 ```sh
-# Point cloud (CSV: one point per line, comma/whitespace separated),
-# H0 and H1, threshold defaulting to the enclosing radius:
+# Point cloud (CSV: one point per line, comma or whitespace separated),
+# H0 and H1, threshold defaults to the enclosing radius:
 holos points.csv
 
 # Lower-distance matrix (ripser-compatible condensed lower triangle),
@@ -55,10 +56,10 @@ holos points.csv --threads 8
 holos --version
 ```
 
-holos infers the input format from the file extension: `.csv`, `.pts`,
+holos infers the input format from the file extension. `.csv`, `.pts`,
 and `.xyz` are point clouds; anything else is a lower-distance matrix.
-Sparse input must be requested with `--format`, which also overrides the
-inference. The diagram goes to stdout; computation metadata goes to
+Sparse input needs an explicit `--format`, which also overrides the
+inference. The diagram goes to stdout, and computation metadata goes to
 stderr.
 
 ## Library
@@ -100,30 +101,59 @@ binary.
 
 Edge collapse is optional preprocessing. It removes edges whose absence
 cannot change any bar, then the engine runs on the smaller graph. An edge
-qualifies only when, at every scale from the edge's own value to the end of
-the filtration, some common neighbor of its endpoints is joined to every
-other common neighbor at that scale. Removing such an edge leaves the
-persistent homology of the flag filtration unchanged in every dimension.
-The tests require bar-for-bar equality with the uncollapsed run, with no
-tolerance, across a battery of coefficient fields, thresholds, and thread
-counts, and every optimization-toggle combination.
+qualifies only when, at every scale from the edge's own value to the end
+of the filtration, some common neighbor of its endpoints is joined to
+every other common neighbor at that scale. Removing such an edge leaves
+the persistent homology of the flag filtration unchanged in every
+dimension. The tests require bar-for-bar equality with the uncollapsed
+run, with no tolerance. They cover several coefficient fields,
+thresholds, and thread counts, and every optimization-toggle
+combination.
 
-Every removal is recorded. The standalone API returns a certificate that
-lists each removed edge, its value, and the witnesses that justify it,
-together with the reduced graph. An independent verifier replays the
-certificate: it rebuilds the graph, checks each recorded witness directly at
-every scale where the edge's neighborhood changes (between those scales the
-checks carry over unchanged), and confirms that the reduced graph has no
-removable edge left.
-The verifier shares no code with the collapse, so a certificate that passes
-has been checked twice by different means.
+The collapse sweeps the edges in passes and deletes each qualifying edge
+as soon as it is found. This serial schedule is the default and, in the
+registered studies below, the fastest end to end on most inputs.
+
+Two parallel schedules are available. The ordered schedule runs the same
+sweep with worker threads. The workers test a window of upcoming edges
+against one frozen state of the graph, speculatively. The sweep then
+walks the window in its own order and reuses a test only when no
+deletion committed since that test could have changed it. The ordered
+schedule reproduces the serial result exactly, bit for bit, at any
+worker count. The rounds schedule deletes a batch of provably
+independent edges per round. Its result does not depend on the worker
+count either, but it is not the serial result, and on some inputs it
+keeps far fewer edges. Which edges survive can differ between the
+schedules; the diagram never does.
+
+The collapse records every removal. The standalone API returns a certificate
+that lists each removed edge, its value, the pass (or, for the rounds
+schedule, the round) it was removed in, and the witnesses that justify
+it, together with the reduced graph.
+
+An independent verifier replays the certificate. It rebuilds the graph
+and checks each recorded witness directly at every scale where the
+edge's neighborhood changes; between those scales the checks carry over
+unchanged. It then confirms that the reduced graph has no removable edge
+left. For a rounds certificate it also checks that the removals of each
+round are independent of each other. The verifier shares no sweep,
+scheduling, or witness-selection code with the collapse, so a
+certificate that passes has been checked twice by different means. The
+verifier certifies that every recorded removal preserves the barcode and
+that the reduced graph has no removable edge left. It does not certify
+that a run followed any particular scheduling policy. The certificate is
+an in-process value: there is no file format for it yet.
 
 ```sh
-holos points.csv --collapse-edges       # collapse statistics go to stderr
+holos points.csv --collapse-edges                              # serial schedule
+holos points.csv --collapse-edges --collapse-schedule ordered --threads 8
 ```
 
 ```rust
 let params = RipsParams::new(1).with_edge_collapse();
+let parallel = RipsParams::new(1)
+    .with_threads(8)
+    .with_collapse_schedule(holos_tda::CollapseSchedule::Ordered);
 ```
 
 ```python
@@ -131,17 +161,47 @@ bars = holos_tda.rips_points(points, max_dim=1, collapse_edges=True)
 ```
 
 For the certificate itself, use `collapse::collapse_dense` or
-`collapse::collapse_sparse`. They return the reduced matrix, the
-certificate, and run counters. The reduced graph does not depend on the
-coefficient field, the homology dimension, or the thread count, so one
-collapse can serve many runs.
+`collapse::collapse_sparse`, which take the threshold. The ordered
+schedule is `collapse::collapse_dense_ordered_parallel` and
+`collapse::collapse_sparse_ordered_parallel`, and the rounds schedule is
+`collapse::collapse_dense_rounds_parallel` and
+`collapse::collapse_sparse_rounds_parallel`; these take a worker count as
+well. The rounds schedule writes algorithm version 2 certificates, which
+the verifier checks round by round. All of them return the reduced
+matrix, the certificate, and run counters. The reduced graph does not
+depend on the coefficient field, the homology dimension, or the thread
+count, so one collapse can serve many runs.
 
-Collapse is off by default. It costs time to find the removable edges and it
-saves time only when it finds enough of them, so whether it pays depends on
-the input. Some graphs lose most of their edges and some lose none. Measure
-it on your own data with `benchmarks/collapse_bench.sh` in the repository's
-`benchmarks/` directory: it reports edge counts, wall time, and peak memory,
-and it validates the diagrams before it reports any timing.
+Collapse is off by default. Finding the removable edges costs time, and
+the collapse saves time only when it finds enough of them, so whether it
+pays depends on the input.
+
+<!-- Break-even numbers from benchmarks/results_collapse_confirm.md (v0.4.0 release records); scaling numbers from benchmarks/results_ordered_confirm.md and benchmarks/results_rounds_confirm.md. -->
+
+In the registered break-even study (held-out confirmation set, serial
+reducer, maxdim 2), the serial collapse won end to end on the cube family
+at every threshold fraction (median 2.85x, range 1.55x to 3.55x) and on
+the clusters family (median 2.22x). The sphere family's median was 3.80x
+over a wide range (0.62x to 6.99x: the near-full-radius entry loses). The
+torus family was within noise of break-even (median 1.14x). The mode that
+isolates the collapse itself from the sparse enumerator confirmed the
+gains come from the collapse. With the reducer already on eight threads,
+or at maxdim 1, the collapse often costs more than it saves. The parallel
+schedules do not change that picture.
+
+In the registered scaling studies (held-out confirmation sets, four
+physical cores with two threads each) the ordered schedule at four
+workers ran the median headline entry at 0.84x the serial collapse speed
+and the whole pipeline at 0.85x, and won end to end on three entries of
+thirteen, by at most 1.13x. The rounds
+schedule scaled its own collapse 4.8x from one worker to eight, but the
+whole pipeline was slower than the serial one on every confirmed entry:
+it tests many more edges to reach its fixed point, and that gap grows
+with the edge count. Records for every number are attached to the
+release. To measure your own data, run `benchmarks/collapse_bench.sh` in
+the repository's `benchmarks/` directory. It reports edge counts, wall
+time, and peak memory, and it validates the diagrams before it reports
+any timing.
 
 ## Correctness
 
@@ -149,29 +209,29 @@ Tests compare every diagram against an independent oracle
 (`src/oracle.rs`). The oracle is a textbook boundary-matrix reduction
 over Z/p. It shares no code with the solver, down to a different inverse
 algorithm. The comparison runs on exhaustive small spaces and on
-randomized inputs. Larger inputs are compared against ripser
+randomized inputs. The tests compare larger inputs against ripser
 (`RIPSER_BIN=... cargo test --test ripser_differential`); CI pins a fixed
 ripser commit and also builds its coefficient-enabled variant for
-`--modulus` runs. Sparse input is checked against the dense engine on the
+`--modulus` runs. They check sparse input against the dense engine on the
 same matrix and against ripser's sparse format. A projective-plane
 fixture pins the torsion behavior: its H1 and H2 exist over Z/2 and
 vanish over Z/3. Property tests cover permutation invariance, scaling
 equivariance, and the optimization toggles (clearing, emergent pairs,
 apparent pairs), which must not change the diagram.
 
-The oracle and ripser tests certify H0, H1, and H2, over Z/2 and odd
+The oracle and ripser gates cover H0, H1, and H2, over Z/2 and odd
 primes. Higher dimensions run through the same generic code but are not
-part of the certified claim. The parallel reducer must reproduce the
-serial diagram exactly: a determinism gate recomputes random clouds,
-tie-heavy grids, and degenerate fixtures at 1, 2, 4, and 8 threads over
-several moduli and requires bar-for-bar equality.
+part of that gated claim. The parallel reducer must reproduce the serial
+diagram exactly. A determinism gate recomputes random clouds, tie-heavy
+grids, and degenerate fixtures at 1, 2, 4, and 8 threads over several
+moduli, and requires bar-for-bar equality.
 
 ## Benchmarks
 
-Single-threaded, against ripser on identical lower-distance inputs
-(uniform random clouds in R^3). The harness fails if the two tools'
-diagrams disagree, so every timing below comes from a run with matching
-barcodes.
+The timings below are single-threaded, against ripser on identical
+lower-distance inputs (uniform random clouds in R^3). The harness fails
+if the two tools' diagrams disagree, so every timing comes from a run
+with matching barcodes.
 
 <!-- Table summarized from benchmarks/results.md; regenerate with run.sh. -->
 
@@ -185,8 +245,9 @@ barcodes.
 Peak memory is at parity with ripser across the run, including
 maxdim 2.
 
-Parallel scaling of the reducer on one cloud (N=400, maxdim 2). The
-harness asserts that the diagram is identical at every thread count.
+The next table shows parallel scaling of the reducer on one cloud
+(N=400, maxdim 2). The harness asserts that the diagram is identical at
+every thread count.
 
 <!-- Table summarized from benchmarks/results_parallel.md; regenerate with parallel_scaling.sh. -->
 

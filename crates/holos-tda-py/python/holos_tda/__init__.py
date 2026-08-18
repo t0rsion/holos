@@ -1,6 +1,6 @@
 """Vietoris-Rips persistent homology with a ripser-class engine.
 
-Thin Python bindings over the `holos-tda` Rust crate. Each function returns
+Thin Python bindings over the ``holos-tda`` Rust crate. Each function returns
 the persistence diagram as a list of ``(dim, birth, death)`` tuples in
 canonical order: by dimension, then birth, then death. Essential classes
 have ``death == math.inf``.

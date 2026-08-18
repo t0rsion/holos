@@ -40,9 +40,10 @@ impl DistanceMatrix {
         Ok(Self { n, data })
     }
 
-    /// Condensed lower triangle, row by row: d(1,0), d(2,0), d(2,1), d(3,0), ...
-    /// An empty vector means one point (n = 1). Only
-    /// [`DistanceMatrix::from_points`] can build an empty *space* (n = 0).
+    /// Build from the condensed lower triangle, row by row: d(1,0), d(2,0),
+    /// d(2,1), d(3,0), and so on. An empty vector means one point (n = 1).
+    /// Only [`DistanceMatrix::from_points`] can build an empty *space*
+    /// (n = 0).
     pub fn from_condensed(mut data: Vec<f64>) -> Result<Self> {
         let m = data.len();
         let n = ((1.0 + 8.0 * m as f64).sqrt() as usize).div_ceil(2);
@@ -90,15 +91,16 @@ impl DistanceMatrix {
         }
     }
 
-    /// min over i of max over j of d(i,j): the radius past which the complex
-    /// is a cone and acquires no further homology. This is the default
-    /// threshold. It does not change the full persistence result.
+    /// Return the minimum over i of the maximum over j of d(i,j). Past that
+    /// radius the complex is a cone and acquires no further homology, so it
+    /// is the default threshold. It does not change the full persistence
+    /// result.
     pub fn enclosing_radius(&self) -> f64 {
         if self.n < 2 {
             return 0.0;
         }
-        // One contiguous pass over the condensed lower triangle. Each
-        // distance folds into both endpoints' running maxima.
+        // Each distance folds into both endpoints' running maxima, so one
+        // pass over the condensed lower triangle is enough.
         let mut row_max = vec![0.0f64; self.n];
         let mut k = 0;
         for i in 1..self.n {
@@ -314,10 +316,11 @@ impl Distances for SparseDistanceMatrix {
         }
     }
 
-    /// Ripser's sparse coboundary: the only in-complex cofacets add a vertex
-    /// adjacent to every simplex vertex, so intersect the vertices' neighbor
-    /// lists instead of scanning all `n` candidates. This reproduces the
-    /// dense enumerator's index and `k` exactly. It tracks
+    /// Enumerate cofacets from the neighbor lists, as ripser's sparse
+    /// coboundary does. An in-complex cofacet adds a vertex adjacent to
+    /// every simplex vertex, so the enumeration intersects the vertices'
+    /// neighbor lists instead of scanning all `n` candidates. This
+    /// reproduces the dense enumerator's index and `k` exactly. It tracks
     /// `idx_below`/`idx_above` as the added vertex descends past the simplex
     /// vertices, the same way [`CofacetIter::advance`] does.
     fn for_each_cofacet<T>(

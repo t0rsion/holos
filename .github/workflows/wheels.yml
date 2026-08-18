@@ -21,7 +21,9 @@ permissions:
 
 jobs:
   # On tags, refuse to proceed unless the tag matches every declared version
-  # (core crate, py crate, pyproject); a stray or RC v* tag must not publish.
+  # (core crate, py crate, pyproject, benchmark driver); a stray or RC v* tag
+  # must not publish. The benchmark driver is not published, but its version
+  # is printed into the benchmark records attached to the release.
   version-check:
     runs-on: ubuntu-latest
     steps:
@@ -30,8 +32,10 @@ jobs:
           v_core=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/holos-tda/Cargo.toml | head -1)
           v_py=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/holos-tda-py/Cargo.toml | head -1)
           v_proj=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/holos-tda-py/pyproject.toml | head -1)
-          echo "core=$v_core py=$v_py pyproject=$v_proj ref=$GITHUB_REF"
-          [ "$v_core" = "$v_py" ] && [ "$v_core" = "$v_proj" ] || { echo "version mismatch"; exit 1; }
+          v_bench=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/collapse-bench/Cargo.toml | head -1)
+          echo "core=$v_core py=$v_py pyproject=$v_proj bench=$v_bench ref=$GITHUB_REF"
+          [ "$v_core" = "$v_py" ] && [ "$v_core" = "$v_proj" ] && [ "$v_core" = "$v_bench" ] \
+            || { echo "version mismatch"; exit 1; }
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             [ "$GITHUB_REF" = "refs/tags/v$v_core" ] || { echo "tag does not match version v$v_core"; exit 1; }
           fi
@@ -46,6 +50,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # Release order: merge the release branch into main, let CI go green,
+      # then tag the merged commit and push the tag. A tag off main fails
+      # here, and the fix is the order, not this step. It is the only check
+      # that the published tag carries the history CI tested, so do not
+      # relax it because a release branch is not merged yet.
       - name: On tags, require the tag to lie on the tested main history
         run: |
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
@@ -54,8 +63,21 @@ jobs:
           fi
       - uses: dtolnay/rust-toolchain@stable
       - uses: dtolnay/rust-toolchain@1.85
+      # The differential suites skip themselves when RIPSER_BIN is unset, so
+      # without ripser this release gate tests less than ci.yml does. ripser
+      # builds from one source file, and the suites run inside the workspace
+      # test below, so this adds a clone and a compile, not a test run.
+      - name: Build ripser at pinned commit
+        run: |
+          git clone https://github.com/Ripser/ripser.git "$RUNNER_TEMP/ripser"
+          # PINNED upstream commit; keep it equal to the commit in ci.yml.
+          git -C "$RUNNER_TEMP/ripser" checkout 01add51ff64aaf40889483260cc5c3b7d0f2a1e7
+          make -C "$RUNNER_TEMP/ripser" ripser ripser-coeff
       - name: Test the workspace at the tag
-        run: cargo +stable test --workspace --locked
+        run: >-
+          RIPSER_BIN="$RUNNER_TEMP/ripser/ripser"
+          RIPSER_COEFF_BIN="$RUNNER_TEMP/ripser/ripser-coeff"
+          cargo +stable test --workspace --locked
       - name: Package, extract, and test the package at the MSRV
         run: |
           cargo +stable package -p holos-tda --locked

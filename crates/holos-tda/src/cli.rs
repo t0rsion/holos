@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::io::{self, OutputFormat};
-use crate::{DistanceMatrix, RipsParams};
+use crate::{CollapseSchedule, DistanceMatrix, RipsParams};
 use clap::{Parser, ValueEnum};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -11,6 +11,23 @@ enum InputFormat {
     PointCloud,
     LowerDistance,
     Sparse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Schedule {
+    Serial,
+    Ordered,
+    Rounds,
+}
+
+impl From<Schedule> for CollapseSchedule {
+    fn from(s: Schedule) -> Self {
+        match s {
+            Schedule::Serial => CollapseSchedule::Serial,
+            Schedule::Ordered => CollapseSchedule::Ordered,
+            Schedule::Rounds => CollapseSchedule::Rounds,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -56,8 +73,9 @@ struct Cli {
     #[arg(long, value_name = "P", default_value_t = 2)]
     modulus: u32,
 
-    /// Reduction worker threads (1 = serial). The diagram is identical at
-    /// any thread count
+    /// Worker threads for the reduction, and for the collapse when
+    /// --collapse-schedule is ordered or rounds (1 = serial). The diagram
+    /// is identical at any thread count
     #[arg(long, value_name = "N", default_value_t = 1)]
     threads: usize,
 
@@ -65,6 +83,15 @@ struct Cli {
     /// identical either way; collapse statistics go to stderr
     #[arg(long)]
     collapse_edges: bool,
+
+    /// Collapse schedule; requires --collapse-edges. serial is the
+    /// default and, in the registered studies, the fastest end to end on
+    /// most inputs; ordered reproduces the serial result on parallel
+    /// workers; rounds runs a different schedule, also the same at every
+    /// thread count, that can keep far fewer edges. The diagram is
+    /// identical under every schedule
+    #[arg(long, value_enum, value_name = "SCHEDULE")]
+    collapse_schedule: Option<Schedule>,
 
     /// Output format
     #[arg(long, value_enum, default_value_t = DiagramFormat::Ripser)]
@@ -95,26 +122,26 @@ fn infer_format(path: &Path) -> InputFormat {
     }
 }
 
-// Collapse through the standalone API so the statistics are available,
-// then hand the engine the reduced graph directly.
-fn collapse_and_run(
-    collapsed: crate::collapse::CollapsedRips,
-    params: &RipsParams,
-) -> crate::Result<crate::Diagram> {
+// Report the collapse before the reduction starts. The pipeline owns the
+// collapse result and, for a parallel schedule, shares one worker pool
+// across both phases, so the statistics come out of it rather than from a
+// separate standalone call.
+fn report_collapse(collapsed: &crate::collapse::CollapsedRips) {
     let s = &collapsed.stats;
+    let epoch = if collapsed.certificate.algorithm_version() == 2 {
+        "rounds"
+    } else {
+        "passes"
+    };
     eprintln!(
-        "collapse: kept {} of {} edges, removed {}, {} passes",
-        s.output_edges, s.input_edges, s.removed_edges, s.passes
+        "collapse: kept {} of {} edges, removed {}, {} {epoch}",
+        s.output_edges, s.input_edges, s.removed_edges, s.epochs
     );
     eprintln!(
         "collapse detail: {} edge tests, {} witness segments, \
          max common neighborhood {}",
         s.edge_tests, s.witness_segments, s.max_common_neighborhood
     );
-    let mut inner = params.clone();
-    inner.collapse_edges = false;
-    inner.threshold = Some(collapsed.certificate.terminal_level());
-    crate::rips_persistence_sparse(&collapsed.matrix, &inner)
 }
 
 fn run(cli: Cli) -> crate::Result<()> {
@@ -129,7 +156,13 @@ fn run(cli: Cli) -> crate::Result<()> {
         use_apparent_pairs: !cli.no_apparent_pairs,
         use_clearing: !cli.no_clearing,
         collapse_edges: false,
+        collapse_schedule: cli.collapse_schedule.unwrap_or(Schedule::Serial).into(),
     };
+    if cli.collapse_schedule.is_some() && !cli.collapse_edges {
+        return Err(crate::Error::InvalidInput(
+            "--collapse-schedule requires --collapse-edges".into(),
+        ));
+    }
     let (mut diagram, n_points) = match format {
         InputFormat::Sparse => {
             let dist = io::read_sparse_matrix(&cli.input)?;
@@ -147,8 +180,7 @@ fn run(cli: Cli) -> crate::Result<()> {
             }
             let n = dist.len();
             let diagram = if cli.collapse_edges {
-                let collapsed = crate::collapse::collapse_sparse(&dist, cli.threshold)?;
-                collapse_and_run(collapsed, &params)?
+                crate::collapse_and_solve(&dist, &params, report_collapse)?
             } else {
                 crate::rips_persistence_sparse(&dist, &params)?
             };
@@ -172,8 +204,7 @@ fn run(cli: Cli) -> crate::Result<()> {
             }
             let n = dist.len();
             let diagram = if cli.collapse_edges {
-                let collapsed = crate::collapse::collapse_dense(&dist, cli.threshold)?;
-                collapse_and_run(collapsed, &params)?
+                crate::collapse_and_solve(&dist, &params, report_collapse)?
             } else {
                 crate::rips_persistence(&dist, &params)?
             };

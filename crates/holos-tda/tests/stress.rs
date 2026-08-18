@@ -41,10 +41,18 @@ fn oracle_bars(dist: &DistanceMatrix, max_dim: usize, threshold: Option<f64>, p:
     rips_persistence_oracle_mod(dist, max_dim, threshold, p).bars
 }
 
-fn check(dist: &DistanceMatrix, max_dim: usize, threshold: Option<f64>, p: u32, ctx: &str) {
-    let oracle = Diagram {
+// `ctx` describes the case in a failure message. It is a closure because
+// the sweeps call this once per case: only a failure needs the string.
+fn check(
+    dist: &DistanceMatrix,
+    max_dim: usize,
+    threshold: Option<f64>,
+    p: u32,
+    ctx: impl Fn() -> String,
+) {
+    let oracle = canonical(&Diagram {
         bars: oracle_bars(dist, max_dim, threshold, p),
-    };
+    });
     for collapse in [false, true] {
         let mut params = RipsParams::new(max_dim).with_modulus(p);
         params.threshold = threshold;
@@ -52,8 +60,9 @@ fn check(dist: &DistanceMatrix, max_dim: usize, threshold: Option<f64>, p: u32, 
         let solver = rips_persistence(dist, &params).unwrap();
         assert_eq!(
             canonical(&solver),
-            canonical(&oracle),
-            "solver != oracle: {ctx} collapse={collapse}"
+            oracle,
+            "solver != oracle: {} collapse={collapse}",
+            ctx()
         );
     }
 }
@@ -139,7 +148,7 @@ fn exhaustive_seven_point_zero_one_sweep() {
                 .map(|i| if mask >> i & 1 == 1 { 1.0 } else { 0.5 })
                 .collect();
             let dist = DistanceMatrix::from_condensed(data).unwrap();
-            check(&dist, 2, None, p, &format!("mask {mask:#x} p {p}"));
+            check(&dist, 2, None, p, || format!("mask {mask:#x} p {p}"));
         }
     }
 }
@@ -199,7 +208,7 @@ fn ultrametrics_have_no_higher_homology() {
             "iter {it}: ultrametric produced homology above dim 0 (n={n})"
         );
         if n <= 9 {
-            check(&dist, 2, None, 3, &format!("ultrametric iter {it} n={n}"));
+            check(&dist, 2, None, 3, || format!("ultrametric iter {it} n={n}"));
         }
     }
 }
@@ -218,7 +227,7 @@ fn maximum_prime_modulus() {
             .map(|i| if mask >> i & 1 == 1 { 1.0 } else { 0.5 })
             .collect();
         let dist = DistanceMatrix::from_condensed(data).unwrap();
-        check(&dist, 2, None, p, &format!("max-prime mask {mask:#x}"));
+        check(&dist, 2, None, p, || format!("max-prime mask {mask:#x}"));
     }
 
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -1,6 +1,5 @@
-//! A simplex as it travels through the reduction: a filtration diameter and a
-//! combinadic index. The engine recovers vertices on demand by unranking the
-//! index.
+//! A simplex in the reduction: a filtration diameter and a combinadic index.
+//! The engine unranks the index to recover the vertices on demand.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Simplex {

@@ -24,7 +24,7 @@ impl UnionFind {
         root
     }
 
-    /// Callers must pass roots.
+    /// Merge two trees by rank. `x` and `y` must both be roots.
     pub fn link(&mut self, x: usize, y: usize) {
         debug_assert!(self.parent[x] == x && self.parent[y] == y);
         if self.rank[x] < self.rank[y] {

@@ -8,7 +8,7 @@
 //!
 //! Each pivot's V-column lives in its table entry, so a reader observes an
 //! owner and its V-column as one consistent snapshot. All coboundary
-//! arithmetic reuses the `&self` cores in [`crate::reduce`].
+//! arithmetic reuses the `&self` methods in [`crate::reduce`].
 
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -144,7 +144,7 @@ struct Scratch {
     verts: Vec<usize>,
 }
 
-/// One column's reduction pass reached one of these terminal states.
+/// The state in which one reduction pass over a column ended.
 enum Pass {
     /// Owns a pivot; carries a column it displaced (to re-reduce), if any.
     Owned(Option<usize>),

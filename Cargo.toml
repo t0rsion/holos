@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/holos-tda", "crates/holos-tda-py"]
+members = ["crates/collapse-bench", "crates/holos-tda", "crates/holos-tda-py"]
 
 # Profiles apply from the workspace root only; member profiles are ignored.
 [profile.release]
@@ -10,4 +10,3 @@ codegen-units = 1
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
-lto = "thin"

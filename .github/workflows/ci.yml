@@ -55,9 +55,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Must match rust-version in Cargo.toml.
+      # Must match rust-version in every crate manifest.
       - uses: dtolnay/rust-toolchain@1.85
-      - run: cargo build -p holos-tda --all-targets --locked
+      - run: cargo build --workspace --all-targets --locked
 
   test:
     strategy:

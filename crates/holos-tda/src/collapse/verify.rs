@@ -1,9 +1,16 @@
-//! Independent checker for [`CollapseCertificate`](super::CollapseCertificate).
+//! Independent checker for [`CollapseCertificate`].
 //!
 //! The checker re-derives the thresholded input and replays every
 //! recorded removal against the spec text. It shares no sweep,
-//! scheduling, or witness-selection code with the collapser; it is slow
-//! by design and exists to catch a wrong collapse, not to be fast.
+//! scheduling, or witness-selection code with the collapser. It is slow
+//! by design: its job is to catch a wrong collapse.
+//!
+//! The checker dispatches on the certificate's algorithm version.
+//! Version 1 replays the serial schedule: each step is checked against
+//! the graph left by the steps before it. Version 2 replays the rounds
+//! schedule: steps are grouped by round, every check in a round runs
+//! against the graph as it stood before the round, and the round's edges
+//! are deleted only after the whole round passes.
 //!
 //! A passing certificate establishes:
 //!
@@ -11,40 +18,49 @@
 //!   level, and input and output edge counts all match the input, the
 //!   output matrix, and each other.
 //! - Replay safety: each step removes a live edge with the recorded
-//!   value, and at every critical value of the current graph the active
-//!   witness apex satisfies the domination inequalities. Every witness
-//!   segment starts at an independently recomputed critical value at or
-//!   below the terminal level, so every segment is the active segment at
-//!   its own start and no segment escapes the apex check.
+//!   value, and at every critical value of the reference graph the
+//!   active witness apex satisfies the domination inequalities. The
+//!   reference graph is the current replay state for version 1 and the
+//!   pre-round snapshot for version 2. Every witness segment starts at
+//!   an independently recomputed critical value at or below the terminal
+//!   level, so every segment is the active segment at its own start and
+//!   no segment escapes the apex check.
 //! - Witness-rule fidelity: the segments are exactly what the frozen
-//!   selection rule produces. A kept apex still dominates. A new segment
-//!   opens only where the previous apex stopped dominating, and its apex
-//!   is the first dominating vertex of the candidate set in increasing
-//!   vertex order.
-//! - Schedule order: the first step is in pass 1, pass numbers never
-//!   decrease and never skip a pass, and steps inside one pass follow the
+//!   selection rule produces on the reference graph. A kept apex still
+//!   dominates. A new segment opens only where the previous apex stopped
+//!   dominating, and its apex is the first dominating vertex of the
+//!   candidate set in increasing vertex order.
+//! - Schedule order: the first schedule epoch is 1, epoch numbers never
+//!   decrease and never skip, and steps inside one epoch follow the
 //!   frozen edge order: value descending, ties by ascending combinadic
 //!   index of the endpoint pair.
+//! - Round independence, version 2 only: for every ordered pair of steps
+//!   in one round, the closed common neighborhood of the first edge,
+//!   taken in the snapshot, does not contain both endpoints of the
+//!   second. A round that groups conflicting removals is rejected even
+//!   when replaying its steps one after the other would succeed.
 //! - Output and fixed point: after the last step the live edges equal the
 //!   output matrix bit for bit, and no live edge is still removable.
 //!
-//! The checker does not certify schedule completeness. Every recorded
-//! step is checked, but nothing proves the schedule visited every edge:
-//! a certificate may skip a removable edge, remove it later than the
-//! frozen schedule would, or leave it out entirely as long as the final
-//! graph is a fixed point. Removing a different safe subset in a
-//! different order therefore verifies. Only a full re-run establishes
-//! the canonical production trace; the test suite does that by comparing
-//! production certificates against an unpruned reference collapser.
+//! The checker does not certify schedule completeness, in either
+//! version. Every recorded step is checked, but nothing proves the
+//! schedule visited every edge: a certificate may skip a removable edge,
+//! remove it later than the frozen schedule would, or leave it out
+//! entirely as long as the final graph is a fixed point. For version 2
+//! nothing proves a round is a greedy-maximal batch either. Removing a
+//! different safe subset in a different order or grouping therefore
+//! verifies. Only a full re-run establishes the canonical production
+//! trace; the test suite does that by comparing production certificates
+//! against unpruned reference collapsers.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use super::CollapsedRips;
+use super::{CollapseCertificate, CollapsedRips, RemovalStep};
 use crate::{DistanceMatrix, SparseDistanceMatrix};
 
-/// A failed certificate check: which step failed (when one did) and what
+/// A failed certificate check: which step failed, when one did, and what
 /// rule it broke.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifyError {
@@ -100,7 +116,10 @@ pub fn verify_sparse(
 ) -> Result<(), VerifyError> {
     let n = dist.len();
     let resolved = resolve_threshold(threshold, || f64::INFINITY)?;
-    let edges: Vec<(usize, usize, f64)> = dist.edges().filter(|&(_, _, d)| d <= resolved).collect();
+    let edges: Vec<(usize, usize, f64)> = dist
+        .edges()
+        .filter(|&(_, _, d)| d.is_finite() && d <= resolved)
+        .collect();
     verify_common(n, threshold, resolved, &edges, result)
 }
 
@@ -204,6 +223,416 @@ fn edge_removable(adj: &[BTreeMap<usize, f64>], u: usize, v: usize, a: f64, term
     })
 }
 
+/// Check that the step names a valid vertex pair; return the endpoints and
+/// the recorded value.
+fn check_edge_pair(
+    n: usize,
+    k: usize,
+    step: &RemovalStep,
+) -> Result<(usize, usize, f64), VerifyError> {
+    let (u, v) = step.edge();
+    if u >= v || v >= n {
+        return Err(fail(
+            Some(k),
+            format!("edge ({u}, {v}) is not a valid vertex pair for n = {n}"),
+        ));
+    }
+    Ok((u, v, step.value()))
+}
+
+/// Check that the edge is live in `adj` with the recorded value, bit for
+/// bit.
+fn check_live_value(
+    adj: &[BTreeMap<usize, f64>],
+    k: usize,
+    u: usize,
+    v: usize,
+    a: f64,
+) -> Result<(), VerifyError> {
+    match adj[u].get(&v) {
+        None => Err(fail(
+            Some(k),
+            format!("edge ({u}, {v}) is not live at this step"),
+        )),
+        Some(&live) if live.to_bits() != a.to_bits() => Err(fail(
+            Some(k),
+            format!("edge ({u}, {v}) value mismatch: step records {a}, graph has {live}"),
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
+/// True when `(a, lex)` breaks the frozen order after `prev`: value
+/// descending, ties by ascending `(v, u)`.
+fn breaks_schedule_order(prev: Option<(f64, (usize, usize))>, a: f64, lex: (usize, usize)) -> bool {
+    match prev {
+        None => false,
+        Some((prev_value, prev_index)) => match a.total_cmp(&prev_value) {
+            Ordering::Greater => true,
+            Ordering::Equal => lex <= prev_index,
+            Ordering::Less => false,
+        },
+    }
+}
+
+/// Validate the step's witness segments against `adj` with the full frozen
+/// selection rule.
+fn check_witnesses(
+    adj: &[BTreeMap<usize, f64>],
+    n: usize,
+    terminal: f64,
+    k: usize,
+    edge: (usize, usize, f64),
+    segments: &[(f64, usize)],
+) -> Result<(), VerifyError> {
+    let (u, v, a) = edge;
+    let Some(&(first_start, _)) = segments.first() else {
+        return Err(fail(Some(k), "step has no witness segments"));
+    };
+    if first_start.to_bits() != a.to_bits() {
+        return Err(fail(
+            Some(k),
+            format!("first witness segment starts at {first_start}, edge value is {a}"),
+        ));
+    }
+    for &(s, w) in segments {
+        if s.is_nan() {
+            return Err(fail(Some(k), "witness segment start is NaN"));
+        }
+        if s > terminal {
+            return Err(fail(
+                Some(k),
+                format!("witness segment starts at {s}, after terminal level {terminal}"),
+            ));
+        }
+        if w >= n {
+            return Err(fail(
+                Some(k),
+                format!("witness apex {w} is not a vertex index for n = {n}"),
+            ));
+        }
+    }
+    for pair in segments.windows(2) {
+        if pair[1].0 <= pair[0].0 {
+            return Err(fail(
+                Some(k),
+                format!(
+                    "witness segment starts are not strictly increasing: {} then {}",
+                    pair[0].0, pair[1].0
+                ),
+            ));
+        }
+    }
+
+    let cands = candidates(adj, u, v, a, terminal);
+    let crits = critical_values(a, &cands);
+    if segments.len() > crits.len() {
+        return Err(fail(
+            Some(k),
+            format!(
+                "{} witness segments exceed {} critical values",
+                segments.len(),
+                crits.len()
+            ),
+        ));
+    }
+    for &(s, _) in segments {
+        if !crits.iter().any(|&c| c.to_bits() == s.to_bits()) {
+            return Err(fail(
+                Some(k),
+                format!("witness segment start {s} is not a critical value of the current graph"),
+            ));
+        }
+    }
+    for &t in &crits {
+        let mut active = None;
+        for (i, &(s, w)) in segments.iter().enumerate() {
+            if s <= t {
+                active = Some((i, s, w));
+            } else {
+                break;
+            }
+        }
+        let Some((seg_index, seg_start, w)) = active else {
+            return Err(fail(
+                Some(k),
+                format!("no witness segment is active at critical value {t}"),
+            ));
+        };
+        if w == u || w == v {
+            return Err(fail(
+                Some(k),
+                format!("apex {w} is an endpoint of edge ({u}, {v})"),
+            ));
+        }
+        let fu = edge_value(adj, u, w);
+        let fv = edge_value(adj, v, w);
+        if !fu.is_finite() || !fv.is_finite() {
+            return Err(fail(
+                Some(k),
+                format!("apex {w} is not a common neighbor of {u} and {v}"),
+            ));
+        }
+        let bw = a.max(fu).max(fv);
+        if bw > t {
+            return Err(fail(
+                Some(k),
+                format!("apex {w} enters at {bw}, after critical value {t}"),
+            ));
+        }
+        for &(x, bx) in &cands {
+            if bx <= t {
+                let fwx = edge_value(adj, w, x);
+                if fwx > t {
+                    return Err(fail(
+                        Some(k),
+                        format!(
+                            "apex {w} does not dominate at critical value {t}: f({w}, {x}) = {fwx}"
+                        ),
+                    ));
+                }
+            }
+        }
+        if seg_start.to_bits() == t.to_bits() {
+            if seg_index > 0 {
+                let prev_w = segments[seg_index - 1].1;
+                if vertex_dominates(adj, u, v, a, &cands, prev_w, t) {
+                    return Err(fail(
+                        Some(k),
+                        format!(
+                            "segment starting at {t} is redundant: previous apex {prev_w} still dominates"
+                        ),
+                    ));
+                }
+            }
+            for &(x, bx) in &cands {
+                if x >= w {
+                    break;
+                }
+                if bx <= t && vertex_dominates(adj, u, v, a, &cands, x, t) {
+                    return Err(fail(
+                        Some(k),
+                        format!(
+                            "apex {w} is not the first dominating vertex at {t}: vertex {x} also dominates"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Replay a version 1 certificate: serial passes, each step checked
+/// against the graph left by the steps before it.
+fn replay_serial(
+    adj: &mut [BTreeMap<usize, f64>],
+    n: usize,
+    terminal: f64,
+    cert: &CollapseCertificate,
+) -> Result<(), VerifyError> {
+    let mut prev_pass = 1usize;
+    let mut prev_key: Option<(f64, (usize, usize))> = None;
+    for (k, step) in cert.steps().iter().enumerate() {
+        if step.epoch() == 0 {
+            return Err(fail(
+                Some(k),
+                "pass number 0 is invalid; passes are 1-based",
+            ));
+        }
+        if k == 0 {
+            if step.epoch() != 1 {
+                return Err(fail(
+                    Some(k),
+                    format!("first step is in pass {}, expected pass 1", step.epoch()),
+                ));
+            }
+        } else if step.epoch() < prev_pass {
+            return Err(fail(
+                Some(k),
+                format!("pass number {} decreases from {prev_pass}", step.epoch()),
+            ));
+        } else if step.epoch() > prev_pass + 1 {
+            return Err(fail(
+                Some(k),
+                format!("pass number {} skips pass {}", step.epoch(), prev_pass + 1),
+            ));
+        }
+        if step.epoch() != prev_pass {
+            prev_key = None;
+        }
+        prev_pass = step.epoch();
+
+        let (u, v, a) = check_edge_pair(n, k, step)?;
+        // (v, u) orders exactly like the combinadic index v*(v-1)/2 + u for
+        // u < v, and the field compare cannot overflow.
+        let lex = (v, u);
+        if breaks_schedule_order(prev_key, a, lex) {
+            return Err(fail(
+                Some(k),
+                format!(
+                    "edge ({u}, {v}) with value {a} breaks the schedule order within pass {}",
+                    step.epoch()
+                ),
+            ));
+        }
+        prev_key = Some((a, lex));
+        check_live_value(adj, k, u, v, a)?;
+        check_witnesses(adj, n, terminal, k, (u, v, a), step.witnesses())?;
+
+        adj[u].remove(&v);
+        adj[v].remove(&u);
+    }
+    Ok(())
+}
+
+/// True when `x` lies in the closed common neighborhood of the live edge
+/// `{u, v}`: `x` is an endpoint or is adjacent to both endpoints.
+fn in_closed_common(adj: &[BTreeMap<usize, f64>], u: usize, v: usize, x: usize) -> bool {
+    let near_u = x == u || adj[u].contains_key(&x);
+    let near_v = x == v || adj[v].contains_key(&x);
+    near_u && near_v
+}
+
+/// Replay a version 2 certificate: snapshot rounds. Each round is checked
+/// in full against the pre-round graph; deletions apply only after the
+/// whole round passes.
+fn replay_rounds(
+    adj: &mut [BTreeMap<usize, f64>],
+    n: usize,
+    terminal: f64,
+    cert: &CollapseCertificate,
+) -> Result<(), VerifyError> {
+    let steps = cert.steps();
+
+    let mut rounds: Vec<(usize, usize)> = Vec::new();
+    for (k, step) in steps.iter().enumerate() {
+        let r = step.epoch();
+        if r == 0 {
+            return Err(fail(
+                Some(k),
+                "round number 0 is invalid; rounds are 1-based",
+            ));
+        }
+        match rounds.last_mut() {
+            None => {
+                if r != 1 {
+                    return Err(fail(
+                        Some(k),
+                        format!("first step is in round {r}, expected round 1"),
+                    ));
+                }
+                rounds.push((k, k + 1));
+            }
+            Some(last) => {
+                let prev = steps[last.1 - 1].epoch();
+                if r < prev {
+                    return Err(fail(
+                        Some(k),
+                        format!("round number {r} decreases from {prev}"),
+                    ));
+                }
+                if r > prev + 1 {
+                    return Err(fail(
+                        Some(k),
+                        format!("round number {r} skips round {}", prev + 1),
+                    ));
+                }
+                if r == prev {
+                    last.1 = k + 1;
+                } else {
+                    rounds.push((k, k + 1));
+                }
+            }
+        }
+    }
+
+    for &(start, end) in &rounds {
+        let round = steps[start].epoch();
+        let round_steps = &steps[start..end];
+
+        let mut prev_key: Option<(f64, (usize, usize))> = None;
+        for (off, step) in round_steps.iter().enumerate() {
+            let k = start + off;
+            let (u, v, a) = check_edge_pair(n, k, step)?;
+            // (v, u) orders exactly like the combinadic index v*(v-1)/2 + u
+            // for u < v, and the field compare cannot overflow.
+            let lex = (v, u);
+            if breaks_schedule_order(prev_key, a, lex) {
+                return Err(fail(
+                    Some(k),
+                    format!(
+                        "edge ({u}, {v}) with value {a} breaks the schedule order within round {round}"
+                    ),
+                ));
+            }
+            prev_key = Some((a, lex));
+            check_live_value(adj, k, u, v, a)?;
+        }
+
+        // Independence: no other removal of the round may have both
+        // endpoints in the closed common neighborhood of this one. The
+        // check walks each neighborhood instead of every pair of steps, so
+        // a wide round of small neighborhoods costs the sum of the
+        // neighborhood sizes squared, not the round width squared.
+        let in_round: BTreeMap<(usize, usize), usize> = round_steps
+            .iter()
+            .enumerate()
+            .map(|(k, step)| (step.edge(), k))
+            .collect();
+        for (ka, e) in round_steps.iter().enumerate() {
+            let (eu, ev) = e.edge();
+            let mut closed: Vec<usize> = adj[eu]
+                .keys()
+                .filter(|x| adj[ev].contains_key(x))
+                .copied()
+                .collect();
+            closed.push(eu);
+            closed.push(ev);
+            closed.sort_unstable();
+            debug_assert!(closed.iter().all(|&x| in_closed_common(adj, eu, ev, x)));
+            let mut conflict: Option<usize> = None;
+            for (i, &x) in closed.iter().enumerate() {
+                for &y in &closed[i + 1..] {
+                    if let Some(&kb) = in_round.get(&(x, y)) {
+                        if kb != ka && conflict.is_none_or(|c| kb < c) {
+                            conflict = Some(kb);
+                        }
+                    }
+                }
+            }
+            if let Some(kb) = conflict {
+                let (fu, fv) = round_steps[kb].edge();
+                return Err(fail(
+                    Some(start + kb),
+                    format!(
+                        "round {round} groups conflicting removals: both endpoints of ({fu}, {fv}) lie in the closed common neighborhood of ({eu}, {ev})"
+                    ),
+                ));
+            }
+        }
+
+        for (off, step) in round_steps.iter().enumerate() {
+            let (u, v) = step.edge();
+            check_witnesses(
+                adj,
+                n,
+                terminal,
+                start + off,
+                (u, v, step.value()),
+                step.witnesses(),
+            )?;
+        }
+
+        for step in round_steps {
+            let (u, v) = step.edge();
+            adj[u].remove(&v);
+            adj[v].remove(&u);
+        }
+    }
+    Ok(())
+}
+
 fn verify_common(
     n: usize,
     requested: Option<f64>,
@@ -213,13 +642,11 @@ fn verify_common(
 ) -> Result<(), VerifyError> {
     let cert = &result.certificate;
 
-    if cert.algorithm_version() != 1 {
+    let version = cert.algorithm_version();
+    if version != 1 && version != 2 {
         return Err(fail(
             None,
-            format!(
-                "unsupported algorithm version {} (expected 1)",
-                cert.algorithm_version()
-            ),
+            format!("unsupported algorithm version {version} (expected 1 or 2)"),
         ));
     }
     if cert.vertex_count() != n {
@@ -306,222 +733,9 @@ fn verify_common(
         adj[v].insert(u, d);
     }
 
-    let mut prev_pass = 1usize;
-    let mut prev_key: Option<(f64, (usize, usize))> = None;
-    for (k, step) in cert.steps().iter().enumerate() {
-        if step.pass() == 0 {
-            return Err(fail(
-                Some(k),
-                "pass number 0 is invalid; passes are 1-based",
-            ));
-        }
-        if k == 0 {
-            if step.pass() != 1 {
-                return Err(fail(
-                    Some(k),
-                    format!("first step is in pass {}, expected pass 1", step.pass()),
-                ));
-            }
-        } else if step.pass() < prev_pass {
-            return Err(fail(
-                Some(k),
-                format!("pass number {} decreases from {prev_pass}", step.pass()),
-            ));
-        } else if step.pass() > prev_pass + 1 {
-            return Err(fail(
-                Some(k),
-                format!("pass number {} skips pass {}", step.pass(), prev_pass + 1),
-            ));
-        }
-        if step.pass() != prev_pass {
-            prev_key = None;
-        }
-        prev_pass = step.pass();
-
-        let (u, v) = step.edge();
-        if u >= v || v >= n {
-            return Err(fail(
-                Some(k),
-                format!("edge ({u}, {v}) is not a valid vertex pair for n = {n}"),
-            ));
-        }
-        let a = step.value();
-        // (v, u) orders exactly like the combinadic index v*(v-1)/2 + u for
-        // u < v, and the field compare cannot overflow.
-        let lex = (v, u);
-        if let Some((prev_value, prev_index)) = prev_key {
-            let out_of_order = match a.total_cmp(&prev_value) {
-                Ordering::Greater => true,
-                Ordering::Equal => lex <= prev_index,
-                Ordering::Less => false,
-            };
-            if out_of_order {
-                return Err(fail(
-                    Some(k),
-                    format!(
-                        "edge ({u}, {v}) with value {a} breaks the schedule order within pass {}",
-                        step.pass()
-                    ),
-                ));
-            }
-        }
-        prev_key = Some((a, lex));
-        match adj[u].get(&v) {
-            None => {
-                return Err(fail(
-                    Some(k),
-                    format!("edge ({u}, {v}) is not live at this step"),
-                ));
-            }
-            Some(&live) if live.to_bits() != a.to_bits() => {
-                return Err(fail(
-                    Some(k),
-                    format!("edge ({u}, {v}) value mismatch: step records {a}, graph has {live}"),
-                ));
-            }
-            Some(_) => {}
-        }
-
-        let segments = step.witnesses();
-        let Some(&(first_start, _)) = segments.first() else {
-            return Err(fail(Some(k), "step has no witness segments"));
-        };
-        if first_start.to_bits() != a.to_bits() {
-            return Err(fail(
-                Some(k),
-                format!("first witness segment starts at {first_start}, edge value is {a}"),
-            ));
-        }
-        for &(s, w) in segments {
-            if s.is_nan() {
-                return Err(fail(Some(k), "witness segment start is NaN"));
-            }
-            if s > terminal {
-                return Err(fail(
-                    Some(k),
-                    format!("witness segment starts at {s}, after terminal level {terminal}"),
-                ));
-            }
-            if w >= n {
-                return Err(fail(
-                    Some(k),
-                    format!("witness apex {w} is not a vertex index for n = {n}"),
-                ));
-            }
-        }
-        for pair in segments.windows(2) {
-            if pair[1].0 <= pair[0].0 {
-                return Err(fail(
-                    Some(k),
-                    format!(
-                        "witness segment starts are not strictly increasing: {} then {}",
-                        pair[0].0, pair[1].0
-                    ),
-                ));
-            }
-        }
-
-        let cands = candidates(&adj, u, v, a, terminal);
-        let crits = critical_values(a, &cands);
-        if segments.len() > crits.len() {
-            return Err(fail(
-                Some(k),
-                format!(
-                    "{} witness segments exceed {} critical values",
-                    segments.len(),
-                    crits.len()
-                ),
-            ));
-        }
-        for &(s, _) in segments {
-            if !crits.iter().any(|&c| c.to_bits() == s.to_bits()) {
-                return Err(fail(
-                    Some(k),
-                    format!(
-                        "witness segment start {s} is not a critical value of the current graph"
-                    ),
-                ));
-            }
-        }
-        for &t in &crits {
-            let mut active = None;
-            for (i, &(s, w)) in segments.iter().enumerate() {
-                if s <= t {
-                    active = Some((i, s, w));
-                } else {
-                    break;
-                }
-            }
-            let Some((seg_index, seg_start, w)) = active else {
-                return Err(fail(
-                    Some(k),
-                    format!("no witness segment is active at critical value {t}"),
-                ));
-            };
-            if w == u || w == v {
-                return Err(fail(
-                    Some(k),
-                    format!("apex {w} is an endpoint of edge ({u}, {v})"),
-                ));
-            }
-            let fu = edge_value(&adj, u, w);
-            let fv = edge_value(&adj, v, w);
-            if !fu.is_finite() || !fv.is_finite() {
-                return Err(fail(
-                    Some(k),
-                    format!("apex {w} is not a common neighbor of {u} and {v}"),
-                ));
-            }
-            let bw = a.max(fu).max(fv);
-            if bw > t {
-                return Err(fail(
-                    Some(k),
-                    format!("apex {w} enters at {bw}, after critical value {t}"),
-                ));
-            }
-            for &(x, bx) in &cands {
-                if bx <= t {
-                    let fwx = edge_value(&adj, w, x);
-                    if fwx > t {
-                        return Err(fail(
-                            Some(k),
-                            format!(
-                                "apex {w} does not dominate at critical value {t}: f({w}, {x}) = {fwx}"
-                            ),
-                        ));
-                    }
-                }
-            }
-            if seg_start.to_bits() == t.to_bits() {
-                if seg_index > 0 {
-                    let prev_w = segments[seg_index - 1].1;
-                    if vertex_dominates(&adj, u, v, a, &cands, prev_w, t) {
-                        return Err(fail(
-                            Some(k),
-                            format!(
-                                "segment starting at {t} is redundant: previous apex {prev_w} still dominates"
-                            ),
-                        ));
-                    }
-                }
-                for &(x, bx) in &cands {
-                    if x >= w {
-                        break;
-                    }
-                    if bx <= t && vertex_dominates(&adj, u, v, a, &cands, x, t) {
-                        return Err(fail(
-                            Some(k),
-                            format!(
-                                "apex {w} is not the first dominating vertex at {t}: vertex {x} also dominates"
-                            ),
-                        ));
-                    }
-                }
-            }
-        }
-
-        adj[u].remove(&v);
-        adj[v].remove(&u);
+    match version {
+        1 => replay_serial(&mut adj, n, terminal, cert)?,
+        _ => replay_rounds(&mut adj, n, terminal, cert)?,
     }
 
     let mut live: BTreeMap<(usize, usize), f64> = BTreeMap::new();
@@ -575,7 +789,9 @@ fn verify_common(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collapse::{CollapseCertificate, CollapseStats, RemovalStep};
+    use crate::collapse::{
+        collapse_sparse_rounds_parallel, CollapseCertificate, CollapseStats, RemovalStep,
+    };
 
     fn triangle_dense() -> DistanceMatrix {
         DistanceMatrix::from_condensed(vec![1.0, 1.0, 1.0]).unwrap()
@@ -590,10 +806,17 @@ mod tests {
             input_edges: input,
             output_edges: output,
             removed_edges: input - output,
-            passes: 1,
+            epochs: 1,
             edge_tests: 0,
             witness_segments: 0,
             max_common_neighborhood: 0,
+            window_slots_offered: 0,
+            window_members_formed: 0,
+            window_members_reused: 0,
+            logical_tests: 0,
+            invalidated_results: 0,
+            global_invalidations: 0,
+            window_batches: 0,
         }
     }
 
@@ -613,11 +836,12 @@ mod tests {
                     u: 0,
                     v: 1,
                     value: 1.0,
-                    pass: 1,
+                    epoch: 1,
                     witnesses: vec![(1.0, 2)],
                 }],
             },
             stats: stats_for(3, 2),
+            timings: Default::default(),
         }
     }
 
@@ -655,26 +879,27 @@ mod tests {
                         u: 0,
                         v: 1,
                         value: 1.0,
-                        pass: 1,
+                        epoch: 1,
                         witnesses: vec![(1.0, 2)],
                     },
                     RemovalStep {
                         u: 0,
                         v: 2,
                         value: 1.0,
-                        pass: 1,
+                        epoch: 1,
                         witnesses: vec![(1.0, 3)],
                     },
                     RemovalStep {
                         u: 1,
                         v: 2,
                         value: 1.0,
-                        pass: 1,
+                        epoch: 1,
                         witnesses: vec![(1.0, 3)],
                     },
                 ],
             },
             stats: stats_for(6, 3),
+            timings: Default::default(),
         }
     }
 
@@ -711,11 +936,12 @@ mod tests {
                     u: 0,
                     v: 1,
                     value: 1.0,
-                    pass: 1,
+                    epoch: 1,
                     witnesses: vec![(1.0, 2)],
                 }],
             },
             stats: stats_for(6, 5),
+            timings: Default::default(),
         }
     }
 
@@ -776,11 +1002,12 @@ mod tests {
                     u: 0,
                     v: 1,
                     value: 1.0,
-                    pass: 1,
+                    epoch: 1,
                     witnesses: vec![(1.0, 2)],
                 }],
             },
             stats: stats_for(5, 4),
+            timings: Default::default(),
         };
         let err = verify_dense(&dist, None, &result).unwrap_err();
         assert_eq!(err.step, Some(0));
@@ -840,6 +1067,7 @@ mod tests {
                 steps: vec![],
             },
             stats: stats_for(3, 3),
+            timings: Default::default(),
         };
         let err = verify_dense(&triangle_dense(), None, &result).unwrap_err();
         assert_eq!(err.step, None);
@@ -863,6 +1091,7 @@ mod tests {
                 steps: vec![],
             },
             stats: stats_for(1, 1),
+            timings: Default::default(),
         };
         assert_eq!(verify_dense(&dist, None, &result), Ok(()));
     }
@@ -870,7 +1099,7 @@ mod tests {
     #[test]
     fn rejects_zero_pass_number() {
         let mut result = triangle_result();
-        result.certificate.steps[0].pass = 0;
+        result.certificate.steps[0].epoch = 0;
         let err = verify_dense(&triangle_dense(), None, &result).unwrap_err();
         assert_eq!(err.step, Some(0));
         assert!(err.message.contains("1-based"), "{}", err.message);
@@ -998,7 +1227,7 @@ mod tests {
     #[test]
     fn rejects_first_pass_not_one() {
         let mut result = triangle_result();
-        result.certificate.steps[0].pass = 2;
+        result.certificate.steps[0].epoch = 2;
         let err = verify_dense(&triangle_dense(), None, &result).unwrap_err();
         assert_eq!(err.step, Some(0));
         assert!(err.message.contains("first step"), "{}", err.message);
@@ -1047,10 +1276,243 @@ mod tests {
     #[test]
     fn rejects_pass_gap() {
         let mut result = k4_result();
-        result.certificate.steps[1].pass = 3;
-        result.certificate.steps[2].pass = 3;
+        result.certificate.steps[1].epoch = 3;
+        result.certificate.steps[2].epoch = 3;
         let err = verify_dense(&k4_dense(), None, &result).unwrap_err();
         assert_eq!(err.step, Some(1));
         assert!(err.message.contains("skips pass 2"), "{}", err.message);
+    }
+
+    /// Two disjoint unit K4s on vertices 0-3 and 4-7; cross edges are
+    /// absent, so the enclosing radius is infinite and the terminal level
+    /// is the largest finite edge value 1.0.
+    fn two_k4_dense() -> DistanceMatrix {
+        let mut cond = Vec::new();
+        for v in 1..8usize {
+            for u in 0..v {
+                cond.push(if (u < 4) == (v < 4) {
+                    1.0
+                } else {
+                    f64::INFINITY
+                });
+            }
+        }
+        DistanceMatrix::from_condensed(cond).unwrap()
+    }
+
+    fn v2_step(u: usize, v: usize, round: usize, apex: usize) -> RemovalStep {
+        RemovalStep {
+            u,
+            v,
+            value: 1.0,
+            epoch: round,
+            witnesses: vec![(1.0, apex)],
+        }
+    }
+
+    /// Hand-derived version 2 result for the two disjoint K4s. Round 1
+    /// removes (0, 1) and (4, 5); each blocks every other edge of its own
+    /// component. Round 2 removes (0, 2), (1, 2), (4, 6), (5, 6): in each
+    /// round 2 snapshot the surviving hub (3 or 7) is the only candidate,
+    /// and the two selected edges do not conflict. The stars at vertices
+    /// 3 and 7 remain and no further edge is removable.
+    fn two_k4_v2_result() -> CollapsedRips {
+        CollapsedRips {
+            matrix: SparseDistanceMatrix::from_triplets(
+                8,
+                &[
+                    (0, 3, 1.0),
+                    (1, 3, 1.0),
+                    (2, 3, 1.0),
+                    (4, 7, 1.0),
+                    (5, 7, 1.0),
+                    (6, 7, 1.0),
+                ],
+            )
+            .unwrap(),
+            certificate: CollapseCertificate {
+                algorithm_version: 2,
+                vertex_count: 8,
+                requested_threshold: None,
+                terminal_level: 1.0,
+                input_edge_count: 12,
+                output_edge_count: 6,
+                steps: vec![
+                    v2_step(0, 1, 1, 2),
+                    v2_step(4, 5, 1, 6),
+                    v2_step(0, 2, 2, 3),
+                    v2_step(1, 2, 2, 3),
+                    v2_step(4, 6, 2, 7),
+                    v2_step(5, 6, 2, 7),
+                ],
+            },
+            stats: stats_for(12, 6),
+            timings: Default::default(),
+        }
+    }
+
+    /// Version 2 result for the unit K4 with one recorded round; callers
+    /// pick the steps. The output matrix is the K4 minus the removed
+    /// edges, so the header checks pass and the replay reaches the round.
+    fn k4_v2_round(steps: Vec<RemovalStep>) -> CollapsedRips {
+        let gone: Vec<(usize, usize)> = steps.iter().map(|s| (s.u, s.v)).collect();
+        let survivors: Vec<(usize, usize, f64)> = (0..4usize)
+            .flat_map(|u| (u + 1..4).map(move |v| (u, v, 1.0)))
+            .filter(|&(u, v, _)| !gone.contains(&(u, v)))
+            .collect();
+        CollapsedRips {
+            matrix: SparseDistanceMatrix::from_triplets(4, &survivors).unwrap(),
+            certificate: CollapseCertificate {
+                algorithm_version: 2,
+                vertex_count: 4,
+                requested_threshold: None,
+                terminal_level: 1.0,
+                input_edge_count: 6,
+                output_edge_count: survivors.len(),
+                steps,
+            },
+            stats: stats_for(6, survivors.len()),
+            timings: Default::default(),
+        }
+    }
+
+    #[test]
+    fn accepts_two_k4_v2_rounds() {
+        assert_eq!(
+            verify_dense(&two_k4_dense(), None, &two_k4_v2_result()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn rejects_same_round_conflict_despite_serial_validity() {
+        // The serial-safe forgery: (0, 1) apex 2 then (0, 2) apex 3
+        // replay cleanly one after the other, but both endpoints of
+        // (0, 2) lie in S((0, 1)) = {0, 1, 2, 3}, so one round cannot
+        // hold both.
+        let result = k4_v2_round(vec![v2_step(0, 1, 1, 2), v2_step(0, 2, 1, 3)]);
+        let err = verify_dense(&k4_dense(), None, &result).unwrap_err();
+        assert_eq!(err.step, Some(1));
+        assert!(err.message.contains("conflict"), "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_witnesses_valid_only_after_earlier_step() {
+        // Step 1 records apex 3 for (1, 2). The frozen rule selects 3
+        // only after (0, 1) is gone; against the round snapshot the apex
+        // is vertex 0, so a verifier that mutates between steps would
+        // accept this pair. Any such in-round dependence puts both
+        // endpoints of (1, 2) inside S((0, 1)), so the nonconflict check
+        // rejects the grouping.
+        let result = k4_v2_round(vec![v2_step(0, 1, 1, 2), v2_step(1, 2, 1, 3)]);
+        let err = verify_dense(&k4_dense(), None, &result).unwrap_err();
+        assert_eq!(err.step, Some(1));
+        assert!(err.message.contains("conflict"), "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_witnesses_from_stale_snapshot() {
+        // Round 2 records apex 1 for (0, 2). Vertex 1 was the frozen
+        // choice in the round 1 graph, but round 1 deleted (0, 1), so in
+        // the round 2 snapshot vertex 1 is no longer a common neighbor.
+        let mut result = two_k4_v2_result();
+        result.certificate.steps[2].witnesses = vec![(1.0, 1)];
+        let err = verify_dense(&two_k4_dense(), None, &result).unwrap_err();
+        assert_eq!(err.step, Some(2));
+        assert!(err.message.contains("common neighbor"), "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_round_gap() {
+        let mut result = two_k4_v2_result();
+        for step in &mut result.certificate.steps[2..] {
+            step.epoch = 3;
+        }
+        let err = verify_dense(&two_k4_dense(), None, &result).unwrap_err();
+        assert_eq!(err.step, Some(2));
+        assert!(err.message.contains("skips round 2"), "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_interleaved_rounds() {
+        // Round tags 1, 2, 1: the third step returns to a closed round.
+        let mut result = two_k4_v2_result();
+        result.certificate.steps.swap(1, 2);
+        let err = verify_dense(&two_k4_dense(), None, &result).unwrap_err();
+        assert_eq!(err.step, Some(2));
+        assert!(err.message.contains("decreases"), "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_out_of_order_within_round() {
+        // (4, 5) before (0, 1) replays cleanly but breaks the frozen
+        // in-round order: equal values must go by ascending (v, u).
+        let mut result = two_k4_v2_result();
+        result.certificate.steps.swap(0, 1);
+        let err = verify_dense(&two_k4_dense(), None, &result).unwrap_err();
+        assert_eq!(err.step, Some(1));
+        assert!(err.message.contains("schedule order"), "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_first_round_not_one() {
+        let mut result = two_k4_v2_result();
+        result.certificate.steps[0].epoch = 2;
+        let err = verify_dense(&two_k4_dense(), None, &result).unwrap_err();
+        assert_eq!(err.step, Some(0));
+        assert!(err.message.contains("first step"), "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_round_zero() {
+        let mut result = two_k4_v2_result();
+        result.certificate.steps[0].epoch = 0;
+        let err = verify_dense(&two_k4_dense(), None, &result).unwrap_err();
+        assert_eq!(err.step, Some(0));
+        assert!(err.message.contains("round number 0"), "{}", err.message);
+    }
+
+    #[test]
+    fn rejects_unknown_algorithm_version() {
+        for version in [0, 3] {
+            let mut result = two_k4_v2_result();
+            result.certificate.algorithm_version = version;
+            let err = verify_dense(&two_k4_dense(), None, &result).unwrap_err();
+            assert_eq!(err.step, None);
+            assert!(
+                err.message
+                    .contains(&format!("unsupported algorithm version {version}")),
+                "{}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn wide_independent_round_verifies_in_linear_time() {
+        // Many disjoint unit K4s: round 1 removes one edge per block, so
+        // the round is as wide as the block count. The independence check
+        // must not compare every pair of steps.
+        let blocks = 3000;
+        let n = 4 * blocks;
+        let mut triplets = Vec::new();
+        for b in 0..blocks {
+            let base = 4 * b;
+            for i in 0..4 {
+                for j in (i + 1)..4 {
+                    triplets.push((base + i, base + j, 1.0));
+                }
+            }
+        }
+        let dist = SparseDistanceMatrix::from_triplets(n, &triplets).unwrap();
+        let result = collapse_sparse_rounds_parallel(&dist, None, 1).unwrap();
+        assert!(result.certificate.steps().len() >= blocks);
+        let start = std::time::Instant::now();
+        verify_sparse(&dist, None, &result).unwrap();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "verifier took {:?} on a round of width {blocks}",
+            start.elapsed()
+        );
     }
 }

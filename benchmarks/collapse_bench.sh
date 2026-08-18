@@ -18,10 +18,15 @@
 #
 # Protocol: run the screen first, then --confirm for the held-out set, after
 # appending any densify-near-boundary midpoints the screen triggers. A screen
-# run writes results_collapse_manifest.txt, recording the corpus version and
-# sha256 and every screen entry it finished. --confirm refuses to start unless
-# that manifest covers the whole registered screen and the corpus still
-# hashes the same.
+# run that voids no entry writes results_collapse_manifest.txt, recording the
+# corpus version and sha256, the entry filter, and every screen entry it
+# finished. --confirm refuses to start unless that manifest covers the whole
+# registered screen, ran unfiltered, and the corpus still hashes the same.
+#
+# Manifest lifecycle: a screen run removes the manifest before it writes the
+# first byte of its results, and writes a fresh one only after finishing with
+# no voided entry. An interrupted screen therefore leaves partial results and
+# no manifest, and --confirm stays locked.
 #
 # Results: benchmarks/results_collapse.txt (log) and .md (tables). --confirm
 # writes results_collapse_confirm.{txt,md} instead, so a confirmation run
@@ -42,7 +47,9 @@ Environment:
   CARGO           cargo invocation (may carry a toolchain), default "cargo"
   CORPUS          corpus file, default benchmarks/collapse_corpus.toml
   REPS            timed runs per mode, default 5 (the preregistered minimum)
-  ONLY            glob over entry ids, default all
+  ONLY            glob over entry ids, default all. A filtered screen run
+                  cannot unlock --confirm: the manifest records the filter,
+                  and --confirm takes the full corpus only
   ALLOW_DIRTY     set to 1 to benchmark a dirty worktree (recorded as -DIRTY)
   ALLOW_NO_SCREEN set to 1 to run --confirm without a verified screen
                   manifest; the results then carry a SCREEN-PROTOCOL-BYPASSED
@@ -169,7 +176,7 @@ require_screen_manifest() {
         exit 1
     fi
 
-    local want_sha got_sha got_version
+    local want_sha got_sha got_version got_filter
     want_sha="$(sha256 "$CORPUS")"
     got_sha="$(awk -F= '$1 == "corpus_sha256" { print $2; exit }' "$MANIFEST")"
     got_version="$(awk -F= '$1 == "corpus_version" { print $2; exit }' "$MANIFEST")"
@@ -178,6 +185,16 @@ require_screen_manifest() {
         echo "       screened: version $got_version sha256 $got_sha" >&2
         echo "       on disk:  version $CORPUS_VERSION sha256 $want_sha" >&2
         echo "       restore the corpus the screen used, or screen the new one" >&2
+        exit 1
+    fi
+
+    # A screen run under ONLY=... covers part of the corpus. Its entry list
+    # can still name every registered id when the glob is wide, so the filter
+    # itself is checked and not inferred from the list.
+    got_filter="$(awk -F= '$1 == "filter" { print $2; exit }' "$MANIFEST")"
+    if [[ "$got_filter" != "*" ]]; then
+        echo "error: the screen ran filtered (filter=${got_filter:-<absent>}), so it screened part of the corpus" >&2
+        echo "$hint" >&2
         exit 1
     fi
 
@@ -224,6 +241,13 @@ fi
 
 mkdir -p "$DATA"
 build_holos
+
+# Remove the old manifest before the first byte of results is written. A crash
+# between here and the end of the run then leaves partial results and no
+# manifest, instead of a complete manifest that vouches for them.
+if [[ "$SET" == screen ]]; then
+    rm -f "$MANIFEST"
+fi
 emit_provenance "$RESULTS" "$HEADER"
 
 {
@@ -281,12 +305,23 @@ while IFS=$'\t' read -r id family n coord_dim max_dim tau modulus threads seed; 
     err2="$DATA/collapse_${SET}_${id}_m2.err"
     err3="$DATA/collapse_${SET}_${id}_m3.err"
 
-    # Agreement first. These runs also warm the page cache.
-    measure_err "$out1" "$err1" "${mode1[@]}" >/dev/null
-    measure_err "$out2" "$err2" "${mode2[@]}" >/dev/null
-    measure_err "$out3" "$err3" "${mode3[@]}" >/dev/null
-    match2="$(compare_diagrams "$out1" "$out2")"
-    match3="$(compare_diagrams "$out1" "$out3")"
+    # Agreement first. These runs also warm the page cache. A mode that exits
+    # nonzero voids this entry, exactly as a diagram mismatch does, and the
+    # remaining entries still run.
+    failed=""
+    if ! measure_err "$out1" "$err1" "${mode1[@]}" >/dev/null; then
+        failed="mode1"
+    elif ! measure_err "$out2" "$err2" "${mode2[@]}" >/dev/null; then
+        failed="mode2"
+    elif ! measure_err "$out3" "$err3" "${mode3[@]}" >/dev/null; then
+        failed="mode3"
+    fi
+    match2="n/a"
+    match3="n/a"
+    if [[ -z "$failed" ]]; then
+        match2="$(compare_diagrams "$out1" "$out2")"
+        match3="$(compare_diagrams "$out1" "$out3")"
+    fi
 
     # "collapse: kept X of Y edges, removed Z, N passes"
     collapse_line="$(grep -m1 '^collapse:' "$err3" || true)"
@@ -317,21 +352,43 @@ while IFS=$'\t' read -r id family n coord_dim max_dim tau modulus threads seed; 
         echo "note: collapse saw $collapse_in input edges, the converted graph has $edges_in" >>"$RESULTS"
     fi
 
-    if [[ "$match2" != yes || "$match3" != yes ]]; then
+    if [[ -n "$failed" || "$match2" != yes || "$match3" != yes ]]; then
         ANY_MISMATCH=1
         {
-            echo "VOID: diagrams disagree, no timings recorded for this entry"
+            if [[ -n "$failed" ]]; then
+                echo "VOID: $failed exited nonzero, no timings recorded for this entry"
+                sed 's/^/  /' "$err1" "$err2" "$err3" 2>/dev/null || true
+            else
+                echo "VOID: diagrams disagree, no timings recorded for this entry"
+            fi
             echo
         } >>"$RESULTS"
         echo "| $id | $family | $n | $coord_dim | $max_dim | $tau | $modulus | $threads | $density | $mean_degree | $max_degree | $isolated | $edges_in | $kept | $removed | $passes | VOID |" >>"$CFG_ROWS"
         echo "| $id | void | void | void | void | void | void | void | void | void | void | void | no |" >>"$TIME_ROWS"
-        echo "id=$id VOID (match2=$match2 match3=$match3)" >&2
+        echo "id=$id VOID (${failed:+$failed exited nonzero, }match2=$match2 match3=$match3)" >&2
         continue
     fi
 
-    stats1="$(measure_repeat "$out1" "$err1" "$REPS" "${mode1[@]}")"
-    stats2="$(measure_repeat "$out2" "$err2" "$REPS" "${mode2[@]}")"
-    stats3="$(measure_repeat "$out3" "$err3" "$REPS" "${mode3[@]}")"
+    # A timed run that exits nonzero voids the entry too. Without the guard,
+    # errexit would end the whole run on one bad mode.
+    if ! stats1="$(measure_repeat "$out1" "$err1" "$REPS" "${mode1[@]}")"; then
+        failed="mode1"
+    elif ! stats2="$(measure_repeat "$out2" "$err2" "$REPS" "${mode2[@]}")"; then
+        failed="mode2"
+    elif ! stats3="$(measure_repeat "$out3" "$err3" "$REPS" "${mode3[@]}")"; then
+        failed="mode3"
+    fi
+    if [[ -n "$failed" ]]; then
+        ANY_MISMATCH=1
+        {
+            echo "VOID: $failed exited nonzero during the timed runs; this entry is void"
+            echo
+        } >>"$RESULTS"
+        echo "| $id | $family | $n | $coord_dim | $max_dim | $tau | $modulus | $threads | $density | $mean_degree | $max_degree | $isolated | $edges_in | $kept | $removed | $passes | VOID |" >>"$CFG_ROWS"
+        echo "| $id | void | void | void | void | void | void | void | void | void | void | void | no |" >>"$TIME_ROWS"
+        echo "id=$id VOID ($failed exited nonzero during the timed runs)" >&2
+        continue
+    fi
 
     med1="$(field median_s "$stats1")"
     med2="$(field median_s "$stats2")"
@@ -400,23 +457,30 @@ fi
 } >"$RESULTS_MD"
 
 # The manifest is what --confirm checks. It names the corpus the screen
-# covered, by version and hash, and every entry that finished with matching
-# diagrams. A filtered run or a void entry leaves it incomplete, and --confirm
-# then refuses.
+# covered, by version and hash, the filter it ran under, and every entry that
+# finished with matching diagrams. The run removed any earlier manifest before
+# it wrote its first result, so only a clean run that reaches this point
+# leaves one. A run that voided an entry leaves none.
 if [[ "$SET" == screen ]]; then
-    {
-        echo "# Written by benchmarks/collapse_bench.sh at the end of a screen run."
-        echo "# --confirm reads it. Do not edit: an edit only fakes a screen."
-        echo "corpus_file=$(basename "$CORPUS")"
-        echo "corpus_version=$CORPUS_VERSION"
-        echo "corpus_date=$CORPUS_DATE"
-        echo "corpus_sha256=$(sha256 "$CORPUS")"
-        echo "screen_date=$PROV_DATE"
-        echo "holos_commit=$PROV_COMMIT"
-        echo "filter=$ONLY"
-        cat "$DONE_IDS"
-    } >"$MANIFEST"
-    echo "Screen manifest written to $MANIFEST." >&2
+    if ((ANY_MISMATCH != 0)); then
+        echo "No screen manifest: this run voided at least one entry." >&2
+        echo "This run removed the earlier manifest before it wrote anything, so" >&2
+        echo "--confirm stays locked." >&2
+    else
+        {
+            echo "# Written by benchmarks/collapse_bench.sh at the end of a clean screen run."
+            echo "# --confirm reads it. Do not edit: an edit only fakes a screen."
+            echo "corpus_file=$(basename "$CORPUS")"
+            echo "corpus_version=$CORPUS_VERSION"
+            echo "corpus_date=$CORPUS_DATE"
+            echo "corpus_sha256=$(sha256 "$CORPUS")"
+            echo "screen_date=$PROV_DATE"
+            echo "holos_commit=$PROV_COMMIT"
+            echo "filter=$ONLY"
+            cat "$DONE_IDS"
+        } >"$MANIFEST"
+        echo "Screen manifest written to $MANIFEST." >&2
+    fi
 fi
 
 echo "Results written to $RESULTS and $RESULTS_MD." >&2

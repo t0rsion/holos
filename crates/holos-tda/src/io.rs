@@ -1,4 +1,5 @@
-//! Point-cloud and lower-distance-matrix input, diagram output.
+//! Readers for point clouds and for dense or sparse distance matrices.
+//! Writers for the diagram output formats.
 
 use std::io::Write;
 use std::path::Path;
@@ -38,7 +39,7 @@ pub fn read_point_cloud(path: &Path) -> Result<Vec<Vec<f64>>> {
             })
             .collect::<Result<Vec<f64>>>()?;
         if point.is_empty() {
-            // Separators only. Treat the line as blank.
+            // The line holds separators only, so treat it as blank.
             continue;
         }
         if let Some(first) = points.first() {

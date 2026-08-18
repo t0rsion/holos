@@ -2,8 +2,12 @@
 //! Both sides read the same f64 matrix entries and take maxima only, so
 //! births and deaths must agree bit-for-bit.
 
+use holos_tda::collapse::{collapse_dense, CollapsedRips};
 use holos_tda::oracle::{rips_persistence_oracle, rips_persistence_oracle_mod};
-use holos_tda::{rips_persistence, Diagram, DistanceMatrix, RipsParams};
+use holos_tda::{
+    rips_persistence, rips_persistence_sparse, CollapseSchedule, Diagram, DistanceMatrix,
+    RipsParams,
+};
 
 struct Rng(u64);
 
@@ -44,20 +48,40 @@ fn assert_same_diagram(a: &Diagram, b: &Diagram) {
     assert_eq!(canonical(a), canonical(b));
 }
 
+// Reduce a graph that the collapse already produced, the way the
+// convenience pipeline does after its own collapse. Every surviving edge
+// lies at or below the terminal level, so the terminal level is the exact
+// threshold for the reduced complex.
+fn solve_collapsed(collapsed: &CollapsedRips, params: &RipsParams) -> Diagram {
+    let mut inner = params.clone();
+    inner.collapse_edges = false;
+    inner.threshold = Some(collapsed.certificate.terminal_level());
+    rips_persistence_sparse(&collapsed.matrix, &inner).unwrap()
+}
+
+// The collapse reads only the input matrix and the threshold. The modulus,
+// the homology dimension, and the optimization toggles never reach it, so
+// one collapsed graph serves every arm of a sweep over those. Collapse once
+// per matrix and threshold, then reduce that graph for each modulus. The
+// first modulus takes the convenience path instead, which keeps the
+// collapse-and-solve wiring under test.
 fn check(dist: &DistanceMatrix, max_dim: usize, threshold: Option<f64>) {
-    for p in [2, 3, 5] {
-        let expected = rips_persistence_oracle_mod(dist, max_dim, threshold, p);
-        for collapse in [false, true] {
-            let mut params = RipsParams::new(max_dim).with_modulus(p);
-            params.threshold = threshold;
-            params.collapse_edges = collapse;
-            let got = rips_persistence(dist, &params).unwrap();
-            assert_eq!(
-                canonical(&got),
-                canonical(&expected),
-                "modulus {p}, collapse {collapse}"
-            );
-        }
+    let collapsed = collapse_dense(dist, threshold).unwrap();
+    for (i, p) in [2u32, 3, 5].into_iter().enumerate() {
+        let expected = canonical(&rips_persistence_oracle_mod(dist, max_dim, threshold, p));
+        let mut params = RipsParams::new(max_dim).with_modulus(p);
+        params.threshold = threshold;
+        let plain = rips_persistence(dist, &params).unwrap();
+        assert_eq!(canonical(&plain), expected, "modulus {p}, collapse false");
+
+        let got = if i == 0 {
+            let mut convenience = params.clone();
+            convenience.collapse_edges = true;
+            rips_persistence(dist, &convenience).unwrap()
+        } else {
+            solve_collapsed(&collapsed, &params)
+        };
+        assert_eq!(canonical(&got), expected, "modulus {p}, collapse true");
     }
 }
 
@@ -104,7 +128,11 @@ fn exhaustive_six_point_sweep_mod_5() {
 }
 
 fn exhaustive_six_point_sweep(modulus: u32) {
-    let threads = std::thread::available_parallelism().map_or(1, |p| p.get());
+    // The three sweeps run at the same time under one test binary. Cap the
+    // fan-out so they do not oversubscribe the machine.
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |p| p.get())
+        .min(8);
     let total = 1u32 << 15;
     let chunk = total.div_ceil(threads as u32);
     std::thread::scope(|scope| {
@@ -126,7 +154,20 @@ fn sweep_one_matrix(mask: u32, modulus: u32) {
         .collect();
     let dist = DistanceMatrix::from_condensed(data).unwrap();
     let full = canonical(&rips_persistence_oracle_mod(&dist, 3, None, modulus));
-    for max_dim in 0..=3usize {
+    // Bit 3 of the toggle mask asks for a collapse that depends on neither
+    // the dimension nor the other toggles, so all 32 arms that set it want
+    // the same reduced graph. Collapse once and reduce that graph per arm.
+    // The full-toggle arm of each dimension runs the pipeline instead, one
+    // schedule per dimension, which keeps the collapse-and-solve wiring and
+    // the schedule dispatch under test.
+    let collapsed = collapse_dense(&dist, None).unwrap();
+    let schedules = [
+        (CollapseSchedule::Serial, 1),
+        (CollapseSchedule::Ordered, 2),
+        (CollapseSchedule::Rounds, 2),
+        (CollapseSchedule::Serial, 2),
+    ];
+    for (max_dim, &(schedule, threads)) in schedules.iter().enumerate() {
         let expected: Vec<_> = full
             .iter()
             .copied()
@@ -140,8 +181,15 @@ fn sweep_one_matrix(mask: u32, modulus: u32) {
             params.use_emergent_pairs = bits & 1 != 0;
             params.use_apparent_pairs = bits & 2 != 0;
             params.use_clearing = bits & 4 != 0;
-            params.collapse_edges = bits & 8 != 0;
-            let got = rips_persistence(&dist, &params).unwrap();
+            let got = if bits & 8 == 0 {
+                rips_persistence(&dist, &params).unwrap()
+            } else if bits == 0b1111 {
+                params.threads = threads;
+                params = params.with_collapse_schedule(schedule);
+                rips_persistence(&dist, &params).unwrap()
+            } else {
+                solve_collapsed(&collapsed, &params)
+            };
             assert_eq!(
                 canonical(&got),
                 expected,

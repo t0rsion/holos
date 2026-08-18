@@ -11,11 +11,14 @@
 //! derived from the specification, not observed from a run.
 
 use holos_tda::collapse::verify::{verify_dense, verify_sparse};
-use holos_tda::collapse::{collapse_dense, collapse_sparse, CollapsedRips, RemovalStep};
+use holos_tda::collapse::{
+    collapse_dense, collapse_dense_rounds_parallel, collapse_sparse,
+    collapse_sparse_rounds_parallel, CollapsedRips, RemovalStep,
+};
 use holos_tda::oracle::rips_persistence_oracle_mod;
 use holos_tda::{
-    rips_persistence, rips_persistence_sparse, Bar, Diagram, DistanceMatrix, RipsParams,
-    SparseDistanceMatrix,
+    rips_persistence, rips_persistence_sparse, Bar, CollapseSchedule, Diagram, DistanceMatrix,
+    RipsParams, SparseDistanceMatrix,
 };
 
 const MODULI: [u32; 3] = [2, 3, 5];
@@ -281,12 +284,12 @@ fn check_certificate(
         let (u, v) = step.edge();
         assert!(u < v, "{name}: step {i} endpoints not ordered");
         assert!(v < n, "{name}: step {i} endpoint out of range");
-        assert!(step.pass() >= 1, "{name}: step {i} pass is not 1-based");
+        assert!(step.epoch() >= 1, "{name}: step {i} pass is not 1-based");
         assert!(
-            step.pass() >= last_pass,
+            step.epoch() >= last_pass,
             "{name}: step {i} pass number decreased"
         );
-        last_pass = step.pass();
+        last_pass = step.epoch();
 
         let w = step.witnesses();
         assert!(!w.is_empty(), "{name}: step {i} has no witness segment");
@@ -329,7 +332,7 @@ fn check_certificate(
         cert.steps().len(),
         "{name}: stats removed_edges"
     );
-    assert!(result.stats.passes >= 1, "{name}: stats passes");
+    assert!(result.stats.epochs >= 1, "{name}: stats passes");
     assert_eq!(
         result.stats.witness_segments,
         cert.steps()
@@ -340,7 +343,7 @@ fn check_certificate(
     );
     if let Some(last) = cert.steps().last() {
         assert!(
-            result.stats.passes >= last.pass(),
+            result.stats.epochs >= last.epoch(),
             "{name}: stats passes must cover the last removal"
         );
     }
@@ -439,7 +442,7 @@ fn check_idempotent(name: &str, result: &CollapsedRips) {
         again.certificate.steps().len()
     );
     assert_eq!(
-        again.stats.passes, 1,
+        again.stats.epochs, 1,
         "{name}: idempotent run needs one pass"
     );
     assert_eq!(
@@ -723,7 +726,7 @@ fn positive_scaling_preserves_removals_and_scales_witnesses() {
     );
     for (i, (a, b)) in base_steps.iter().zip(big_steps).enumerate() {
         assert_eq!(a.edge(), b.edge(), "step {i}: scaling changed the edge");
-        assert_eq!(a.pass(), b.pass(), "step {i}: scaling changed the pass");
+        assert_eq!(a.epoch(), b.epoch(), "step {i}: scaling changed the pass");
         assert_eq!(
             b.value(),
             3.0 * a.value(),
@@ -784,7 +787,7 @@ fn empty_graph_collapses_to_nothing() {
     let result = collapse_and_check_sparse("empty", &empty, None);
     assert_eq!(result.certificate.terminal_level(), 0.0, "terminal level");
     assert_eq!(result.certificate.input_edge_count(), 0, "input edges");
-    assert_eq!(result.stats.passes, 1, "passes");
+    assert_eq!(result.stats.epochs, 1, "passes");
     assert_eq!(result.stats.max_common_neighborhood, 0, "neighborhood");
 }
 
@@ -877,18 +880,18 @@ fn later_pass_removability() {
     let result = assert_fixture("later_pass_removability", &dense, Some(1.0), 2, true);
     let step = step_for(&result, (0, 1)).expect("edge (0, 1) must be removable in a later pass");
     assert_eq!(
-        step.pass(),
+        step.epoch(),
         2,
         "edge (0, 1) must survive pass 1 and leave in pass 2"
     );
     assert!(
-        result.certificate.steps().iter().any(|s| s.pass() == 2),
+        result.certificate.steps().iter().any(|s| s.epoch() == 2),
         "no removal happened after the first pass"
     );
     assert!(
-        result.stats.passes >= 3,
+        result.stats.epochs >= 3,
         "a removal in pass 2 needs a third, empty pass, got {}",
-        result.stats.passes
+        result.stats.epochs
     );
 }
 
@@ -916,7 +919,7 @@ fn ties_le_vs_lt() {
         vec![(2.0, 2)],
         "the tie must be certified by the first candidate at the edge value"
     );
-    assert_eq!(step.pass(), 1, "the tied edge must go in pass 1");
+    assert_eq!(step.epoch(), 1, "the tied edge must go in pass 1");
 
     // Same graph without the (2, 3) tie: the two candidates are not adjacent,
     // so (0, 1) is never removable. This isolates the tie as the deciding
@@ -948,7 +951,7 @@ fn chordless_4cycle() {
         result.certificate.steps().is_empty(),
         "a chordless 4-cycle has no removable edge"
     );
-    assert_eq!(result.stats.passes, 1, "zero yield must take one pass");
+    assert_eq!(result.stats.epochs, 1, "zero yield must take one pass");
     assert_eq!(result.matrix.num_edges(), 4, "all four edges must survive");
 
     let bars = dense_bars(&dense, 2, Some(1.0), 2, 1, ALL_ON, true);
@@ -976,7 +979,7 @@ fn octahedral_sphere() {
         result.certificate.steps().is_empty(),
         "the octahedron has no removable edge"
     );
-    assert_eq!(result.stats.passes, 1, "zero yield must take one pass");
+    assert_eq!(result.stats.epochs, 1, "zero yield must take one pass");
     assert_eq!(
         result.matrix.num_edges(),
         12,
@@ -1264,7 +1267,7 @@ fn k64_64_zero_yield() {
     assert_eq!(result.certificate.input_edge_count(), 4096, "input edges");
     assert_eq!(result.certificate.output_edge_count(), 4096, "output edges");
     assert_eq!(result.matrix.num_edges(), 4096, "surviving edges");
-    assert_eq!(result.stats.passes, 1, "zero yield must take one pass");
+    assert_eq!(result.stats.epochs, 1, "zero yield must take one pass");
     assert_eq!(result.stats.witness_segments, 0, "no witness segments");
     assert_eq!(
         result.stats.max_common_neighborhood, 0,
@@ -1368,48 +1371,118 @@ fn with_edge_collapse_sets_the_flag() {
     let p = RipsParams::new(2).with_edge_collapse();
     assert!(p.collapse_edges, "with_edge_collapse must set the flag");
     assert_eq!(p.max_dim, 2, "with_edge_collapse must keep max_dim");
+    assert_eq!(
+        p.collapse_schedule,
+        CollapseSchedule::Serial,
+        "the serial schedule must be the default"
+    );
+    for schedule in [CollapseSchedule::Ordered, CollapseSchedule::Rounds] {
+        let p = RipsParams::new(2).with_collapse_schedule(schedule);
+        assert!(p.collapse_edges, "with_collapse_schedule must set the flag");
+        assert_eq!(p.collapse_schedule, schedule);
+    }
+}
+
+#[test]
+fn every_schedule_gives_the_same_diagram_at_every_thread_count() {
+    let fixtures: [(&str, DistanceMatrix); 5] = [
+        ("apex", level_dependent_apex_matrix()),
+        ("points", battery_points()),
+        ("ties", battery_ties()),
+        ("zeros", battery_zeros()),
+        ("disconnected", battery_disconnected()),
+    ];
+    let schedules = [
+        CollapseSchedule::Serial,
+        CollapseSchedule::Ordered,
+        CollapseSchedule::Rounds,
+    ];
+    for (name, dense) in &fixtures {
+        let sparse = sparse_from_dense(dense);
+        for &modulus in &MODULI {
+            for threshold in [None, Some(2.0), Some(f64::INFINITY)] {
+                for max_dim in 0..=2 {
+                    let plain = dense_bars(dense, max_dim, threshold, modulus, 1, ALL_ON, false);
+                    let plain_sparse =
+                        sparse_bars(&sparse, max_dim, threshold, modulus, 1, ALL_ON, false);
+                    for &threads in &THREAD_COUNTS {
+                        for schedule in schedules {
+                            let label = format!(
+                                "{name}: p={modulus} threshold={threshold:?} max_dim={max_dim} \
+                                 threads={threads} schedule={schedule:?}"
+                            );
+                            let p = params(max_dim, threshold, modulus, threads, ALL_ON, false)
+                                .with_collapse_schedule(schedule);
+                            assert_eq!(
+                                canon(&rips_persistence(dense, &p).unwrap()),
+                                plain,
+                                "{label}: dense"
+                            );
+                            assert_eq!(
+                                canon(&rips_persistence_sparse(&sparse, &p).unwrap()),
+                                plain_sparse,
+                                "{label}: sparse"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]
 fn convenience_path_matches_the_standalone_path() {
-    // The flag on RipsParams must do exactly what a caller would do by hand:
-    // collapse, then run the engine on the collapsed matrix at the
-    // certificate's terminal level.
+    // The flag on RipsParams runs the serial version 1 schedule, whose
+    // output equals the serial entry point's exactly; the version 2 entry
+    // point follows a different schedule and stops at a different graph.
+    // Both must give the same diagram as the pipeline.
     let dense = level_dependent_apex_matrix();
     let sparse = sparse_from_dense(&dense);
+    let standalone_bars = |collapsed: &CollapsedRips, max_dim: usize, modulus: u32| {
+        let inner = params(
+            max_dim,
+            Some(collapsed.certificate.terminal_level()),
+            modulus,
+            1,
+            ALL_ON,
+            false,
+        );
+        canon(&rips_persistence_sparse(&collapsed.matrix, &inner).unwrap())
+    };
     for &modulus in &MODULI {
         for threshold in [None, Some(2.0), Some(f64::INFINITY)] {
             for max_dim in 0..=2 {
                 let label = format!("p={modulus} threshold={threshold:?} max_dim={max_dim}");
 
                 let convenience = dense_bars(&dense, max_dim, threshold, modulus, 1, ALL_ON, true);
-                let collapsed = collapse_dense(&dense, threshold).unwrap();
-                let inner = params(
-                    max_dim,
-                    Some(collapsed.certificate.terminal_level()),
-                    modulus,
-                    1,
-                    ALL_ON,
-                    false,
+                let collapsed = collapse_dense_rounds_parallel(&dense, threshold, 1).unwrap();
+                assert_eq!(
+                    convenience,
+                    standalone_bars(&collapsed, max_dim, modulus),
+                    "{label}: dense entry point"
                 );
-                let standalone =
-                    canon(&rips_persistence_sparse(&collapsed.matrix, &inner).unwrap());
-                assert_eq!(convenience, standalone, "{label}: dense entry point");
+                let serial = collapse_dense(&dense, threshold).unwrap();
+                assert_eq!(
+                    convenience,
+                    standalone_bars(&serial, max_dim, modulus),
+                    "{label}: dense serial schedule"
+                );
 
                 let convenience =
                     sparse_bars(&sparse, max_dim, threshold, modulus, 1, ALL_ON, true);
-                let collapsed = collapse_sparse(&sparse, threshold).unwrap();
-                let inner = params(
-                    max_dim,
-                    Some(collapsed.certificate.terminal_level()),
-                    modulus,
-                    1,
-                    ALL_ON,
-                    false,
+                let collapsed = collapse_sparse_rounds_parallel(&sparse, threshold, 1).unwrap();
+                assert_eq!(
+                    convenience,
+                    standalone_bars(&collapsed, max_dim, modulus),
+                    "{label}: sparse entry point"
                 );
-                let standalone =
-                    canon(&rips_persistence_sparse(&collapsed.matrix, &inner).unwrap());
-                assert_eq!(convenience, standalone, "{label}: sparse entry point");
+                let serial = collapse_sparse(&sparse, threshold).unwrap();
+                assert_eq!(
+                    convenience,
+                    standalone_bars(&serial, max_dim, modulus),
+                    "{label}: sparse serial schedule"
+                );
             }
         }
     }
@@ -1690,7 +1763,7 @@ fn assert_reference_match(name: &str, result: &CollapsedRips, reference: &RefRun
             want.value.to_bits(),
             "{name}: step {i} value"
         );
-        assert_eq!(got.pass(), want.pass, "{name}: step {i} pass number");
+        assert_eq!(got.epoch(), want.pass, "{name}: step {i} pass number");
         assert_eq!(
             got.witnesses().len(),
             want.witnesses.len(),
@@ -1716,7 +1789,7 @@ fn assert_reference_match(name: &str, result: &CollapsedRips, reference: &RefRun
         assert_eq!((a.0, a.1), (b.0, b.1), "{name}: survivor {i} endpoints");
         assert_eq!(a.2.to_bits(), b.2.to_bits(), "{name}: survivor {i} value");
     }
-    assert_eq!(result.stats.passes, reference.passes, "{name}: pass count");
+    assert_eq!(result.stats.epochs, reference.passes, "{name}: pass count");
     assert_eq!(
         result.certificate.terminal_level().to_bits(),
         reference.terminal.to_bits(),

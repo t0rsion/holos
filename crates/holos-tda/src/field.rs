@@ -98,11 +98,11 @@ pub(crate) trait Coeffs {
         }
     }
 
-    /// (-1)^k as a field element: ripser's `k & 1 ? p - 1 : 1`.
+    /// Return (-1)^k as a field element (ripser's `k & 1 ? p - 1 : 1`).
     fn sign(&self, k: usize) -> u64;
     fn mul(&self, a: u64, b: u64) -> u64;
     fn neg(&self, a: u64) -> u64;
-    /// Ripser's reduction factor: -(pivot / other) in the field.
+    /// Return ripser's reduction factor, -(pivot / other) in the field.
     fn factor(&self, pivot: u64, other: u64) -> u64;
     /// Pop the pivot with lazy cancellation. Entries with equal index
     /// combine, and a zero combined coefficient vanishes.
@@ -157,7 +157,7 @@ impl Fp {
             inv[1] = 1;
         }
         for a in 2..p {
-            // inv[a] = p - (inv[p % a] * (p / a)) % p, valid for prime p.
+            // The recurrence is valid only for prime p.
             inv[a as usize] = p - (inv[(p % a) as usize] * (p / a)) % p;
         }
         // Fewest bits that hold a coefficient in 0..p (i.e. up to p - 1).

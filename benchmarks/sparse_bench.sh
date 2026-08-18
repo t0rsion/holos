@@ -42,6 +42,10 @@ SEED="${SEED:-42}"
 K="${K:-15}"
 MAXDIM="${MAXDIM:-2}"
 THREADS="${THREADS:-1}"
+# Both arms are holos, so the diagrams must be identical, not close.
+# compare_diagrams reads TOLERANCE; its 1e-5 default exists for ripser's f32
+# output alone.
+TOLERANCE=0
 
 RESULTS="$HERE/results_sparse.txt"
 RESULTS_MD="$HERE/results_sparse.md"
@@ -127,6 +131,7 @@ match="$(compare_diagrams "$sparse_out" "$dense_out")"
     echo "cloud: gen_cloud.py $N $COORD_DIM $SEED"
     echo "knn: k=$K  edges=$EDGE_COUNT  (dense pairs = $((N * (N - 1) / 2)))"
     echo "maxdim: $MAXDIM  threads: $THREADS"
+    echo "diagram comparison: exact (tolerance $TOLERANCE)"
     echo "sparse cmd: ${sparse_cmd[*]}"
     echo "sparse  $sparse_stats"
     echo "dense cmd:  ${dense_cmd[*]}"
@@ -140,6 +145,7 @@ match="$(compare_diagrams "$sparse_out" "$dense_out")"
     echo
     echo "- N: $N  coord dim: $COORD_DIM  seed: $SEED  k: $K  maxdim: $MAXDIM  threads: $THREADS"
     echo "- kNN edges: $EDGE_COUNT of $((N * (N - 1) / 2)) dense pairs"
+    echo "- diagram comparison: exact, tolerance $TOLERANCE"
     echo
     echo "| variant | wall (s) | peak RSS (MB) |"
     echo "|:--|--:|--:|"

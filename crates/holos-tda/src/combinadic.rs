@@ -11,8 +11,9 @@ pub struct BinomialTable {
 }
 
 impl BinomialTable {
-    /// Table of C(i, j) for i <= n, j <= k_max. Errors if any entry
-    /// overflows u64. That bound limits the representable simplex indices.
+    /// Build the table of C(i, j) for i <= n, j <= k_max. Returns an error
+    /// if any entry overflows u64. That bound limits the representable
+    /// simplex indices.
     pub fn new(n: usize, k_max: usize) -> Result<Self> {
         let mut table = vec![0u64; (n + 1) * (k_max + 1)];
         for i in 0..=n {
@@ -49,7 +50,7 @@ impl BinomialTable {
             .sum()
     }
 
-    /// Largest j <= upper with C(j, k) <= idx.
+    /// Return the largest j <= upper with C(j, k) <= idx.
     #[inline]
     pub fn max_vertex(&self, idx: u64, k: usize, upper: usize) -> usize {
         let mut lo = k - 1;
@@ -65,7 +66,8 @@ impl BinomialTable {
         lo
     }
 
-    /// Vertices of the simplex with the given index, ascending.
+    /// Write the vertices of the simplex with the given index into `out`,
+    /// ascending.
     pub fn unrank(&self, mut idx: u64, dim: usize, n: usize, out: &mut Vec<usize>) {
         out.clear();
         let mut upper = n - 1;
@@ -114,9 +116,9 @@ impl<'a> CofacetIter<'a> {
         }
     }
 
-    /// All cofacets. Yields (cofacet_index, added_vertex, k) where k is the
-    /// enumerator position at yield time. The coboundary coefficient of the
-    /// cofacet is (-1)^k (ripser's `k & 1 ? modulus - 1 : 1`).
+    /// Yield the next cofacet as (cofacet_index, added_vertex, k), where k
+    /// is the enumerator position at yield time. The coboundary coefficient
+    /// of the cofacet is (-1)^k (ripser's `k & 1 ? modulus - 1 : 1`).
     pub fn next_all(&mut self) -> Option<(u64, usize, usize)> {
         if self.exhausted || self.j < self.k {
             return None;
@@ -135,7 +137,8 @@ impl<'a> CofacetIter<'a> {
         Some((index, vertex, self.k))
     }
 
-    /// Only cofacets whose added vertex exceeds all simplex vertices.
+    /// Yield the next cofacet whose added vertex exceeds every simplex
+    /// vertex.
     pub fn next_upper(&mut self) -> Option<(u64, usize)> {
         if self.exhausted || self.j < self.k || self.bt.get(self.j, self.k) <= self.idx_below {
             return None;

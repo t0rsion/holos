@@ -31,7 +31,8 @@ pub fn rips_persistence_oracle_mod(
     modulus: u32,
 ) -> Diagram {
     let p = modulus as u64;
-    // Own primality check: composite p makes pivots noninvertible.
+    // The oracle runs its own primality check: a composite p makes pivots
+    // noninvertible.
     assert!(
         p >= 2 && (2..p).take_while(|d| d * d <= p).all(|d| p % d != 0),
         "oracle modulus must be prime, got {p}"
@@ -177,8 +178,8 @@ fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
     out
 }
 
-/// a + factor * b over Z/p. Both columns are sorted by row. Zero entries
-/// drop.
+/// Return a + factor * b over Z/p. Both columns must be sorted by row.
+/// Zero entries drop.
 fn add_scaled_mod_p(
     a: &[(usize, u64)],
     b: &[(usize, u64)],
@@ -218,7 +219,8 @@ fn add_scaled_mod_p(
     out
 }
 
-/// a^(p-2) mod p: the inverse by Fermat's little theorem, valid for prime p.
+/// Return a^(p-2) mod p, the inverse of a by Fermat's little theorem. `p`
+/// must be prime.
 fn mod_inverse(a: u64, p: u64) -> u64 {
     let mut base = a % p;
     let mut exp = p - 2;

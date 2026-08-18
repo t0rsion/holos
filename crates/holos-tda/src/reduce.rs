@@ -6,7 +6,7 @@
 //! dimension max_dim+1.
 //!
 //! Every method takes `&self`: the engine holds no mutable scratch, so the
-//! same cores drive both this serial path and the parallel one in
+//! same methods drive this serial path and the parallel one in
 //! [`crate::parallel`].
 
 use std::collections::BinaryHeap;
@@ -47,6 +47,28 @@ pub(crate) struct Engine<'a, C: Coeffs, D: Distances> {
 
 impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
     pub(crate) fn new(dist: &'a D, params: &'a RipsParams, ops: C) -> Result<Self> {
+        let pool = if params.threads > 1 {
+            Some(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(params.threads)
+                    .build()
+                    .map_err(|e| crate::Error::Io(format!("thread pool: {e}")))?,
+            )
+        } else {
+            None
+        };
+        Self::new_in(dist, params, ops, pool)
+    }
+
+    /// Build the engine on a caller-provided pool (or serially on `None`).
+    /// The collapse pipeline shares one pool between the collapse
+    /// and the reduction through this entry.
+    pub(crate) fn new_in(
+        dist: &'a D,
+        params: &'a RipsParams,
+        ops: C,
+        pool: Option<rayon::ThreadPool>,
+    ) -> Result<Self> {
         let n = dist.len();
         let threshold = params.threshold.unwrap_or_else(|| dist.default_threshold());
         // A complex on n points has no simplex above dimension n-1. The clamp
@@ -58,16 +80,6 @@ impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
         if bt.get(n, max_dim + 2) > ops.max_index() {
             return Err(crate::Error::IndexOverflow { n, dim: max_dim });
         }
-        let pool = if params.threads > 1 {
-            Some(
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(params.threads)
-                    .build()
-                    .map_err(|e| crate::Error::Io(format!("thread pool: {e}")))?,
-            )
-        } else {
-            None
-        };
         Ok(Self {
             dist,
             bt,
@@ -133,9 +145,9 @@ impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
         edges
     }
 
-    /// Union-find pass: emits dim-0 bars and returns the dim-1 columns
-    /// (cycle edges), sorted for reduction (diameter descending, index
-    /// ascending).
+    /// Emit the dim-0 bars with one union-find pass and return the dim-1
+    /// columns (cycle edges), sorted for reduction (diameter descending,
+    /// index ascending).
     fn dim0_pairs(&self, edges: &[Simplex], diagram: &mut Diagram) -> Vec<Simplex> {
         let mut sorted: Vec<Simplex> = edges.to_vec();
         let order = |a: &Simplex, b: &Simplex| {
@@ -422,10 +434,11 @@ impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
         Some(self.get_pivot(working_cob))
     }
 
-    /// Ripser's init_coboundary_and_get_pivot: enumerate the coboundary and
-    /// return its pivot. When the emergent shortcut fires, the pivot comes
-    /// back without building the working column. `has_pivot` answers whether
-    /// a given cofacet index is already a claimed pivot.
+    /// Enumerate the coboundary of `column` and return its pivot, as
+    /// ripser's init_coboundary_and_get_pivot does. When the emergent
+    /// shortcut fires, the pivot comes back without building the working
+    /// column. `has_pivot` answers whether a given cofacet index is already
+    /// a claimed pivot.
     pub(crate) fn init_coboundary(
         &self,
         column: Simplex,
@@ -544,9 +557,9 @@ impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
         d
     }
 
-    /// First facet (in ripser's facet order) with the same diameter, along
-    /// with its enumerator position k (for the boundary sign).
-    /// `vertices` must be the simplex's vertex set.
+    /// Return the first facet in ripser's facet order with the same
+    /// diameter, and its enumerator position k for the boundary sign.
+    /// `vertices` must be the vertex set of `simplex`.
     fn zero_pivot_facet_with(
         &self,
         vertices: &[usize],
@@ -566,7 +579,8 @@ impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
         None
     }
 
-    /// First cofacet (descending index order) with the same diameter.
+    /// Return the first cofacet in descending index order with the same
+    /// diameter.
     fn zero_pivot_cofacet_with(
         &self,
         vertices: &[usize],

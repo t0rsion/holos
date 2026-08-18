@@ -1,0 +1,18 @@
+[package]
+name = "collapse-bench"
+version = "0.5.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+# dist takes the whole workspace, and this crate has a binary. `publish =
+# false` keeps it out of a release today; the explicit opt-out states the
+# intent, so the benchmark driver cannot reach an installer, an archive, or
+# the Homebrew tap.
+[package.metadata.dist]
+dist = false
+
+# The driver stays stdlib-only beside the library it measures. A benchmark
+# that pulls its own dependencies measures them too.
+[dependencies]
+holos-tda = { path = "../holos-tda" }

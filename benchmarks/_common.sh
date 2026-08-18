@@ -66,14 +66,16 @@ median_iqr() {
 # measure_repeat OUT ERR REPS CMD... : one warm-up run, then REPS timed runs.
 # Prints "median_s=<s> iqr_s=<s> q1_s=<s> q3_s=<s> min_s=<s> max_s=<s>
 # max_rss_kb=<kb> runs=<n>". Peak RSS is the largest of the timed runs. OUT
-# and ERR hold the last run's output.
+# and ERR hold the last run's output. A run that exits nonzero returns 1 and
+# prints nothing, so a caller that guards the call sees the failure even
+# where errexit is suspended.
 measure_repeat() {
     local out="$1" err="$2" reps="$3"
     shift 3
-    measure_err "$out" "$err" "$@" >/dev/null
+    measure_err "$out" "$err" "$@" >/dev/null || return 1
     local walls=() rss_peak=0 line wall rss r
     for ((r = 0; r < reps; r++)); do
-        line="$(measure_err "$out" "$err" "$@")"
+        line="$(measure_err "$out" "$err" "$@")" || return 1
         wall="${line#wall_s=}"
         wall="${wall%% *}"
         rss="${line##*max_rss_kb=}"
@@ -219,6 +221,21 @@ emit_provenance() {
     PROV_CPU="$( (grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//') 2>/dev/null || sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
     PROV_NCPU="$( (nproc) 2>/dev/null || echo unknown)"
     PROV_AFFINITY="$( (grep -m1 '^Cpus_allowed_list' /proc/self/status | cut -f2) 2>/dev/null || echo unknown)"
+    # Physical topology of the allowed CPUs: SMT siblings share a core,
+    # so "8 logical" can be 4 physical cores. Interpret scaling per core.
+    PROV_TOPOLOGY="$(lscpu -p=CPU,CORE,SOCKET 2>/dev/null | awk -F, -v allowed="$PROV_AFFINITY" '
+        BEGIN {
+            n = split(allowed, parts, ",")
+            for (i = 1; i <= n; i++) {
+                if (split(parts[i], r, "-") == 2) { for (c = r[1]; c <= r[2]; c++) ok[c] = 1 }
+                else { ok[parts[i]] = 1 }
+            }
+        }
+        # logical:socket.core. Core ids repeat across sockets, so the
+        # socket belongs to the identity of a core.
+        /^[0-9]/ { if ($1 in ok) { printf "%s%s:%s.%s", sep, $1, $3, $2; sep = " " } }
+    ' || echo unknown)"
+    [ -n "$PROV_TOPOLOGY" ] || PROV_TOPOLOGY=unknown
     PROV_HOLOS_SHA="$(sha256 "$HOLOS_BIN")"
     PROV_HOLOS_VERSION="$("$HOLOS_BIN" --version)"
     PROV_CARGO_VERSION="$($CARGO --version)"
@@ -237,6 +254,7 @@ emit_provenance() {
         echo "cargo: $PROV_CARGO_VERSION"
         echo "rustc: $PROV_RUSTC_VERSION"
         echo "cpu: $PROV_CPU ($PROV_NCPU logical; cpus allowed: $PROV_AFFINITY)"
+        echo "cpu topology of allowed set (logical:socket.core): $PROV_TOPOLOGY"
         echo "timing: benchmarks/measure.py (monotonic wall clock; peak RSS = VmHWM, exec-gated)"
         echo
     } >"$file"
@@ -252,6 +270,7 @@ emit_provenance_md() {
     echo "- build: \`$BUILD_CMD_DISPLAY\` with \`[profile.release]\` $PROV_PROFILE_FLAGS; RUSTFLAGS \`${RUSTFLAGS:-<unset>}\`"
     echo "- rustc: $PROV_RUSTC_VERSION ($PROV_CARGO_VERSION)"
     echo "- cpu: $PROV_CPU ($PROV_NCPU logical); cpus allowed: $PROV_AFFINITY"
+    echo "- cpu topology of allowed set (logical:socket.core): $PROV_TOPOLOGY"
     echo "- timing: measure.py (monotonic wall clock; peak RSS = VmHWM, exec-gated)"
 }
 
@@ -272,4 +291,15 @@ require_proc() {
         echo "measure.py reads peak RSS from /proc (Linux only); no /proc here." >&2
         exit 1
     fi
+}
+
+# head_commit : the commit this checkout sits on, with the -DIRTY suffix
+# emit_provenance appends, or "unknown". The manifest records the same string.
+head_commit() {
+    local commit
+    commit="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+    if [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" ]]; then
+        commit="$commit-DIRTY"
+    fi
+    echo "$commit"
 }

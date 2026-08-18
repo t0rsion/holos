@@ -154,6 +154,8 @@ fn collapse_edges_keeps_the_diagram_and_reports_stats() {
     );
     assert!(n[2] > 0, "the grid must yield removals: {kept}");
     assert!(n[3] >= 2, "a removal needs a following empty pass: {kept}");
+    // The default schedule is the serial version 1 schedule.
+    assert!(kept.ends_with("passes"), "expected pass wording: {kept}");
 
     let detail = line_starting(&err, "collapse detail:");
     assert!(detail.contains("edge tests"), "{detail}");
@@ -163,6 +165,63 @@ fn collapse_edges_keeps_the_diagram_and_reports_stats() {
         3,
         "unexpected detail line: {detail}"
     );
+
+    let bare = run(&[path, "--dim", "2", "--collapse-schedule", "rounds"]);
+    assert!(
+        !bare.status.success(),
+        "--collapse-schedule without --collapse-edges must be rejected"
+    );
+    assert!(
+        stderr(&bare).contains("requires --collapse-edges"),
+        "{}",
+        stderr(&bare)
+    );
+
+    // Every schedule keeps the diagram at every thread count. The ordered
+    // schedule reports passes; the rounds schedule reports rounds. At four
+    // threads the parallel schedules test a different number of edges
+    // than the serial one on this grid, which shows the flag reached the
+    // pipeline.
+    let serial_detail = detail.clone();
+    for schedule in ["serial", "ordered", "rounds"] {
+        for threads in ["1", "4"] {
+            let out = run(&[
+                path,
+                "--dim",
+                "2",
+                "--collapse-edges",
+                "--collapse-schedule",
+                schedule,
+                "--threads",
+                threads,
+            ]);
+            assert!(out.status.success(), "stderr: {}", stderr(&out));
+            assert_eq!(
+                stdout(&plain),
+                stdout(&out),
+                "schedule {schedule} at {threads} threads changed the diagram"
+            );
+            let kept = line_starting(&stderr(&out), "collapse: kept");
+            let unit = if schedule == "rounds" {
+                "rounds"
+            } else {
+                "passes"
+            };
+            assert!(
+                kept.ends_with(unit),
+                "schedule {schedule}: expected {unit} wording: {kept}"
+            );
+            let this_detail = line_starting(&stderr(&out), "collapse detail:");
+            if schedule == "serial" {
+                assert_eq!(this_detail, serial_detail, "serial detail must not move");
+            } else if threads == "4" {
+                assert_ne!(
+                    this_detail, serial_detail,
+                    "schedule {schedule} at 4 threads ran the serial collapse"
+                );
+            }
+        }
+    }
 }
 
 #[test]

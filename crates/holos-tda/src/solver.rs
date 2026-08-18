@@ -8,6 +8,17 @@ use crate::reduce::Engine;
 use crate::{Diagram, Error, Result, RipsParams};
 
 pub(crate) fn compute<D: Distances + Sync>(dist: &D, params: &RipsParams) -> Result<Diagram> {
+    compute_in(dist, params, None)
+}
+
+/// Compute on a caller-provided pool. `None` lets the engine build its own
+/// (or run serially). The collapse pipeline hands its run-wide pool
+/// through here.
+pub(crate) fn compute_in<D: Distances + Sync>(
+    dist: &D,
+    params: &RipsParams,
+    pool: Option<rayon::ThreadPool>,
+) -> Result<Diagram> {
     if let Some(t) = params.threshold {
         if t.is_nan() || t < 0.0 {
             return Err(Error::InvalidInput(format!(
@@ -22,13 +33,18 @@ pub(crate) fn compute<D: Distances + Sync>(dist: &D, params: &RipsParams) -> Res
         )));
     }
     if p == 2 {
-        compute_impl(dist, Z2, params)
+        compute_impl(dist, Z2, params, pool)
     } else {
-        compute_impl(dist, Fp::new(p), params)
+        compute_impl(dist, Fp::new(p), params, pool)
     }
 }
 
-fn compute_impl<C, D>(dist: &D, ops: C, params: &RipsParams) -> Result<Diagram>
+fn compute_impl<C, D>(
+    dist: &D,
+    ops: C,
+    params: &RipsParams,
+    pool: Option<rayon::ThreadPool>,
+) -> Result<Diagram>
 where
     C: crate::field::Coeffs + Sync,
     D: Distances + Sync,
@@ -37,7 +53,10 @@ where
     if dist.len() == 0 {
         return Ok(diagram);
     }
-    let engine = Engine::new(dist, params, ops)?;
+    let engine = match pool {
+        Some(_) => Engine::new_in(dist, params, ops, pool)?,
+        None => Engine::new(dist, params, ops)?,
+    };
     engine.run(&mut diagram);
     diagram.canonicalize();
     Ok(diagram)

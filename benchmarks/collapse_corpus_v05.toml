@@ -1,0 +1,673 @@
+# Registered corpus for the rounds-collapse scaling study (algorithm
+# version 2; v0.5 internally, part of the public 0.5.0 release).
+#
+# FROZEN. Version 1 (2026-08-05) froze the entries, sizes, seeds, and
+# decision rule after consuming the v0.4 registered study (PLAN.md section
+# 13 prerequisite). Version 2 (2026-08-06) amends the measurement protocol
+# only, before any confirmation entry has run; versions 3 to 5
+# (2026-08-17) amend metadata and the repetition-count protocol only, after
+# the study was consumed; see [meta.amendments]. The entries do not change
+# in response to a result.
+#
+# PLAN.md is the maintainer's registration document. It is local and not
+# published; this file quotes every rule it depends on.
+#
+# The decision rule below is the frozen rule from PLAN.md section 13. It is
+# quoted here so the corpus carries its own criterion. Freezing this file
+# does not change the rule.
+
+[meta]
+version = 5
+date = "2026-08-17"
+study = "parallel edge collapse, algorithm version 2, scaling and product replacement"
+runner = "benchmarks/collapse_scaling_rounds.sh"
+driver = "crates/collapse-bench"
+plan = "PLAN.md section 13, the Study block"
+threshold_rule = """
+T = tau * R, where R is the enclosing radius of the cloud, the minimum over i
+of the maximum over j of d(i, j). tau = 1.0 reproduces the dense default
+threshold exactly. Every configuration of an entry gets the same T, and the
+driver holds it fixed across the collapse and the reduction.
+"""
+sampling_rule = """
+One cloud per entry, from gen_cloud.py N COORD_DIM SEED FAMILY. Screen
+entries use seed 5301. Confirmation entries use seeds 9137, 9138, and 9139
+by family, as in the v0.4 corpus, and no screen entry uses them. No entry is
+resampled: a rerun of the script regenerates the same cloud.
+"""
+configurations = """
+The driver runs every configuration of an entry in one process and times
+each phase on its own clock. No number comes from subtracting one command
+line from another.
+
+v2-cN   version 2 collapse, N collapse workers, one configuration per
+        collapse_threads value of the entry; v2-c1 and v2-cP (P the last
+        value) are the ones the decision rule reads
+v1-c1   version 1 serial collapse, the v0.4 pipeline baseline
+none    no collapse
+
+That is T + 2 configurations for T collapse_threads values: four on the
+headline grid, six on the strong-scaling probes. Every configuration
+reduces with reducer_threads workers, so the reducer is held fixed and the
+collapse is the only variable. The diagrams of every configuration must be
+identical bar for bar before any timing is recorded.
+"""
+measures = """
+collapse-only scaling: median collapse phase of v2-c1 over v2-cP.
+serial-prefix isolation: the same ratio with the reducer held at 8 workers.
+product replacement: median total of v1-c1 over median total of v2-cP.
+no-collapse end to end: median total of none, as the outside reference.
+survivor delta: output edges of v2 minus output edges of v1.
+reduction delta: median reduce phase of v1-c1 over v2-cP.
+peak RSS: measured by a separate single-repetition process per pipeline, so
+each figure belongs to one pipeline. The driver's own vm_hwm_kb is a
+whole-process high-water mark and is recorded for reference only.
+"""
+decision_rule = """
+Frozen at registration, quoted from PLAN.md section 13.
+
+A qualifying region is two or more consecutive held-out geometric entries of
+one chain, by chain_index. Disjoint clique unions may test scaling but
+cannot establish the headline; they carry headline = false and belong to no
+region.
+
+Product-positive: median C2,1/C2,8 >= 2.0 AND median end-to-end >= 1.15 over
+the v0.4-serial pipeline (v1 collapse plus the 8-worker reducer) AND peak RSS
+<= 1.5x that pipeline.
+Parallel-but-Amdahl-limited: collapse-only >= 2.0 without end-to-end 1.15.
+Conditional: collapse-only >= 1.25 and below 2.0, or isolated wins only.
+Negative: otherwise.
+
+Every grade reports the v2-vs-v1 survivor delta and the reduction-time delta.
+"""
+cost_note = """
+Sizes target seconds to minutes per entry on eight pinned cores, as the v0.4
+corpus does. One entry runs T + 2 configurations (four on the headline
+grid), each one agreement run plus the timed runs, plus two short peak-RSS
+probes, so a headline entry costs about six times a single v0.4 mode. n falls as tau rises, because the complex grows
+with both.
+"""
+
+[meta.amendments]
+v5 = """
+2026-08-17. Metadata correction, after the study was consumed. No entry,
+size, seed, thread count, threshold, measure, or rule changes. The
+configurations and cost_note fields described four configurations; the
+driver has always run v2-cN at every collapse_threads value of an entry,
+so the strong-scaling probes run six. The fields now say so, and the
+runner's records say "every configuration" instead of "all four".
+"""
+v4 = """
+2026-08-17. Non-semantic protocol amendment, after the study was consumed.
+No entry, size, seed, thread count, threshold, measure, or rule changes.
+The repetition count of an entry is the smallest multiple of the entry's
+configuration count (T + 2 for T collapse thread counts: 4 on the headline
+grid, 6 on the strong-scaling probes) at or above REPS, whose default is
+the preregistered minimum 5. Version 3 fixed REPS at 8 for every entry,
+which is balanced on the headline grid and not on the probes; the runner
+now rounds up per entry and the driver's kind=entry line records the count
+and balanced=yes. The runner also removes a stale manifest before a screen
+starts, writes one only after a run with no void entry, and checks the
+screen's commit and filter before a confirmation runs, as the ordered
+runner does.
+"""
+v3 = """
+2026-08-17. Non-semantic metadata amendment, after the screen and the
+held-out confirmation both ran and were consumed (graded
+parallel-but-Amdahl-limited). No entry, size, seed, thread count,
+threshold, measure, or rule changes.
+
+1. The runner is benchmarks/collapse_scaling_rounds.sh. The former
+   benchmarks/collapse_scaling.sh was rewritten for the ordered study and
+   can no longer run this corpus; the rounds runner is the version 2 runner
+   with the study's own result names (results_rounds_screen,
+   results_rounds_confirm, results_rounds_manifest), the driver's rounds
+   configuration set (--mode rounds: v2-cN, v1-c1, none), a balanced
+   repetition rotation (REPS a multiple of the configuration count, 8 by
+   default; the version 2 runs used 5 over four configurations and were
+   not balanced, which the reproduction discloses beside them), and
+   refusal of a filtered --confirm.
+2. The header names the study by schedule and says what PLAN.md is.
+3. The public function names of the rounds schedule are
+   collapse_dense_rounds_parallel and collapse_sparse_rounds_parallel;
+   the driver's v2 configurations call them.
+"""
+v2 = """
+2026-08-06. Version 2 amends version 1 before any confirmation entry has
+run. Reviewed and required by the adversarial release review. Entries,
+sizes, seeds, and the decision rule are unchanged. Five changes:
+
+1. The reduce phase is defined honestly as the public reduction call,
+   which includes the engine's pool construction and diagram
+   canonicalization. The version 1 text implied a narrower timer. At
+   millisecond scales this biases reduce_v1_over_v2 toward 1.0; the
+   definition, not the timer, changes.
+2. Fail closed: a failed peak-RSS probe voids its entry (peak RSS is a
+   decision-rule input), and every timed repetition's diagram is compared
+   against the agreement reference after its clocks stop. Both are runner
+   and driver changes that add no timed work.
+3. Provenance now records the physical topology of the allowed CPU set.
+   On the study machine, cpus 0-7 are four P-cores with two SMT threads
+   each, not eight cores; collapse-worker scaling must be interpreted
+   against physical cores.
+4. The version 1 screen of 2026-08-06 is preserved as an audited,
+   incomplete record: 14 of 16 entries valid, b-torus-md1 and
+   c-clusters-t02-probe VOID (their driver processes were killed
+   mid-timing by a failing CPU, after their four configurations' diagrams
+   had agreed; the machine logged MCE hardware errors and rebooted twice
+   during the cycle). Its rows are descriptive observations only. The
+   protocol requires a fresh, complete version 2 screen before the
+   confirmation set runs; the version 1 screen's manifest does not unlock
+   confirmation, by hash and by ID count.
+5. Study-counter gap ratified: the plan asked for blocked-successful and
+   conflict-blocking counters; they are not public fields and the driver
+   labels them unavailable. The deferral is recorded in PLAN section 14
+   and accepted for this study; none of them enters the decision rule.
+"""
+
+v1 = """
+2026-08-05. Version 1 freezes the version 0 draft. The prerequisite is
+met: the v0.4 registered study (collapse_corpus.toml version 3) ran at the
+v0.4 release commit, screen and held-out confirmation, and its results
+were consumed before this freeze. What they established, and what changed
+here because of them:
+
+1. Consumed results, in grades of the v0.4 rule: positive on the cube
+   confirmation chain (median mode3/mode1 2.85, range 1.55 to 3.55) and
+   the clusters chain (median 2.22), both with mode3/mode2 far above the
+   1.05 margin; positive with a wide disclosed range on the sphere chain
+   (median 3.8, range 0.62 to 6.99); conditional on the torus chain
+   (median 1.14). The off-chain reducer-at-8 probe lost (0.45): with a
+   parallel reducer the serial collapse is the pipeline's Amdahl
+   bottleneck. That probe is exactly the regime this corpus's product
+   comparison targets, so the headline entries keep reducer_threads 8 and
+   mid-tau geometric families where the v0.4 study showed real collapse
+   yield.
+2. Protocol fix. The v0.4 densify-near-boundary rule was unusable as
+   written: adding a midpoint changes the corpus and breaks the manifest
+   hash the confirmation gate checks, so no midpoint can ever be added
+   legally. Observed sign changes in the v0.4 screen (cube between tau
+   0.5 and 0.8 and between 0.8 and 1.0, torus between 0.3 and 0.5 and
+   between 0.5 and 0.8, sphere between 0.8 and 1.0) are therefore
+   reported here instead of chased. This corpus has no midpoint rule:
+   boundary sign changes in the screen are reported in the results and
+   never modify the registered confirmation set.
+3. Disclosure of informal v2 timings that preceded this freeze: two
+   plumbing smoke runs of the phase-separated driver on ad-hoc clouds
+   (clusters n = 250 seed 777 at the enclosing radius; torus n = 400
+   seed 778 at tau 0.45), plus the in-module thread-invariance unit
+   fixtures. They showed severe v2 work inflation (rounds in the
+   hundreds on cluster-type inputs) and roughly 4x to 5x collapse-only
+   self-scaling at 8 workers. They carry no evidentiary weight: the
+   decision rule reads this corpus's confirmation entries only. No entry
+   of this corpus reuses those seeds.
+"""
+
+[meta.decisions]
+clique_family = """
+Decided at the version 1 freeze: the clusters-at-low-tau approximation
+stays (8 Gaussian clusters thresholded below the inter-cluster distance
+give 8 nearly complete components). No new generator family. The probes
+keep headline = false and belong to no region.
+"""
+counters = """
+Decided at the version 1 freeze: the gap is accepted. The driver prints
+what CollapseStats and the certificate expose (edge tests, witness
+segments, epochs, survivors, largest common neighborhood, per-epoch batch
+widths from the certificate) and prints blocked-successful counts and
+conflict blocking as unavailable. Deriving retests as edge_tests minus
+input_edges stays labeled as derived.
+"""
+rss_probe = """
+Decided at the version 1 freeze: peak RSS comes from one extra
+single-repetition process per pipeline (v1, and v2 at P workers). The
+probe cost, two short runs per entry, is accepted.
+"""
+
+[meta.grid]
+family = ["cube", "sphere", "clusters", "torus"]
+tau = [0.15, 0.2, 0.3, 0.5, 0.8, 1.0]
+collapse_threads = [1, 8]
+reducer_threads = 8
+modulus = [2, 5]
+max_dim = [1, 2]
+coord_dim = [3, 5]
+note = """
+collapse_threads and reducer_threads are the defaults for every entry.
+{1, 8} and 8 are the headline settings: C2,1 against C2,8 with the reducer
+held at 8. An entry may override both, and the strong-scaling probes do.
+"""
+
+[meta.design]
+block_a = """
+The collapse-share block: families and thresholds where the collapse takes a
+large share of the pipeline. clusters and torus at the enclosing radius,
+cube at low tau. These carry the headline.
+"""
+block_b = "the modulus and max_dim axes, one at a time, off the block-a cells."
+block_c = """
+strong-scaling probes at collapse_threads {1, 2, 4, 8}, on the near-clique
+inputs. They map the scaling curve and cannot establish the headline.
+"""
+note = """
+The design is fractional. The screen locates where the parallel collapse
+pays; the held-out confirmation set is what any public claim rests on.
+"""
+
+[meta.confirm_chains]
+rule = """
+Every confirmation entry carries chain and chain_index. A chain is the
+ordered sweep of one family at modulus 2, collapse_threads {1, 8}, and
+reducer_threads 8, by ascending tau. chain_index runs 1, 2, 3, ... with no
+gaps, and file order matches it. A qualifying region is two or more
+consecutive entries of one chain. An entry with chain = "none" varies one
+axis off its family baseline, stands alone, and belongs to no region. This
+mirrors [meta.confirm_chains] of the v0.4 corpus.
+"""
+cube = ["k-cube-t03", "k-cube-t05", "k-cube-t08"]
+sphere = ["k-sphere-t05", "k-sphere-t08"]
+clusters = ["k-clusters-t05", "k-clusters-t08", "k-clusters-t10"]
+torus = ["k-torus-t05", "k-torus-t08", "k-torus-t10"]
+none = ["k-cube-t05-p5", "k-clusters-t05-md1", "k-clusters-t02-probe"]
+
+[[screen]]
+id = "a-clusters-t10"
+family = "clusters"
+n = 300
+coord_dim = 3
+max_dim = 2
+tau = 1.0
+modulus = 2
+seed = 5301
+block = "a"
+headline = true
+
+[[screen]]
+id = "a-clusters-t08"
+family = "clusters"
+n = 350
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 2
+seed = 5301
+block = "a"
+headline = true
+
+[[screen]]
+id = "a-clusters-t05"
+family = "clusters"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+seed = 5301
+block = "a"
+headline = true
+
+[[screen]]
+id = "a-torus-t10"
+family = "torus"
+n = 300
+coord_dim = 3
+max_dim = 2
+tau = 1.0
+modulus = 2
+seed = 5301
+block = "a"
+headline = true
+
+[[screen]]
+id = "a-torus-t08"
+family = "torus"
+n = 350
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 2
+seed = 5301
+block = "a"
+headline = true
+
+[[screen]]
+id = "a-torus-t05"
+family = "torus"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+seed = 5301
+block = "a"
+headline = true
+
+[[screen]]
+id = "a-cube-t03"
+family = "cube"
+n = 800
+coord_dim = 3
+max_dim = 2
+tau = 0.3
+modulus = 2
+seed = 5301
+block = "a"
+headline = true
+
+[[screen]]
+id = "a-cube-t05"
+family = "cube"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+seed = 5301
+block = "a"
+headline = true
+
+[[screen]]
+id = "a-sphere-t08"
+family = "sphere"
+n = 350
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 2
+seed = 5301
+block = "a"
+headline = true
+
+[[screen]]
+id = "a-sphere-t05"
+family = "sphere"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+seed = 5301
+block = "a"
+headline = true
+
+[[screen]]
+id = "b-clusters-t10-p5"
+family = "clusters"
+n = 300
+coord_dim = 3
+max_dim = 2
+tau = 1.0
+modulus = 5
+seed = 5301
+block = "b"
+headline = true
+
+[[screen]]
+id = "b-cube-md1"
+family = "cube"
+n = 1500
+coord_dim = 3
+max_dim = 1
+tau = 0.3
+modulus = 2
+seed = 5301
+block = "b"
+headline = true
+
+[[screen]]
+id = "b-cube5-md1"
+family = "cube"
+n = 1000
+coord_dim = 5
+max_dim = 1
+tau = 0.5
+modulus = 2
+seed = 5301
+block = "b"
+headline = true
+
+[[screen]]
+id = "b-torus-md1"
+family = "torus"
+n = 1500
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 2
+seed = 5301
+block = "b"
+headline = true
+
+# Near-clique probes. The clusters family at low tau leaves 8 nearly
+# complete components with no edge between them. They map the scaling curve
+# on wide batches. They are not geometric regions and cannot carry the
+# headline: see [meta.open_items] clique_family.
+
+[[screen]]
+id = "c-clusters-t02-probe"
+family = "clusters"
+n = 900
+coord_dim = 3
+max_dim = 2
+tau = 0.2
+modulus = 2
+collapse_threads = [1, 2, 4, 8]
+reducer_threads = 8
+seed = 5301
+block = "c"
+headline = false
+
+[[screen]]
+id = "c-clusters-t015-probe"
+family = "clusters"
+n = 1200
+coord_dim = 3
+max_dim = 1
+tau = 0.15
+modulus = 2
+collapse_threads = [1, 2, 4, 8]
+reducer_threads = 8
+seed = 5301
+block = "c"
+headline = false
+
+# Held out. Do not run until the screen is complete. chain and chain_index
+# declare the order the decision rule reads: see [meta.confirm_chains].
+
+[[confirm]]
+id = "k-cube-t03"
+family = "cube"
+n = 1200
+coord_dim = 3
+max_dim = 2
+tau = 0.3
+modulus = 2
+seed = 9137
+block = "confirm"
+headline = true
+chain = "cube"
+chain_index = 1
+
+[[confirm]]
+id = "k-cube-t05"
+family = "cube"
+n = 750
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+seed = 9137
+block = "confirm"
+headline = true
+chain = "cube"
+chain_index = 2
+
+[[confirm]]
+id = "k-cube-t08"
+family = "cube"
+n = 400
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 2
+seed = 9137
+block = "confirm"
+headline = true
+chain = "cube"
+chain_index = 3
+
+[[confirm]]
+id = "k-cube-t05-p5"
+family = "cube"
+n = 750
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 5
+seed = 9137
+block = "confirm"
+headline = true
+chain = "none"
+chain_index = 0
+
+[[confirm]]
+id = "k-sphere-t05"
+family = "sphere"
+n = 750
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+seed = 9138
+block = "confirm"
+headline = true
+chain = "sphere"
+chain_index = 1
+
+[[confirm]]
+id = "k-sphere-t08"
+family = "sphere"
+n = 400
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 2
+seed = 9138
+block = "confirm"
+headline = true
+chain = "sphere"
+chain_index = 2
+
+[[confirm]]
+id = "k-clusters-t05"
+family = "clusters"
+n = 750
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+seed = 9138
+block = "confirm"
+headline = true
+chain = "clusters"
+chain_index = 1
+
+[[confirm]]
+id = "k-clusters-t08"
+family = "clusters"
+n = 500
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 2
+seed = 9138
+block = "confirm"
+headline = true
+chain = "clusters"
+chain_index = 2
+
+[[confirm]]
+id = "k-clusters-t10"
+family = "clusters"
+n = 400
+coord_dim = 3
+max_dim = 2
+tau = 1.0
+modulus = 2
+seed = 9138
+block = "confirm"
+headline = true
+chain = "clusters"
+chain_index = 3
+
+[[confirm]]
+id = "k-clusters-t05-md1"
+family = "clusters"
+n = 1500
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 2
+seed = 9138
+block = "confirm"
+headline = true
+chain = "none"
+chain_index = 0
+
+[[confirm]]
+id = "k-clusters-t02-probe"
+family = "clusters"
+n = 900
+coord_dim = 3
+max_dim = 2
+tau = 0.2
+modulus = 2
+collapse_threads = [1, 2, 4, 8]
+reducer_threads = 8
+seed = 9138
+block = "confirm"
+headline = false
+chain = "none"
+chain_index = 0
+
+[[confirm]]
+id = "k-torus-t05"
+family = "torus"
+n = 750
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+seed = 9139
+block = "confirm"
+headline = true
+chain = "torus"
+chain_index = 1
+
+[[confirm]]
+id = "k-torus-t08"
+family = "torus"
+n = 500
+coord_dim = 3
+max_dim = 2
+tau = 0.8
+modulus = 2
+seed = 9139
+block = "confirm"
+headline = true
+chain = "torus"
+chain_index = 2
+
+[[confirm]]
+id = "k-torus-t10"
+family = "torus"
+n = 400
+coord_dim = 3
+max_dim = 2
+tau = 1.0
+modulus = 2
+seed = 9139
+block = "confirm"
+headline = true
+chain = "torus"
+chain_index = 3

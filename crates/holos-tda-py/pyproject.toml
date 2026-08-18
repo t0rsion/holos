@@ -1,10 +1,13 @@
 [build-system]
-requires = ["maturin>=1.7,<2.0"]
+# maturin 1.9.0 added PEP 639 support for `license` and `license-files`, and
+# 1.9.3 fixed `license-files` in source distributions. An older maturin
+# builds a wheel with no license files from this file.
+requires = ["maturin>=1.9.3,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "holos-tda"
-version = "0.4.0"
+version = "0.5.0"
 description = "Vietoris-Rips persistent homology with a ripser-class engine"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
