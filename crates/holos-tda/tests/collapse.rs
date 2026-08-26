@@ -474,11 +474,6 @@ fn assert_collapse_preserves_diagram(
     for &modulus in &MODULI {
         for threshold in thresholds {
             for &threads in &THREAD_COUNTS {
-                // Toggle coverage: the full eight-way cross at one and four
-                // threads, the two extremes at every thread count. The
-                // crossed pair is modulus x threshold x max_dim x toggles at
-                // threads {1, 4}, and modulus x threshold x max_dim x
-                // {all on, all off} at threads {1, 2, 4, 8}.
                 let toggle_set: &[(bool, bool, bool)] = match threads {
                     1 | 4 => &TOGGLE_CROSS,
                     _ => &[ALL_ON, ALL_OFF],
@@ -557,7 +552,7 @@ fn assert_fixture(
     result
 }
 
-// Battery inputs. Each one is small enough for the oracle at max_dim 2.
+// Each of these is small enough for the oracle at max_dim 2.
 
 // Generic point cloud: distinct values, no ties, no absent edges.
 fn battery_points() -> DistanceMatrix {
@@ -645,8 +640,6 @@ fn collapse_preserves_the_diagram_with_absent_edges() {
 fn collapse_preserves_the_diagram_when_disconnected() {
     assert_collapse_preserves_diagram("disconnected", &battery_disconnected(), 1.5, true);
 }
-
-// Certificate properties.
 
 #[test]
 fn certificate_properties_hold_on_every_battery_input() {
@@ -790,8 +783,6 @@ fn empty_graph_collapses_to_nothing() {
     assert_eq!(result.stats.epochs, 1, "passes");
     assert_eq!(result.stats.max_common_neighborhood, 0, "neighborhood");
 }
-
-// Named adversarial fixtures.
 
 /// A single fixed apex cannot certify edge (0, 1): vertex 2 is the only
 /// candidate at level 1, but it is not adjacent to vertex 3, which joins the
@@ -1172,7 +1163,7 @@ fn projective_plane_torsion() {
     // so it cannot be quietly field-dependent.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data/projective_plane.lower_distance_matrix");
-    let dense = holos_tda::io::read_lower_distance_matrix(&path).unwrap();
+    let dense = holos_tda::io::read_lower_distance_matrix(&path, 1).unwrap();
     collapse_and_check_dense("projective_plane", &dense, None);
 
     let intervals = |bars: &[Bar], dim: usize| -> Vec<(f64, f64)> {
@@ -1355,8 +1346,6 @@ fn k64_64_plus_k4_mixed_yield() {
         }
     }
 }
-
-// Public API surface.
 
 #[test]
 fn with_edge_collapse_sets_the_flag() {
@@ -1578,8 +1567,6 @@ fn random_certificates_pass_the_independent_verifier() {
     assert!(removed_total > 100, "collapse never fired: {removed_total}");
 }
 
-// The unpruned reference schedule.
-//
 // The production collapser skips edges whose verdict provably cannot have
 // changed, with a retest-everything fallback once the affected vertex set
 // grows past its marking limit. Only the test counter may move: the removal

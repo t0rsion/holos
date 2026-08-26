@@ -11,21 +11,24 @@ pub struct BinomialTable {
 }
 
 impl BinomialTable {
-    /// Build the table of C(i, j) for i <= n, j <= k_max. Returns an error
-    /// if any entry overflows u64. That bound limits the representable
-    /// simplex indices.
+    /// Build the table of C(i, j) for i <= n, j <= k_max.
+    ///
+    /// Returns an error if any entry overflows u64. That bound limits the
+    /// representable simplex indices.
     pub fn new(n: usize, k_max: usize) -> Result<Self> {
+        // The table is k-major: C(i, j) sits at j * (n + 1) + i. The
+        // enumerators sweep i downward with j fixed, so that layout reads
+        // one cache line per eight lookups whatever k_max is.
         let mut table = vec![0u64; (n + 1) * (k_max + 1)];
         for i in 0..=n {
-            table[i * (k_max + 1)] = 1;
+            table[i] = 1;
             for j in 1..=k_max.min(i) {
-                let above = table[(i - 1) * (k_max + 1) + j - 1];
-                let left = table[(i - 1) * (k_max + 1) + j];
-                table[i * (k_max + 1) + j] =
-                    above.checked_add(left).ok_or(Error::IndexOverflow {
-                        n,
-                        dim: k_max.saturating_sub(2),
-                    })?;
+                let above = table[(j - 1) * (n + 1) + i - 1];
+                let left = table[j * (n + 1) + i - 1];
+                table[j * (n + 1) + i] = above.checked_add(left).ok_or(Error::IndexOverflow {
+                    n,
+                    dim: k_max.saturating_sub(2),
+                })?;
             }
         }
         Ok(Self { table, n, k_max })
@@ -37,7 +40,7 @@ impl BinomialTable {
         if n < k {
             0
         } else {
-            self.table[n * (self.k_max + 1) + k]
+            self.table[k * (self.n + 1) + n]
         }
     }
 
@@ -66,9 +69,40 @@ impl BinomialTable {
         lo
     }
 
+    /// Return the two vertices of the edge with the given index, the lower
+    /// one first. `n` is the point count.
+    ///
+    /// This is [`BinomialTable::unrank`] at dimension 1. The upper vertex is
+    /// the largest v with C(v, 2) at or below the index. C(v, 2) <= index is
+    /// v * v - v - 2 * index <= 0, so that vertex is the floor of
+    /// (1 + sqrt(1 + 8 * index)) / 2 and a square root replaces the search
+    /// over the table. The integer square root gives that floor exactly: no
+    /// odd integer lies between a root and its own floor, so halving the
+    /// floor and halving the root agree. Halving (1 + root) is
+    /// `root.div_ceil(2)`.
+    #[inline]
+    pub fn unrank_edge(&self, index: u64, n: usize) -> (usize, usize) {
+        debug_assert!(self.k_max >= 2 && n >= 2 && n <= self.n);
+        debug_assert!(index < self.get(n, 2));
+        let root = if index <= (u64::MAX - 1) / 8 {
+            (8 * index + 1).isqrt()
+        } else {
+            (8 * (index as u128) + 1).isqrt() as u64
+        };
+        let upper = root.div_ceil(2) as usize;
+        ((index - self.get(upper, 2)) as usize, upper)
+    }
+
     /// Write the vertices of the simplex with the given index into `out`,
     /// ascending.
     pub fn unrank(&self, mut idx: u64, dim: usize, n: usize, out: &mut Vec<usize>) {
+        if dim == 1 {
+            let (lower, upper) = self.unrank_edge(idx, n);
+            out.clear();
+            out.push(lower);
+            out.push(upper);
+            return;
+        }
         out.clear();
         let mut upper = n - 1;
         for k in (1..=dim + 1).rev() {
@@ -81,10 +115,11 @@ impl BinomialTable {
     }
 }
 
-/// Enumerates cofacets of a simplex in decreasing order of the added vertex,
-/// which is decreasing order of cofacet index. `next_upper` restricts to
+/// Enumerates cofacets of a simplex in decreasing order of the added vertex.
+///
+/// That order is decreasing cofacet index. `next_upper` restricts to
 /// cofacets whose added vertex exceeds every simplex vertex. Over all
-/// d-simplices that generates each (d+1)-simplex exactly once.
+/// d-simplices, `next_upper` generates each (d+1)-simplex exactly once.
 pub struct CofacetIter<'a> {
     bt: &'a BinomialTable,
     idx_below: u64,
@@ -156,6 +191,11 @@ impl<'a> CofacetIter<'a> {
 
 /// Enumerates facets of a simplex, removing vertices from the highest
 /// position downward.
+///
+/// It searches for each removed vertex, so the shipped facet walk in
+/// `reduce.rs` takes the same indices from the vertices instead. This is
+/// the reference that walk is tested against.
+#[cfg(test)]
 pub struct FacetIter<'a> {
     bt: &'a BinomialTable,
     idx_below: u64,
@@ -164,6 +204,7 @@ pub struct FacetIter<'a> {
     k: isize,
 }
 
+#[cfg(test)]
 impl<'a> FacetIter<'a> {
     pub fn new(bt: &'a BinomialTable, index: u64, dim: usize, n: usize) -> Self {
         Self {
@@ -179,6 +220,7 @@ impl<'a> FacetIter<'a> {
 /// Items are (facet_index, removed_vertex, k) where k is the removed
 /// vertex's position in the simplex. The boundary coefficient of the facet
 /// is (-1)^k.
+#[cfg(test)]
 impl Iterator for FacetIter<'_> {
     type Item = (u64, usize, usize);
 
@@ -279,7 +321,6 @@ mod tests {
                     cv.push(v);
                     cv.sort_unstable();
                     assert_eq!(ci, naive_rank(&cv), "cofacet index mismatch");
-                    // k is the added vertex's position in the cofacet.
                     assert_eq!(k, cv.iter().position(|&x| x == v).unwrap());
                     got.push((ci, v));
                 }
@@ -322,7 +363,6 @@ mod tests {
                 for (fi, v, k) in iter {
                     let fv: Vec<usize> = verts.iter().copied().filter(|&x| x != v).collect();
                     assert_eq!(fi, naive_rank(&fv), "facet index mismatch");
-                    // k is the removed vertex's position in the simplex.
                     assert_eq!(k, verts.iter().position(|&x| x == v).unwrap());
                     removed_order.push(v);
                 }
@@ -361,6 +401,68 @@ mod tests {
                     "signed del o del != 0 at {verts:?}"
                 );
             }
+        }
+    }
+
+    // The general unrank body. `unrank` takes a closed-form shortcut at
+    // dimension 1, so a test of that shortcut needs the search it replaced.
+    fn unrank_by_search(bt: &BinomialTable, mut idx: u64, dim: usize, n: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut upper = n - 1;
+        for k in (1..=dim + 1).rev() {
+            let v = bt.max_vertex(idx, k, upper);
+            idx -= bt.get(v, k);
+            upper = v.saturating_sub(1);
+            out.push(v);
+        }
+        out.reverse();
+        out
+    }
+
+    #[test]
+    fn unrank_edge_matches_the_search() {
+        for n in 2..=128usize {
+            let bt = BinomialTable::new(n, 2).unwrap();
+            for idx in 0..bt.get(n, 2) {
+                let (lower, upper) = bt.unrank_edge(idx, n);
+                assert_eq!(
+                    vec![lower, upper],
+                    unrank_by_search(&bt, idx, 1, n),
+                    "n {n}, index {idx}"
+                );
+                assert_eq!(naive_rank(&[lower, upper]), idx, "n {n}, index {idx}");
+            }
+        }
+    }
+
+    // Same sweep at the engineering corpus size. Release sweep only.
+    #[test]
+    #[ignore = "exhaustive: 4.5 million edge indices"]
+    fn unrank_edge_matches_the_search_at_three_thousand_points() {
+        let n = 3000usize;
+        let bt = BinomialTable::new(n, 2).unwrap();
+        let mut buf = Vec::new();
+        for idx in 0..bt.get(n, 2) {
+            bt.unrank(idx, 1, n, &mut buf);
+            assert_eq!(buf, unrank_by_search(&bt, idx, 1, n), "index {idx}");
+        }
+    }
+
+    proptest::proptest! {
+        // Point counts past the exhaustive sweep, at an index the pick
+        // places anywhere in the range.
+        #[test]
+        fn unrank_edge_matches_the_search_at_large_n(
+            n in 2usize..100_000,
+            pick in 0.0f64..1.0,
+        ) {
+            let bt = BinomialTable::new(n, 2).unwrap();
+            let pairs = bt.get(n, 2);
+            let idx = ((pairs as f64 * pick) as u64).min(pairs - 1);
+            let (lower, upper) = bt.unrank_edge(idx, n);
+            proptest::prop_assert!(lower < upper && upper < n);
+            proptest::prop_assert_eq!(vec![lower, upper], unrank_by_search(&bt, idx, 1, n));
+            proptest::prop_assert_eq!(bt.get(upper, 2) + lower as u64, idx);
         }
     }
 

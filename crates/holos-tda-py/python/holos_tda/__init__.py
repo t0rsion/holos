@@ -1,9 +1,8 @@
 """Vietoris-Rips persistent homology with a ripser-class engine.
 
-Thin Python bindings over the ``holos-tda`` Rust crate. Each function returns
-the persistence diagram as a list of ``(dim, birth, death)`` tuples in
-canonical order: by dimension, then birth, then death. Essential classes
-have ``death == math.inf``.
+Python bindings for the ``holos-tda`` crate. Each function returns a list of
+``(dim, birth, death)`` tuples in canonical order: by dimension, then birth,
+then death. Essential classes have ``death == math.inf``.
 """
 
 import sys
@@ -26,14 +25,14 @@ def rips_points(points, max_dim=1, threshold=None, modulus=2, threads=1,
     """Compute Rips persistence of a Euclidean point cloud.
 
     Args:
-        points: sequence of points, each a sequence of float coordinates
-            (all of the same dimension).
+        points: sequence of points, each a sequence of float coordinates of
+            the same dimension.
         max_dim: highest homology dimension to compute.
         threshold: truncate the filtration at this scale. ``None`` uses the
             enclosing radius.
         modulus: coefficient field Z/p; must be a prime below 32768.
-        threads: reduction worker threads. 1 runs the serial engine. The
-            diagram is identical at any thread count.
+        threads: worker threads. 1 runs the serial engine. The diagram is
+            identical at any thread count.
         collapse_edges: collapse dominated edges before the engine runs.
             The diagram is identical either way.
 
@@ -49,17 +48,17 @@ def rips_condensed(data, max_dim=1, threshold=None, modulus=2, threads=1,
                    collapse_edges=False):
     """Compute Rips persistence of a condensed distance matrix.
 
-    The layout is upper-triangular and row-major, as produced by
+    The layout is upper-triangular and row-major, the same as
     ``scipy.spatial.distance.pdist``.
 
     Args:
-        data: flat sequence of the n*(n-1)/2 pairwise distances.
+        data: flat sequence of the ``n(n-1)/2`` pairwise distances.
         max_dim: highest homology dimension to compute.
         threshold: truncate the filtration at this scale. ``None`` uses the
             enclosing radius.
         modulus: coefficient field Z/p; must be a prime below 32768.
-        threads: reduction worker threads. 1 runs the serial engine. The
-            diagram is identical at any thread count.
+        threads: worker threads. 1 runs the serial engine. The diagram is
+            identical at any thread count.
         collapse_edges: collapse dominated edges before the engine runs.
             The diagram is identical either way.
 
@@ -84,8 +83,8 @@ def rips_sparse(n, triplets, max_dim=1, threshold=None, modulus=2, threads=1,
         max_dim: highest homology dimension to compute.
         threshold: truncate the filtration at this scale.
         modulus: coefficient field Z/p; must be a prime below 32768.
-        threads: reduction worker threads. 1 runs the serial engine. The
-            diagram is identical at any thread count.
+        threads: worker threads. 1 runs the serial engine. The diagram is
+            identical at any thread count.
         collapse_edges: collapse dominated edges before the engine runs.
             The diagram is identical either way.
 

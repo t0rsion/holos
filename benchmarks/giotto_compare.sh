@@ -29,9 +29,9 @@ usage() {
 Usage: giotto_compare.sh [-h]
 
 Compare holos against giotto-ph's ripser_parallel on identical seeded clouds
-at matched thread counts (wall time + diagram agreement), then compare the
-two products around edge collapse on one thresholded graph. Skips cleanly
-with exit 0 if giotto-ph is not importable.
+at matched thread counts (wall time and diagram agreement), then compare
+the two products around edge collapse on one thresholded graph. Exit 0 if
+giotto-ph is not importable.
 
 Environment:
   CARGO             cargo invocation (may carry a toolchain), default "cargo"
@@ -53,8 +53,7 @@ EOF
 
 source "$(dirname "$0")/_common.sh"
 
-# The optional-dependency gate. It runs before any build or measurement, so
-# the skip path is cheap and never fails.
+# Skip before any build when giotto-ph is missing, and exit 0.
 if ! python3 -c 'from gph import ripser_parallel' 2>/dev/null; then
     echo "giotto-ph not installed, skipping"
     exit 0

@@ -10,8 +10,8 @@
 //! configurations face a second gate: their collapsed matrix and
 //! certificate must equal the serial version 1 run's.
 //!
-//! The timed repetitions are counterbalanced: they interleave the
-//! configurations instead of running one configuration to exhaustion.
+//! Timed repetitions interleave the configurations instead of running one
+//! configuration to exhaustion.
 //!
 //! Output is one key=value line per record. benchmarks/collapse_scaling_ordered.sh
 //! parses it; the fields below are its interface.
@@ -74,15 +74,13 @@ Configurations:
   none    no collapse
 
 The agreement runs come first, in the order v2, v1, v1o, v1p, none, so the
-serial version 1 result exists before the ordered gate needs it. The timed
-repetitions then run counterbalanced.
+serial version 1 result exists before the ordered gate needs it.
 
 Shipped pipeline against the phase split:
   holos_tda::rips_persistence with RipsParams::collapse_edges set and the
   ordered collapse schedule selected is the shipped pipeline: one run-wide
   pool drives the ordered collapse and then the reduction. It takes one
-  worker count for both halves and exposes no phase boundary, so no outside
-  clock can split it without running something else.
+  worker count for both halves and exposes no phase boundary.
   The driver measures the shipped pipeline and the phase split. v1p-cP calls
   the shipped path and reports one `pipeline` phase inside its total, and it
   is the configuration the end-to-end comparison reads. v1o-cN builds a pool
@@ -97,15 +95,14 @@ Shipped pipeline against the phase split:
 
 Counterbalancing:
   The timed repetitions interleave the configurations. Repetition r runs
-  them starting at position r of the agreement order and wraps around, so
-  the configuration at position i of repetition r is configuration
-  (i + r) mod m of that order. Each configuration moves one place earlier
-  every repetition, and drift or a thermal ramp cannot land on one
-  configuration alone. The rotation is balanced, every configuration in
-  every position equally often, only when the repetition count is a
-  multiple of m. The kind=entry line reports balanced=yes or balanced=no,
-  and a registered run needs yes. The rotation is deterministic, and each
-  repetition prints its exact order as a kind=order line.
+  them starting at position r of the agreement order and wraps around.
+  Each configuration moves one place earlier every repetition, so drift or
+  a thermal ramp cannot land on one configuration alone. The rotation is
+  balanced, every configuration in every position equally often, only when
+  the repetition count is a multiple of the configuration count. The
+  kind=entry line reports balanced=yes or balanced=no, and a registered run
+  needs yes. The rotation is deterministic, and each repetition prints its
+  exact order as a kind=order line.
 
 Phases:
   distance  the distance matrix of the cloud
@@ -138,10 +135,9 @@ Ordered agreement:
   passes, witness segments, and logical_tests against the serial run's
   edge_tests). A mismatch prints the first difference and exits nonzero.
   The result is one kind=ordered_gate line per v1o configuration.
-  The gate needs v1-c1 in the same run: under --mode v1o it reports
-  checked=no and only the diagram comparison applies.
-  The shipped path returns a diagram and no certificate, so v1p faces the
-  diagram comparison alone.
+  The gate needs v1-c1 in the same run. --mode v1o without v1 exits
+  nonzero. The shipped path returns a diagram and no certificate, so v1p
+  faces the diagram comparison alone.
 
 Peak memory:
   vm_hwm_kb is VmHWM from /proc/self/status, read once after the timed
@@ -349,8 +345,8 @@ fn run(argv: &[String]) -> Result<(), String> {
     }
     let configs = configurations(&args);
 
-    // Agreement first. A timed repetition never runs before every
-    // configuration has produced its diagram and matched the reference.
+    // Agreement first. No timed repetition runs until every configuration
+    // has produced its diagram and matched the reference.
     let mut verified: Vec<Outcome> = Vec::with_capacity(configs.len());
     let mut serial_v1: Option<CollapsedRips> = None;
     let mut gate_lines: Vec<String> = Vec::new();
@@ -400,8 +396,8 @@ fn run(argv: &[String]) -> Result<(), String> {
         }
         verified.push(outcome);
     }
-    // The gate has run, so the reference result is dead. Free it before
-    // the timed runs, which must not allocate on top of it.
+    // Drop the serial reference before timed runs, which must not allocate
+    // on top of it.
     drop(serial_v1);
 
     let hwm_start = vm_hwm_kb();
@@ -411,8 +407,6 @@ fn run(argv: &[String]) -> Result<(), String> {
         println!("{line}");
     }
 
-    // Counterbalanced timing: each repetition walks the configurations from
-    // its own starting point, so no configuration owns the end of the run.
     let mut samples: Vec<Vec<Vec<f64>>> = verified
         .iter()
         .map(|verify| vec![Vec::with_capacity(args.reps); verify.phases.len()])
@@ -428,9 +422,8 @@ fn run(argv: &[String]) -> Result<(), String> {
         for &index in order {
             let cfg = &configs[index];
             let mut outcome = run_pipeline(&points, &args, cfg, false)?;
-            // The clocks have stopped; comparing the repetition's diagram
-            // against the verified reference costs no timed work and turns
-            // a mid-run corruption into a hard failure instead of a timing.
+            // After the clocks stop: a mid-run diagram change is a hard
+            // failure, not a timing.
             if !diagrams_equal(&outcome.diagram, &verified[index].diagram) {
                 return Err(format!(
                     "config {} rep {rep}: diagram differs from the agreement run",
@@ -446,8 +439,8 @@ fn run(argv: &[String]) -> Result<(), String> {
         }
     }
 
-    // The ceiling predictor divides by the serial version 1 collapse clock of
-    // this same run. Read it before the report loop sorts the samples.
+    // Ceiling predictor denominator. Read it before the report loop sorts
+    // the samples.
     let serial_collapse_s = serial_collapse_median(&configs, &verified, &samples);
 
     for (((cfg, verify), values), runs) in configs
@@ -477,8 +470,8 @@ fn run(argv: &[String]) -> Result<(), String> {
         }
         print_counters(&args, cfg, runs, serial_collapse_s);
     }
-    // One mark for the process. The repetitions interleave, so no
-    // configuration can claim it.
+    // Process-wide mark. The repetitions interleave, so no configuration
+    // can claim it.
     println!(
         "kind=memory entry={} config=all vm_hwm_kb={} vm_hwm_kb_at_start={} scope=process_high_water",
         args.entry,
@@ -605,9 +598,8 @@ fn print_counters(args: &Args, cfg: &Config, runs: &[Counters], serial_collapse_
     let Some(first) = runs.first() else {
         return;
     };
-    // The batch widths come from the certificate, which the ordered gate has
-    // already matched against the serial run, so one repetition carries them.
-    // counters_stable reports whether the repetitions agreed on every count.
+    // Batch widths come from the certificate, which the ordered gate already
+    // matched against the serial run, so one repetition carries them.
     let widths: Vec<f64> = first.batch_widths.iter().map(|&(_, w)| w as f64).collect();
     let (width_min, width_max, width_mean, width_median) = if widths.is_empty() {
         (0.0, 0.0, 0.0, 0.0)
@@ -844,8 +836,8 @@ fn run_pipeline(
     };
 
     if cfg.kind == Kind::V1Product {
-        // The shipped path: one call, one run-wide pool for the collapse and
-        // the reduction. It has no phase boundary an outside clock can see.
+        // One call, one run-wide pool. No phase boundary an outside clock
+        // can see.
         let params = RipsParams::new(args.max_dim)
             .with_threshold(args.threshold)
             .with_modulus(args.modulus)
@@ -1014,8 +1006,7 @@ fn configurations(args: &Args) -> Vec<Config> {
         }
     }
     // One shipped-pipeline configuration, at the last collapse thread count.
-    // The end-to-end comparison is defined at P alone, and the shipped path
-    // costs a whole pipeline per repetition.
+    // The end-to-end comparison is defined at P alone.
     if matches!(args.mode, Mode::V1Product | Mode::All) {
         let threads = *args.collapse_threads.last().unwrap_or(&1);
         configs.push(Config {

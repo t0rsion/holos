@@ -10,8 +10,8 @@
 #           triplets, no collapse: isolates the sparse enumerator
 #   mode 3  the same triplets with --collapse-edges
 # The three diagrams must be identical before any timing counts. The
-# comparison is exact, with no tolerance: collapse must not move an endpoint,
-# and all three outputs come from the same f64 printer.
+# comparison is exact, with no tolerance: collapse must not move an
+# endpoint, and all three outputs come from the same f64 printer.
 #
 # Timings are one warm-up run plus REPS timed runs, reported as median and
 # IQR, with peak RSS over the timed runs.
@@ -40,8 +40,9 @@ usage() {
 Usage: collapse_bench.sh [--confirm] [-h]
 
 Run the preregistered edge-collapse break-even corpus. Without --confirm it
-runs the [[screen]] entries; with --confirm it runs the held-out [[confirm]]
-entries, which needs a complete screen run of this same corpus first.
+runs the [[screen]] entries. With --confirm it runs the held-out
+[[confirm]] entries, which needs a complete screen run of this same corpus
+first.
 
 Environment:
   CARGO           cargo invocation (may carry a toolchain), default "cargo"

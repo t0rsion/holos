@@ -1,3 +1,5 @@
+//! Union-find with path compression and union by rank.
+
 pub struct UnionFind {
     parent: Vec<usize>,
     rank: Vec<u8>,

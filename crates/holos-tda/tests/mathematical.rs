@@ -213,7 +213,7 @@ fn projective_plane_torsion() {
     // where the coefficient field changes the answer.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data/projective_plane.lower_distance_matrix");
-    let dist = holos_tda::io::read_lower_distance_matrix(&path).unwrap();
+    let dist = holos_tda::io::read_lower_distance_matrix(&path, 1).unwrap();
     let compute_mod =
         |p: u32| rips_persistence(&dist, &RipsParams::new(2).with_modulus(p)).unwrap();
     let h = |d: &Diagram, dim: usize| -> Vec<(f64, f64)> {
@@ -240,7 +240,7 @@ fn projective_plane_torsion_under_every_toggle() {
     // field: the torsion answer holds for all 8 combinations at each p.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data/projective_plane.lower_distance_matrix");
-    let dist = holos_tda::io::read_lower_distance_matrix(&path).unwrap();
+    let dist = holos_tda::io::read_lower_distance_matrix(&path, 1).unwrap();
     for p in [2u32, 3, 5] {
         let baseline = rips_persistence(&dist, &RipsParams::new(2).with_modulus(p)).unwrap();
         for mask in 0u8..8 {

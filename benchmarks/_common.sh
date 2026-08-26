@@ -1,5 +1,4 @@
-# Shared helpers for the parallel and sparse benchmark scripts. Sourced, not
-# run.
+# Shared helpers for the benchmark scripts. Sourced, not run.
 #
 # Provenance discipline, inherited from run.sh: recorded output carries the
 # holos commit, binary sha256, build flags, and CPU. It shows repo-relative or
@@ -105,8 +104,8 @@ speedup() {
     awk -v b="$1" -v w="$2" 'BEGIN { if (w+0 == 0 || b+0 == 0) print "n/a"; else printf "%.2f", b / w }'
 }
 
-# Point cloud CSV -> condensed lower-distance (ripser/holos lower-distance
-# format), so a cloud and its distance matrix carry identical geometry.
+# Point cloud CSV -> condensed lower-distance (ripser/holos format), so a
+# cloud and its distance matrix carry identical geometry.
 cloud_to_lower() {
     python3 - "$1" <<'EOF'
 import math
@@ -126,7 +125,7 @@ EOF
 
 # Compare two ripser-format outputs as interval multisets per dimension, with
 # endpoints within TOLERANCE (default 1e-5). Matching is greedy over sorted
-# bars, as in run.sh: f32-rounded endpoints can sort differently than holos's
+# bars, as in run.sh: f32-rounded endpoints can sort differently than holos
 # f64 output. Prints yes/no.
 compare_diagrams() {
     python3 - "$1" "$2" "${TOLERANCE:-1e-5}" <<'EOF'
@@ -219,8 +218,22 @@ emit_provenance() {
     fi
 
     PROV_CPU="$( (grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//') 2>/dev/null || sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
-    PROV_NCPU="$( (nproc) 2>/dev/null || echo unknown)"
-    PROV_AFFINITY="$( (grep -m1 '^Cpus_allowed_list' /proc/self/status | cut -f2) 2>/dev/null || echo unknown)"
+    # A runner that pins its own controller process sets
+    # PROV_AFFINITY_OVERRIDE to the CPU set of the run, so these two fields
+    # name the set the run had and not the controller's one core.
+    PROV_AFFINITY="${PROV_AFFINITY_OVERRIDE:-$( (grep -m1 '^Cpus_allowed_list' /proc/self/status | cut -f2) 2>/dev/null || echo unknown)}"
+    if [[ -n "${PROV_AFFINITY_OVERRIDE:-}" ]]; then
+        PROV_NCPU="$(awk -v want="$PROV_AFFINITY" 'BEGIN {
+            n = split(want, parts, ",")
+            for (i = 1; i <= n; i++) {
+                if (split(parts[i], r, "-") == 2) count += r[2] - r[1] + 1
+                else count++
+            }
+            print count
+        }')"
+    else
+        PROV_NCPU="$( (nproc) 2>/dev/null || echo unknown)"
+    fi
     # Physical topology of the allowed CPUs: SMT siblings share a core,
     # so "8 logical" can be 4 physical cores. Interpret scaling per core.
     PROV_TOPOLOGY="$(lscpu -p=CPU,CORE,SOCKET 2>/dev/null | awk -F, -v allowed="$PROV_AFFINITY" '

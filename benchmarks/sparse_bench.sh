@@ -15,9 +15,10 @@ usage() {
     cat <<'EOF'
 Usage: sparse_bench.sh [-h]
 
-Build a kNN sparse graph from a seeded cloud and reduce it via holos sparse
-(triplets) vs holos dense (densified with +inf for absent pairs). Reports time
-and peak RSS for each and asserts the diagrams are identical.
+Build a kNN sparse graph from a seeded cloud and reduce it two ways: holos
+sparse on the triplets, and holos dense on the densified matrix (absent
+pairs = +inf). Reports time and peak RSS for each and asserts the diagrams
+are identical.
 
 Environment:
   CARGO        cargo invocation (may carry a toolchain), default "cargo"

@@ -104,7 +104,6 @@ fn modulus_decides_projective_plane_torsion() {
     assert_eq!(dim_section(&text, 2), "", "{text}");
 }
 
-// The unsigned integers of a stderr line, in order.
 fn numbers(line: &str) -> Vec<usize> {
     line.split_whitespace()
         .filter_map(|word| {
@@ -125,7 +124,7 @@ fn line_starting(text: &str, prefix: &str) -> String {
 #[test]
 fn collapse_edges_keeps_the_diagram_and_reports_stats() {
     // Nine points on a 3x3 grid: dense enough that the collapse removes
-    // edges, small enough to stay a quick run. The diagram may not move.
+    // edges, small enough to stay a quick run.
     let f = TempFile::new("grid.csv", "0 0\n1 0\n2 0\n0 1\n1 1\n2 1\n0 2\n1 2\n2 2\n");
     let path = f.path().to_str().unwrap();
     let plain = run(&[path, "--dim", "2"]);
@@ -222,6 +221,44 @@ fn collapse_edges_keeps_the_diagram_and_reports_stats() {
             }
         }
     }
+}
+
+#[test]
+fn engine_setting_keeps_the_output() {
+    let f = TempFile::new("engine.csv", "0 0\n1 0\n1 1\n0 1\n");
+    let path = f.path().to_str().unwrap();
+    let expected = stdout(&run(&[path, "--dim", "1"]));
+    for engine in ["auto", "dense", "sparse"] {
+        let out = run(&[path, "--dim", "1", "--engine", engine]);
+        assert!(out.status.success(), "stderr: {}", stderr(&out));
+        assert_eq!(stdout(&out), expected, "engine {engine}");
+    }
+    let out = run(&[path, "--engine", "quantum"]);
+    assert!(!out.status.success());
+}
+
+#[test]
+fn dense_storage_setting_keeps_the_output() {
+    let f = TempFile::new("storage.csv", "0 0\n1 0\n1 1\n0 1\n");
+    let path = f.path().to_str().unwrap();
+    let expected = stdout(&run(&[path, "--dim", "1"]));
+    for engine in ["auto", "dense", "sparse"] {
+        for storage in ["auto", "compact", "square"] {
+            let out = run(&[
+                path,
+                "--dim",
+                "1",
+                "--engine",
+                engine,
+                "--dense-storage",
+                storage,
+            ]);
+            assert!(out.status.success(), "stderr: {}", stderr(&out));
+            assert_eq!(stdout(&out), expected, "engine {engine}, storage {storage}");
+        }
+    }
+    let out = run(&[path, "--dense-storage", "triangular"]);
+    assert!(!out.status.success());
 }
 
 #[test]

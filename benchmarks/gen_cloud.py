@@ -10,6 +10,13 @@ Families:
   torus     uniform on a torus, major radius 0.35, minor radius 0.15, in the
             first three coordinates; further coordinates hold 0.5, so ambient
             padding leaves every distance unchanged
+  lattice   the first N points of a regular grid, in odometer order. Every
+            distance is a grid step times the square root of an integer, so
+            equal distances are common and exact. SEED is unused
+  duplicate 4 copies of each of ceil(N/4) cube points, truncated to N, so
+            every group holds a zero distance
+  equal     N copies of the centre point. Every distance is zero. SEED is
+            unused
 
 Stdlib only. The same (N, DIM, SEED, FAMILY) yields byte-identical output on
 one machine: every family draws from random() alone, which Python keeps stable
@@ -20,6 +27,7 @@ import random
 import sys
 
 CLUSTER_COUNT = 8
+DUPLICATE_COPIES = 4
 CLUSTER_SIGMA = 0.05
 TORUS_MAJOR = 0.35
 TORUS_MINOR = 0.15
@@ -82,7 +90,45 @@ def torus(rng, n, dim):
     return pts
 
 
-FAMILIES = {"cube": cube, "sphere": sphere, "clusters": clusters, "torus": torus}
+def lattice(rng, n, dim):
+    side = 1
+    while side**dim < n:
+        side += 1
+    if side < 2:
+        sys.exit("lattice needs N >= 2")
+    step = 1.0 / (side - 1)
+    pts = []
+    for i in range(n):
+        rest, coords = i, []
+        for _ in range(dim):
+            coords.append(step * (rest % side))
+            rest //= side
+        pts.append(coords)
+    return pts
+
+
+def duplicate(rng, n, dim):
+    distinct = -(-n // DUPLICATE_COPIES)
+    pts = []
+    for _ in range(distinct):
+        point = [rng.random() for _ in range(dim)]
+        pts.extend([list(point) for _ in range(DUPLICATE_COPIES)])
+    return pts[:n]
+
+
+def equal(rng, n, dim):
+    return [[0.5] * dim for _ in range(n)]
+
+
+FAMILIES = {
+    "cube": cube,
+    "sphere": sphere,
+    "clusters": clusters,
+    "torus": torus,
+    "lattice": lattice,
+    "duplicate": duplicate,
+    "equal": equal,
+}
 
 
 def main() -> None:

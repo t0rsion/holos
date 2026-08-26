@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Benchmark holos against ripser on identical lower-distance inputs.
 # Methodology: benchmarks/README.md. Results land in benchmarks/results.txt
-# (full log) and benchmarks/results.md (provenance header plus table, ready
-# to paste into README verbatim).
+# (full log) and benchmarks/results.md (provenance header plus table).
 #
 # Exits nonzero if any run's diagrams disagree. A timing whose diagrams do
 # not match is void.
@@ -88,9 +87,9 @@ EOF
 
 # Compare two ripser-format outputs as interval multisets per dimension, with
 # endpoints within TOLERANCE. Matching is greedy over sorted bars rather than
-# a positional zip: ripser prints f32-rounded values, so near-equal births can
-# sort in a different order than holos's f64 output. A positional comparison
-# misaligns from there on. Prints yes/no.
+# a positional zip: ripser prints f32-rounded values, so near-equal births
+# can sort in a different order than holos f64 output. A positional
+# comparison misaligns from there on. Prints yes/no.
 compare_diagrams() {
     python3 - "$1" "$2" "$TOLERANCE" <<'EOF'
 import re
@@ -308,7 +307,6 @@ for n in "${SIZES[@]}"; do
     run_case "$n" fixed "$FIXED_THRESHOLD" "$MAXDIM" "$FIXED_THRESHOLD"
 done
 
-# Deeper case: maxdim 2 on the mid-size cloud (its .lower already exists).
 run_case "$DIM2_N" dim2 "$DIM2_THRESHOLD" 2 "$DIM2_THRESHOLD"
 
 echo "Results written to $RESULTS and $RESULTS_MD." >&2

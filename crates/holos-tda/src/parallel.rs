@@ -20,7 +20,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use crate::distances::Distances;
 use crate::field::{Coeffs, Entry, HeapEntry};
-use crate::reduce::{Engine, Pivots};
+use crate::reduce::{Engine, PairScratch, Pivots};
 use crate::simplex::Simplex;
 use crate::Bar;
 
@@ -70,47 +70,70 @@ fn claim(table: &Table, index: u64, owner: Owner) -> Claim {
     }
 }
 
+/// One field on a cache line of its own. Two workers that hammer two
+/// separate counters must not share a line, or each write costs the other a
+/// miss. The alignment covers the adjacent-line prefetch as well.
+#[repr(align(128))]
+struct Padded<T>(T);
+
+/// Idle polls a worker spends yielding before it sleeps.
+const IDLE_YIELDS: u32 = 32;
+/// The sleep doubles from one microsecond this many times, then holds.
+const IDLE_SLEEP_DOUBLINGS: u32 = 7;
+
 /// Columns awaiting reduction. An atomic counter dispenses the initial
-/// `0..len` lock-free. A mutex holds the rare displaced columns to re-reduce,
-/// and a flag gates that mutex, so the common path never locks it.
+/// `0..len` lock-free. A mutex holds the rare displaced columns to
+/// re-reduce, and a flag gates that mutex, so the common path never locks
+/// it.
+///
+/// The three shared counters sit on separate cache lines. A worker writes
+/// `next` on every column, so a `pending` on the same line would cost every
+/// other worker a miss per column.
 struct WorkQueue {
-    next: AtomicUsize,
-    len: usize,
-    requeued: Mutex<Vec<usize>>,
-    has_requeued: AtomicBool,
+    next: Padded<AtomicUsize>,
     /// Columns not yet in a final state; the region ends when it hits zero.
-    pending: AtomicUsize,
+    pending: Padded<AtomicUsize>,
+    has_requeued: Padded<AtomicBool>,
+    requeued: Mutex<Vec<usize>>,
+    len: usize,
 }
 
 impl WorkQueue {
     fn new(len: usize) -> Self {
         Self {
-            next: AtomicUsize::new(0),
-            len,
+            next: Padded(AtomicUsize::new(0)),
+            pending: Padded(AtomicUsize::new(len)),
+            has_requeued: Padded(AtomicBool::new(false)),
             requeued: Mutex::new(Vec::new()),
-            has_requeued: AtomicBool::new(false),
-            pending: AtomicUsize::new(len),
+            len,
         }
     }
 
+    /// The next column to reduce. A displaced column comes first, so a
+    /// re-reduction does not wait behind the undispensed columns.
     fn take(&self) -> Option<usize> {
-        if self.has_requeued.load(Ordering::Acquire) {
-            let mut queue = self.requeued.lock().unwrap();
-            let col = queue.pop();
-            if queue.is_empty() {
-                self.has_requeued.store(false, Ordering::Release);
-            }
-            if col.is_some() {
-                return col;
+        if self.has_requeued.0.load(Ordering::Acquire) {
+            if let Some(col) = self.pop_requeued() {
+                return Some(col);
             }
         }
         // Saturate at `len`. An unbounded counter could wrap on a long run
         // and dispense a column twice.
         self.next
+            .0
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |i| {
                 (i < self.len).then_some(i + 1)
             })
             .ok()
+    }
+
+    fn pop_requeued(&self) -> Option<usize> {
+        let mut queue = self.requeued.lock().unwrap();
+        let col = queue.pop();
+        if queue.is_empty() {
+            self.has_requeued.0.store(false, Ordering::Release);
+        }
+        col
     }
 
     fn requeue(&self, col: usize) {
@@ -119,7 +142,7 @@ impl WorkQueue {
         // caller) keeps a worker alive to re-poll.
         let mut queue = self.requeued.lock().unwrap();
         queue.push(col);
-        self.has_requeued.store(true, Ordering::Release);
+        self.has_requeued.0.store(true, Ordering::Release);
     }
 }
 
@@ -142,9 +165,11 @@ struct Scratch {
     cofacet_buf: Vec<Entry>,
     v_buf: Vec<Entry>,
     verts: Vec<usize>,
+    cofacet_verts: Vec<usize>,
+    pairs: PairScratch,
 }
 
-/// The state in which one reduction pass over a column ended.
+/// Outcome of one reduction pass over a column.
 enum Pass {
     /// Owns a pivot; carries a column it displaced (to re-reduce), if any.
     Owned(Option<usize>),
@@ -156,17 +181,32 @@ enum Pass {
 
 impl<C: Coeffs + Sync, D: Distances + Sync> Engine<'_, C, D> {
     /// Parallel counterpart of [`Engine::reduce_dimension`]: same pivot
-    /// registry, with bars returned rather than pushed. Runs on the engine's
-    /// run-wide worker pool.
+    /// registry, with bars returned rather than pushed. Runs `budget`
+    /// workers on the engine's run-wide worker pool. The budget is at most
+    /// the pool size, so the pool threads above it return at once.
     pub(crate) fn reduce_dimension_parallel(
         &self,
         columns: &[Simplex],
         dim: usize,
         prev_pivots: &Pivots,
+        budget: usize,
     ) -> (Pivots, Vec<Bar>) {
         if columns.is_empty() {
             return (FxHashMap::default(), Vec::new());
         }
+        let (table, bars) = self.converge(columns, dim, prev_pivots, budget);
+        (self.to_pivots(&table), bars)
+    }
+
+    /// Run the workers until the table holds the reduced pivot set, then
+    /// read the dimension's bars off it.
+    fn converge(
+        &self,
+        columns: &[Simplex],
+        dim: usize,
+        prev_pivots: &Pivots,
+        budget: usize,
+    ) -> (Table, Vec<Bar>) {
         let table: Table = DashMap::with_capacity_and_hasher(columns.len(), FxBuildHasher);
         let queue = WorkQueue::new(columns.len());
         let ctx = Ctx {
@@ -179,39 +219,87 @@ impl<C: Coeffs + Sync, D: Distances + Sync> Engine<'_, C, D> {
         };
 
         self.install(|| {
-            rayon::broadcast(|_| {
-                let mut scratch = Scratch::default();
-                self.worker(&ctx, &mut scratch);
+            rayon::broadcast(|worker| {
+                if worker.index() < budget {
+                    let mut scratch = Scratch::default();
+                    self.worker(&ctx, &mut scratch);
+                }
             });
         });
 
-        (self.to_pivots(&table), self.collect_bars(&ctx))
+        let bars = self.collect_bars(&ctx);
+        drop(ctx);
+        (table, bars)
+    }
+
+    /// The converged pivot registry: (pivot index, coefficient, owner
+    /// column, diameter bits), sorted by pivot index. The thread-invariance
+    /// gate compares this. The reduced output drops the diameter.
+    #[cfg(test)]
+    pub(crate) fn parallel_pivot_registry(
+        &self,
+        columns: &[Simplex],
+        dim: usize,
+        prev_pivots: &Pivots,
+        budget: usize,
+    ) -> Vec<(u64, u64, usize, u64)> {
+        let (table, _) = self.converge(columns, dim, prev_pivots, budget);
+        let mut registry: Vec<(u64, u64, usize, u64)> = table
+            .iter()
+            .map(|r| {
+                let owner = r.value();
+                (*r.key(), owner.coeff, owner.col, owner.diameter.to_bits())
+            })
+            .collect();
+        registry.sort_unstable();
+        registry
     }
 
     // `inline(never)` keeps ThinLTO's inliner from folding the whole reduce
     // pass into the rayon broadcast closure. That fold overflows the
     // inliner's recursion.
+    /// A worker counts its finished columns privately and subtracts them
+    /// from `pending` only when the queue runs dry. That takes the busiest
+    /// shared write off the per-column path. The count is always reported
+    /// before the worker reads `pending`, and a displacement raises
+    /// `pending` while the displacing column is still counted there, so
+    /// `pending` never reads zero with a column still in flight.
     #[inline(never)]
     fn worker(&self, ctx: &Ctx, scratch: &mut Scratch) {
+        let mut done = 0usize;
+        let mut idle = 0u32;
         loop {
             let Some(col) = ctx.queue.take() else {
-                if ctx.queue.pending.load(Ordering::Acquire) == 0 {
+                if done > 0 {
+                    ctx.queue.pending.0.fetch_sub(done, Ordering::AcqRel);
+                    done = 0;
+                }
+                if ctx.queue.pending.0.load(Ordering::Acquire) == 0 {
                     return;
                 }
-                std::thread::yield_now();
+                // The queue is dry but a column is still in flight, and it
+                // may come back displaced. Yield first, then sleep for
+                // longer each time, so a worker with nothing left stops
+                // reading the shared counters in a tight loop.
+                if idle < IDLE_YIELDS {
+                    std::thread::yield_now();
+                } else {
+                    let step = (idle - IDLE_YIELDS).min(IDLE_SLEEP_DOUBLINGS);
+                    std::thread::sleep(std::time::Duration::from_micros(1 << step));
+                }
+                idle += 1;
                 continue;
             };
+            idle = 0;
             match self.reduce_pass(ctx, scratch, col) {
                 Pass::Owned(displaced) => {
                     if let Some(k) = displaced {
-                        ctx.queue.pending.fetch_add(1, Ordering::AcqRel);
+                        ctx.queue.pending.0.fetch_add(1, Ordering::AcqRel);
                         ctx.queue.requeue(k);
                     }
-                    ctx.queue.pending.fetch_sub(1, Ordering::AcqRel);
+                    done += 1;
                 }
-                Pass::Essential => {
-                    ctx.queue.pending.fetch_sub(1, Ordering::AcqRel);
-                }
+                Pass::Essential => done += 1,
                 Pass::Requeue => ctx.queue.requeue(col),
             }
         }
@@ -229,6 +317,8 @@ impl<C: Coeffs + Sync, D: Distances + Sync> Engine<'_, C, D> {
             &mut scratch.working_cob,
             &mut scratch.cofacet_buf,
             &mut scratch.verts,
+            &mut scratch.cofacet_verts,
+            &mut scratch.pairs,
         );
         // The emergent shortcut returns a pivot without building the working
         // column. A column that then has to reduce must build it first.
@@ -266,15 +356,13 @@ impl<C: Coeffs + Sync, D: Distances + Sync> Engine<'_, C, D> {
                     pivot = self.get_pivot(&mut scratch.working_cob);
                 }
                 _ => {
-                    // Not held by a smaller column. If the pivot is one half of
-                    // a zero-apparent pair, fold the paired facet and keep
-                    // reducing. Otherwise this column owns the pivot.
                     if let Some(next) = self.reduce_apparent_facet(
                         p,
                         ctx.dim,
                         &mut scratch.working_red,
                         &mut scratch.working_cob,
                         &mut scratch.verts,
+                        &mut scratch.pairs,
                     ) {
                         pivot = next;
                     } else {
@@ -326,7 +414,8 @@ impl<C: Coeffs + Sync, D: Distances + Sync> Engine<'_, C, D> {
     }
 
     /// Derive the dimension's bars from the converged table: a finite bar per
-    /// owned pivot, an essential bar per column that owns none.
+    /// owned pivot, an essential bar per unowned column that is not a prior
+    /// death.
     fn collect_bars(&self, ctx: &Ctx) -> Vec<Bar> {
         let mut bars = Vec::new();
         let mut owns_pivot = vec![false; ctx.columns.len()];
@@ -355,5 +444,115 @@ impl<C: Coeffs + Sync, D: Distances + Sync> Engine<'_, C, D> {
             }
         }
         bars
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rustc_hash::FxHashMap;
+
+    use crate::field::Z2;
+    use crate::reduce::{Engine, Pivots};
+    use crate::simplex::Simplex;
+    use crate::{Diagram, DistanceMatrix, RipsParams};
+
+    /// Every in-complex edge, in column order: diameter descending, index
+    /// ascending. The reducer takes any such list, so a test can hand it one
+    /// without running the dim-0 pass first.
+    fn edge_columns(
+        dist: &DistanceMatrix,
+        engine: &Engine<'_, Z2, DistanceMatrix>,
+    ) -> Vec<Simplex> {
+        let mut columns = Vec::new();
+        for i in 1..dist.len() {
+            for j in 0..i {
+                let diameter = dist.get(i, j);
+                if engine.in_complex(diameter) {
+                    columns.push(Simplex {
+                        diameter,
+                        index: engine.bt.get(i, 2) + j as u64,
+                    });
+                }
+            }
+        }
+        columns.sort_unstable_by(|a, b| {
+            b.diameter
+                .total_cmp(&a.diameter)
+                .then(a.index.cmp(&b.index))
+        });
+        columns
+    }
+
+    fn points(seed: u64, n: usize, coord_dim: usize) -> Vec<Vec<f64>> {
+        let mut x = seed | 1;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 11) as f64 / (1u64 << 53) as f64
+        };
+        (0..n)
+            .map(|_| (0..coord_dim).map(|_| next()).collect())
+            .collect()
+    }
+
+    fn grid(side: usize) -> Vec<Vec<f64>> {
+        (0..side)
+            .flat_map(|a| (0..side).map(move |b| vec![a as f64, b as f64]))
+            .collect()
+    }
+
+    /// The pivot registry the workers converge to must not depend on how many
+    /// of them there are, nor on the block the queue hands out. The check is
+    /// wider than the diagram: it compares the pivot index, the coefficient,
+    /// the owning column, and the diameter bits, and it compares the first
+    /// three against the serial reducer as well.
+    fn assert_registry_is_worker_invariant(dist: &DistanceMatrix, label: &str) {
+        let mut serial_params = RipsParams::new(1);
+        serial_params.threads = 1;
+        let serial = Engine::new(dist, &serial_params, Z2).unwrap();
+        let columns = edge_columns(dist, &serial);
+        assert!(columns.len() > 64, "{label}: too few columns to be a gate");
+        let empty: Pivots = FxHashMap::default();
+        let mut diagram = Diagram::default();
+        let want = serial.reduce_dimension(&columns, 1, &empty, &mut diagram);
+
+        let mut first: Option<Vec<(u64, u64, usize, u64)>> = None;
+        for budget in [2usize, 3, 4, 8] {
+            let mut params = RipsParams::new(1);
+            params.threads = budget;
+            let engine = Engine::new(dist, &params, Z2).unwrap();
+            let got = engine.parallel_pivot_registry(&columns, 1, &empty, budget);
+
+            let by_index: Pivots = got
+                .iter()
+                .map(|&(index, coeff, col, _)| (index, (coeff, col)))
+                .collect();
+            assert_eq!(
+                by_index, want,
+                "{label}: {budget} workers disagree with the serial pivot registry"
+            );
+            match &first {
+                None => first = Some(got),
+                Some(want) => assert_eq!(
+                    &got, want,
+                    "{label}: {budget} workers disagree with 2 workers, diameter bits included"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn pivot_registry_is_worker_invariant_on_a_cloud() {
+        let dist = DistanceMatrix::from_points(&points(20260818, 100, 3)).unwrap();
+        assert_registry_is_worker_invariant(&dist, "cloud(n=100,d=3)");
+    }
+
+    #[test]
+    fn pivot_registry_is_worker_invariant_on_ties() {
+        // A lattice puts many simplices at one diameter, which is where the
+        // workers reorder the most and displace each other the most.
+        let dist = DistanceMatrix::from_points(&grid(9)).unwrap();
+        assert_registry_is_worker_invariant(&dist, "grid(9x9)");
     }
 }

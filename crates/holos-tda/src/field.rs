@@ -20,13 +20,50 @@ pub(crate) struct Entry {
     pub(crate) payload: u64,
 }
 
+/// An [`Entry`] in heap order, held as the single 128-bit key that order
+/// sorts by.
+///
 /// Heap order matches ripser's working-column priority queue: pop the cofacet
 /// minimal in the (d+1)-simplex order, smallest diameter then largest index.
 /// The payload is index-major, so comparing payloads compares indices. A
 /// coefficient in the low bits is only a tiebreak among equal indices, which
 /// lazy cancellation then combines.
+///
+/// The key is the complement of the diameter bits over the payload. Every
+/// diameter is a maximum of validated distances, so it is not NaN, not
+/// negative, and has no negative zero. On those values the IEEE bit pattern
+/// read as `u64` orders as `total_cmp` does. Complementing it puts the
+/// largest diameter first, so one comparison is one integer compare.
+/// `Coeffs::pack` debug-asserts the invariant, `bits_order_matches_total_cmp`
+/// pins it, and `bit_keys::heap_traces_agree_under_both_comparators` traces
+/// cancellation against the field comparator the key replaced.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct HeapEntry(pub(crate) Entry);
+pub(crate) struct HeapEntry(u128);
+
+impl HeapEntry {
+    #[inline]
+    pub(crate) fn new(entry: Entry) -> Self {
+        debug_assert!(
+            !entry.diameter.is_nan() && entry.diameter >= 0.0 && entry.diameter.is_sign_positive()
+        );
+        HeapEntry(u128::from(!entry.diameter.to_bits()) << 64 | u128::from(entry.payload))
+    }
+
+    /// The [`Entry`] this key encodes. The key is a bijection.
+    #[inline]
+    pub(crate) fn entry(self) -> Entry {
+        Entry {
+            diameter: f64::from_bits(!((self.0 >> 64) as u64)),
+            payload: self.0 as u64,
+        }
+    }
+
+    /// The packed index and coefficient, without rebuilding the diameter.
+    #[inline]
+    pub(crate) fn payload(self) -> u64 {
+        self.0 as u64
+    }
+}
 
 impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
@@ -39,13 +76,47 @@ impl PartialOrd for HeapEntry {
         Some(self.cmp(other))
     }
 }
+
+/// Untimed comparison counter for the working-column heap.
+///
+/// Only a test build has it. In a non-test build `note_comparison` is empty.
+/// The count is thread-local, because the test binary runs tests on several
+/// threads at once.
+#[cfg(test)]
+pub(crate) mod counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COMPARISONS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    #[inline]
+    pub(super) fn note_comparison() {
+        COMPARISONS.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Zero this thread's counter.
+    pub(crate) fn reset() {
+        COMPARISONS.with(|c| c.set(0));
+    }
+
+    /// Heap comparisons this thread made since the last [`reset`].
+    pub(crate) fn comparisons() -> u64 {
+        COMPARISONS.with(Cell::get)
+    }
+}
+
+#[cfg(not(test))]
+mod counters {
+    #[inline(always)]
+    pub(super) fn note_comparison() {}
+}
+
 impl Ord for HeapEntry {
+    #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .0
-            .diameter
-            .total_cmp(&self.0.diameter)
-            .then(self.0.payload.cmp(&other.0.payload))
+        counters::note_comparison();
+        self.0.cmp(&other.0)
     }
 }
 
@@ -68,6 +139,8 @@ pub(crate) trait Coeffs {
 
     #[inline]
     fn pack(&self, diameter: f64, index: u64, coeff: u64) -> Entry {
+        // The heap comparator compares diameters by bits, which needs this.
+        debug_assert!(!diameter.is_nan() && diameter >= 0.0 && diameter.is_sign_positive());
         let mask = (1u64 << self.coeff_bits()) - 1;
         Entry {
             diameter,
@@ -101,6 +174,9 @@ pub(crate) trait Coeffs {
     /// Return (-1)^k as a field element (ripser's `k & 1 ? p - 1 : 1`).
     fn sign(&self, k: usize) -> u64;
     fn mul(&self, a: u64, b: u64) -> u64;
+    /// Return `a` times (-1)^k. One operand is 1 or p - 1, so no division is
+    /// needed. `a` must be below p.
+    fn mul_sign(&self, k: usize, a: u64) -> u64;
     fn neg(&self, a: u64) -> u64;
     /// Return ripser's reduction factor, -(pivot / other) in the field.
     fn factor(&self, pivot: u64, other: u64) -> u64;
@@ -123,6 +199,9 @@ impl Coeffs for Z2 {
     fn mul(&self, _a: u64, _b: u64) -> u64 {
         1
     }
+    fn mul_sign(&self, _k: usize, _a: u64) -> u64 {
+        1
+    }
     fn neg(&self, _a: u64) -> u64 {
         1
     }
@@ -132,10 +211,10 @@ impl Coeffs for Z2 {
     fn pop_pivot(&self, heap: &mut BinaryHeap<HeapEntry>) -> Option<Entry> {
         while let Some(top) = heap.pop() {
             match heap.peek() {
-                Some(next) if next.0.payload == top.0.payload => {
+                Some(next) if next.payload() == top.payload() => {
                     heap.pop();
                 }
-                _ => return Some(top.0),
+                _ => return Some(top.entry()),
             }
         }
         None
@@ -160,7 +239,7 @@ impl Fp {
             // The recurrence is valid only for prime p.
             inv[a as usize] = p - (inv[(p % a) as usize] * (p / a)) % p;
         }
-        // Fewest bits that hold a coefficient in 0..p (i.e. up to p - 1).
+        // Fewest bits that hold a coefficient in 0..p.
         let coeff_bits = (u64::BITS - (p - 1).leading_zeros()).max(1);
         Self { p, coeff_bits, inv }
     }
@@ -180,17 +259,31 @@ impl Coeffs for Fp {
     fn mul(&self, a: u64, b: u64) -> u64 {
         a * b % self.p
     }
+    fn mul_sign(&self, k: usize, a: u64) -> u64 {
+        if k & 1 == 1 {
+            self.neg(a)
+        } else {
+            debug_assert!(a < self.p);
+            a
+        }
+    }
     fn neg(&self, a: u64) -> u64 {
-        (self.p - a) % self.p
+        // Subtraction alone, because `a` is below p. The general `mul`
+        // divides, and the reduction calls this on every cofacet it pushes.
+        debug_assert!(a < self.p);
+        if a == 0 {
+            0
+        } else {
+            self.p - a
+        }
     }
     fn factor(&self, pivot: u64, other: u64) -> u64 {
         (self.p - pivot * self.inv[other as usize] % self.p) % self.p
     }
     fn pop_pivot(&self, heap: &mut BinaryHeap<HeapEntry>) -> Option<Entry> {
-        // Accumulate coefficients across equal indices. Return the first
-        // index whose sum is non-zero. The heap stays positioned at it.
+        // The heap stays positioned at the first index whose sum is non-zero.
         let mut acc: Option<(f64, u64, u64)> = None; // (diameter, index, coeff)
-        while let Some(&HeapEntry(top)) = heap.peek() {
+        while let Some(top) = heap.peek().map(|&e| e.entry()) {
             let index = self.index(top);
             let coeff = self.coeff(top);
             match acc.as_mut() {
@@ -231,12 +324,73 @@ pub(crate) const MODULUS_LIMIT: u64 = 1 << 15;
 mod tests {
     use super::*;
 
+    // The heap comparator reads diameters as bits. That is exact only for
+    // the values the engine can produce: not NaN, not negative, and with no
+    // negative zero. `DistanceMatrix` validates its input against those
+    // rules and normalizes -0.0. A diameter is a maximum of such values.
+    #[test]
+    fn bits_order_matches_total_cmp() {
+        let values = [
+            0.0f64,
+            f64::MIN_POSITIVE / 2.0,
+            f64::MIN_POSITIVE,
+            1e-8,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            1e8,
+            f64::MAX,
+            f64::INFINITY,
+        ];
+        for &a in &values {
+            assert!(!a.is_nan() && a >= 0.0 && a.is_sign_positive());
+            for &b in &values {
+                assert_eq!(
+                    a.to_bits().cmp(&b.to_bits()),
+                    a.total_cmp(&b),
+                    "bit order and total_cmp disagree on {a} and {b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn heap_entry_orders_by_diameter_then_payload() {
+        let mk = |diameter: f64, payload: u64| HeapEntry::new(Entry { diameter, payload });
+        assert!(mk(2.0, 0) < mk(1.0, 0));
+        assert!(mk(1.0, 3) < mk(1.0, 9));
+        assert_eq!(mk(1.0, 3).cmp(&mk(1.0, 3)), Ordering::Equal);
+        assert!(mk(f64::INFINITY, 0) < mk(1.0, 0));
+        assert!(mk(1.0, 0) < mk(0.0, 0));
+    }
+
     #[test]
     fn prime_check() {
         let primes = [2u64, 3, 5, 7, 11, 13, 32749];
         let composites = [0u64, 1, 4, 9, 15, 32767];
         assert!(primes.into_iter().all(is_prime));
         assert!(!composites.into_iter().any(is_prime));
+    }
+
+    // `mul_sign` and the subtracting `neg` must give what the general
+    // multiply gives on every coefficient the reduction can hold.
+    #[test]
+    fn mul_sign_matches_the_general_multiply() {
+        for p in [3u64, 5, 7, 251, 32749] {
+            let f = Fp::new(p);
+            for a in 0..p {
+                assert_eq!(f.neg(a), (p - a) % p, "neg of {a} mod {p}");
+                for k in 0..4usize {
+                    assert_eq!(
+                        f.mul_sign(k, a),
+                        f.mul(f.sign(k), a),
+                        "sign {k} times {a} mod {p}"
+                    );
+                }
+            }
+        }
+        assert_eq!(Z2.mul_sign(1, 1), Z2.mul(Z2.sign(1), 1));
     }
 
     #[test]
