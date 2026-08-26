@@ -44,9 +44,9 @@
 #
 # Manifest lifecycle: a screen run removes the manifest before it writes the
 # first byte of its results, and writes a fresh one only after it finishes
-# with no voided entry. An interrupted screen therefore leaves partial results
-# and no manifest, and --confirm stays locked. This machine reboots under
-# load, so the crash window is real.
+# with no voided entry. An interrupted screen therefore leaves partial
+# results and no manifest, and --confirm stays locked. This machine reboots
+# under load, so the crash window is real.
 #
 # Registration gate: registered results need a known CPU topology, and the
 # frozen P of every headline entry must equal the number of physical cores in
@@ -691,8 +691,6 @@ while IFS=$'\t' read -r id family n coord_dim max_dim tau modulus seed headline 
     repair_fraction="$(field repair_fraction_derived "$counters_v1o")"
     globals="$(field global_invalidations "$counters_v1o")"
     windows="$(field window_batches "$counters_v1o")"
-    # Occupancy and the subphase clocks, both medians over the timed
-    # repetitions inside the driver.
     slots_offered="$(field window_slots_offered "$counters_v1o")"
     members_formed="$(field window_members_formed "$counters_v1o")"
     members_reused="$(field window_members_reused "$counters_v1o")"

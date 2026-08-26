@@ -181,8 +181,6 @@ fn compute(
     diagram
 }
 
-// The gate itself: canonicalized bars at threads {2,4,8} must equal the
-// threads=1 bars exactly, for one field and one toggle configuration.
 fn assert_thread_invariant(case: &Case, modulus: u32, toggles: (bool, bool, bool)) {
     let base = compute(
         &case.dist,
@@ -210,7 +208,6 @@ fn assert_thread_invariant(case: &Case, modulus: u32, toggles: (bool, bool, bool
     }
 }
 
-// Full cross of moduli x the 2^3 optimization matrix for one case.
 fn sweep_case(case: &Case) {
     for &modulus in &MODULI {
         for bits in 0u8..8 {
@@ -399,7 +396,6 @@ fn parallel_assembly_above_threshold_is_thread_invariant() {
             }
         }
     }
-    // Clearing and apparent pairs off, p=2, dense, serial vs 8 threads.
     let stripped = (false, true, false);
     let base = bipartite_k4_compute(None, &dense, None, 2, 1, stripped);
     assert_bipartite_k4_structure(&base, "dense stripped");

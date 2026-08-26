@@ -1,9 +1,10 @@
 //! The `holos` command-line interface, callable as a library function.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::io::{self, OutputFormat};
-use crate::{CollapseSchedule, DistanceMatrix, RipsParams};
+use crate::{CollapseSchedule, DenseStorage, DistanceMatrix, Engine, RipsParams};
 use clap::{Parser, ValueEnum};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -26,6 +27,40 @@ impl From<Schedule> for CollapseSchedule {
             Schedule::Serial => CollapseSchedule::Serial,
             Schedule::Ordered => CollapseSchedule::Ordered,
             Schedule::Rounds => CollapseSchedule::Rounds,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum EngineArg {
+    Auto,
+    Dense,
+    Sparse,
+}
+
+impl From<EngineArg> for Engine {
+    fn from(e: EngineArg) -> Self {
+        match e {
+            EngineArg::Auto => Engine::Auto,
+            EngineArg::Dense => Engine::Dense,
+            EngineArg::Sparse => Engine::Sparse,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum StorageArg {
+    Auto,
+    Compact,
+    Square,
+}
+
+impl From<StorageArg> for DenseStorage {
+    fn from(s: StorageArg) -> Self {
+        match s {
+            StorageArg::Auto => DenseStorage::Auto,
+            StorageArg::Compact => DenseStorage::Compact,
+            StorageArg::Square => DenseStorage::Square,
         }
     }
 }
@@ -73,9 +108,10 @@ struct Cli {
     #[arg(long, value_name = "P", default_value_t = 2)]
     modulus: u32,
 
-    /// Worker threads for the reduction, and for the collapse when
-    /// --collapse-schedule is ordered or rounds (1 = serial). The diagram
-    /// is identical at any thread count
+    /// Worker budget for the input parse and the reduction, and for the
+    /// collapse when --collapse-schedule is ordered or rounds (1 =
+    /// serial). A file under one mebibyte parses serially at any thread
+    /// count. The diagram is identical at any thread count
     #[arg(long, value_name = "N", default_value_t = 1)]
     threads: usize,
 
@@ -86,12 +122,28 @@ struct Cli {
 
     /// Collapse schedule; requires --collapse-edges. serial is the
     /// default and, in the registered studies, the fastest end to end on
-    /// most inputs; ordered reproduces the serial result on parallel
-    /// workers; rounds runs a different schedule, also the same at every
-    /// thread count, that can keep far fewer edges. The diagram is
+    /// most inputs. ordered gives the serial result on parallel workers.
+    /// rounds gives the same result at every thread count, not the serial
+    /// graph, and on some inputs a smaller reduced graph. The diagram is
     /// identical under every schedule
     #[arg(long, value_enum, value_name = "SCHEDULE")]
     collapse_schedule: Option<Schedule>,
+
+    /// Engine for a dense input: auto reduces a low-density input as a
+    /// thresholded graph when the graph fits its memory budget, dense and
+    /// sparse force one engine. Sparse input always uses the sparse
+    /// engine. The diagram is identical under every setting
+    #[arg(long, value_enum, value_name = "ENGINE", default_value_t = EngineArg::Auto)]
+    engine: EngineArg,
+
+    /// Storage form for a dense run: auto holds the condensed lower
+    /// triangle and converts to a full row-major matrix when a frozen
+    /// work and memory rule selects it, compact forbids the full form,
+    /// square forces it. A run routed to the sparse engine builds no full
+    /// matrix under any setting. The diagram is identical under every
+    /// setting
+    #[arg(long, value_enum, value_name = "FORM", default_value_t = StorageArg::Auto)]
+    dense_storage: StorageArg,
 
     /// Output format
     #[arg(long, value_enum, default_value_t = DiagramFormat::Ripser)]
@@ -104,6 +156,9 @@ struct Cli {
 
     #[arg(long, hide = true)]
     no_apparent_pairs: bool,
+
+    #[arg(long, hide = true)]
+    no_adjacency_rows: bool,
 
     #[arg(long, hide = true)]
     no_clearing: bool,
@@ -122,10 +177,9 @@ fn infer_format(path: &Path) -> InputFormat {
     }
 }
 
-// Report the collapse before the reduction starts. The pipeline owns the
-// collapse result and, for a parallel schedule, shares one worker pool
-// across both phases, so the statistics come out of it rather than from a
-// separate standalone call.
+// The pipeline owns the collapse result and, for a parallel schedule,
+// shares one worker pool across both phases, so the statistics come out
+// of it rather than from a separate standalone call.
 fn report_collapse(collapsed: &crate::collapse::CollapsedRips) {
     let s = &collapsed.stats;
     let epoch = if collapsed.certificate.algorithm_version() == 2 {
@@ -155,8 +209,11 @@ fn run(cli: Cli) -> crate::Result<()> {
         use_emergent_pairs: !cli.no_emergent_pairs,
         use_apparent_pairs: !cli.no_apparent_pairs,
         use_clearing: !cli.no_clearing,
+        use_adjacency_rows: !cli.no_adjacency_rows,
         collapse_edges: false,
         collapse_schedule: cli.collapse_schedule.unwrap_or(Schedule::Serial).into(),
+        engine: cli.engine.into(),
+        dense_storage: cli.dense_storage.into(),
     };
     if cli.collapse_schedule.is_some() && !cli.collapse_edges {
         return Err(crate::Error::InvalidInput(
@@ -165,7 +222,7 @@ fn run(cli: Cli) -> crate::Result<()> {
     }
     let (mut diagram, n_points) = match format {
         InputFormat::Sparse => {
-            let dist = io::read_sparse_matrix(&cli.input)?;
+            let dist = io::read_sparse_matrix(&cli.input, params.threads)?;
             match cli.threshold {
                 Some(t) => eprintln!(
                     "{} points, {} edges, threshold {t}",
@@ -189,10 +246,10 @@ fn run(cli: Cli) -> crate::Result<()> {
         _ => {
             let dist = match format {
                 InputFormat::PointCloud => {
-                    let points = io::read_point_cloud(&cli.input)?;
+                    let points = io::read_point_cloud(&cli.input, params.threads)?;
                     DistanceMatrix::from_points(&points)?
                 }
-                _ => io::read_lower_distance_matrix(&cli.input)?,
+                _ => io::read_lower_distance_matrix(&cli.input, params.threads)?,
             };
             match cli.threshold {
                 Some(t) => eprintln!("{} points, threshold {t}", dist.len()),
@@ -216,13 +273,17 @@ fn run(cli: Cli) -> crate::Result<()> {
         DiagramFormat::Ripser => OutputFormat::Ripser,
         DiagramFormat::Csv => OutputFormat::Csv,
     };
+    // Stdout flushes on every line; a diagram of many bars is written once
+    // through a buffer.
     let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::with_capacity(1 << 16, stdout.lock());
     io::write_diagram(
-        &mut stdout.lock(),
+        &mut out,
         &diagram,
         output,
         cli.dim.min(n_points.saturating_sub(1)),
-    )
+    )?;
+    out.flush().map_err(|e| crate::Error::Io(e.to_string()))
 }
 
 /// Run the `holos` CLI on `argv` and return the process exit code.

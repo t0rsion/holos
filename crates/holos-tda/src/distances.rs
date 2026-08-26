@@ -4,14 +4,26 @@ use crate::combinadic::{BinomialTable, CofacetIter};
 use crate::simplex::Simplex;
 use crate::{Error, Result};
 
-/// Symmetric dissimilarity matrix in condensed lower-triangle form.
+/// Symmetric dissimilarity matrix.
 /// No metric assumptions: entries need not satisfy the triangle inequality.
 /// Entries must be non-negative and not NaN; +inf is legal and equivalent
 /// to an absent edge.
+///
+/// The matrix has two storage forms. The compact form holds the condensed
+/// lower triangle, `n(n-1)/2` entries, and is the form every constructor
+/// builds. The full form holds both triangles row-major, `n * n` entries,
+/// so a cofacet diameter fold reads one contiguous row per simplex vertex
+/// instead of one strided column. A dense run converts to the full form
+/// when [`crate::DenseStorage`] selects it. Both forms answer every query
+/// identically.
 #[derive(Debug, Clone)]
 pub struct DistanceMatrix {
     n: usize,
+    /// Row-major n by n in the full form, the condensed lower triangle in
+    /// the compact one. Row `i` holds its entries below the diagonal first
+    /// in both, which is what [`DistanceMatrix::lower_row`] returns.
     data: Vec<f64>,
+    square: bool,
 }
 
 impl DistanceMatrix {
@@ -37,22 +49,25 @@ impl DistanceMatrix {
                 data.push(euclidean(&points[i], &points[j]));
             }
         }
-        Ok(Self { n, data })
+        Ok(Self {
+            n,
+            data,
+            square: false,
+        })
     }
 
     /// Build from the condensed lower triangle, row by row: d(1,0), d(2,0),
     /// d(2,1), d(3,0), and so on. An empty vector means one point (n = 1).
-    /// Only [`DistanceMatrix::from_points`] can build an empty *space*
-    /// (n = 0).
-    pub fn from_condensed(mut data: Vec<f64>) -> Result<Self> {
-        let m = data.len();
+    /// Only [`DistanceMatrix::from_points`] can build n = 0.
+    pub fn from_condensed(mut condensed: Vec<f64>) -> Result<Self> {
+        let m = condensed.len();
         let n = ((1.0 + 8.0 * m as f64).sqrt() as usize).div_ceil(2);
         if n * (n - 1) / 2 != m {
             return Err(Error::InvalidInput(format!(
                 "condensed length {m} is not n(n-1)/2 for any n"
             )));
         }
-        for (i, d) in data.iter_mut().enumerate() {
+        for (i, d) in condensed.iter_mut().enumerate() {
             if d.is_nan() {
                 return Err(Error::InvalidDistance(format!(
                     "NaN at condensed index {i}"
@@ -67,7 +82,11 @@ impl DistanceMatrix {
                 *d = 0.0;
             }
         }
-        Ok(Self { n, data })
+        Ok(Self {
+            n,
+            data: condensed,
+            square: false,
+        })
     }
 
     /// Number of points.
@@ -84,6 +103,9 @@ impl DistanceMatrix {
     #[inline]
     pub fn get(&self, i: usize, j: usize) -> f64 {
         debug_assert!(i < self.n && j < self.n);
+        if self.square {
+            return self.data[i * self.n + j];
+        }
         match i.cmp(&j) {
             std::cmp::Ordering::Equal => 0.0,
             std::cmp::Ordering::Greater => self.data[i * (i - 1) / 2 + j],
@@ -91,46 +113,199 @@ impl DistanceMatrix {
         }
     }
 
+    /// Row `i` up to the diagonal: the distances from `i` to every point
+    /// below it, in index order. Both forms store that run contiguously.
+    #[inline]
+    fn lower_row(&self, i: usize) -> &[f64] {
+        let start = if self.square {
+            i * self.n
+        } else {
+            i * (i - 1) / 2
+        };
+        &self.data[start..start + i]
+    }
+
+    /// Count the pairs that enter the complex at `threshold`: finite and at
+    /// or below it. One pass over the condensed triangle, no allocation.
+    pub(crate) fn count_edges_at(&self, threshold: f64) -> usize {
+        (1..self.n)
+            .map(|i| {
+                self.lower_row(i)
+                    .iter()
+                    .filter(|d| d.is_finite() && **d <= threshold)
+                    .count()
+            })
+            .sum()
+    }
+
+    /// The thresholded graph: the pairs [`DistanceMatrix::count_edges_at`]
+    /// counts, over the same vertex set. A vertex with no edge keeps its
+    /// place and its essential H0 bar, because `n` sizes the graph.
+    ///
+    /// The conversion writes the compressed neighbor block directly. One
+    /// pass over the lower triangle counts the degrees, and a second pass
+    /// writes each kept pair under both of its endpoints. Row `i` reaches
+    /// vertex `v` before any later row does, and it lists the neighbors
+    /// below `v` in ascending order, so every list comes out sorted and the
+    /// conversion needs no sort.
+    pub(crate) fn to_sparse_at(&self, threshold: f64) -> Result<SparseDistanceMatrix> {
+        let n = self.n;
+        if n > u32::MAX as usize {
+            return Err(Error::InvalidInput(format!(
+                "sparse matrix holds at most {} points, got {n}",
+                u32::MAX
+            )));
+        }
+        let keep = |d: f64| d.is_finite() && d <= threshold;
+        let mut degree = vec![0usize; n];
+        for i in 1..n {
+            for (j, &d) in self.lower_row(i).iter().enumerate() {
+                if keep(d) {
+                    degree[i] += 1;
+                    degree[j] += 1;
+                }
+            }
+        }
+        let mut offsets = vec![0usize; n + 1];
+        let mut total = 0usize;
+        for (v, &deg) in degree.iter().enumerate() {
+            offsets[v] = total;
+            total += deg;
+        }
+        offsets[n] = total;
+
+        let mut indices = vec![0u32; total];
+        let mut values = vec![0.0f64; total];
+        let mut cursor = offsets[..n].to_vec();
+        let mut max_distance = 0.0f64;
+        for i in 1..n {
+            for (j, &d) in self.lower_row(i).iter().enumerate() {
+                if !keep(d) {
+                    continue;
+                }
+                max_distance = max_distance.max(d);
+                indices[cursor[i]] = j as u32;
+                values[cursor[i]] = d;
+                cursor[i] += 1;
+                indices[cursor[j]] = i as u32;
+                values[cursor[j]] = d;
+                cursor[j] += 1;
+            }
+        }
+        Ok(SparseDistanceMatrix {
+            n,
+            offsets,
+            indices,
+            values,
+            max_distance,
+        })
+    }
+
     /// Return the minimum over i of the maximum over j of d(i,j). Past that
     /// radius the complex is a cone and acquires no further homology, so it
-    /// is the default threshold. It does not change the full persistence
-    /// result.
+    /// is the default threshold.
     pub fn enclosing_radius(&self) -> f64 {
         if self.n < 2 {
             return 0.0;
         }
         // Each distance folds into both endpoints' running maxima, so one
-        // pass over the condensed lower triangle is enough.
+        // pass over the lower triangle is enough. Row `i` holds its own
+        // maximum in a local until the row ends: no earlier row writes
+        // `row_max[i]`, because every column index it touches is below it.
         let mut row_max = vec![0.0f64; self.n];
-        let mut k = 0;
         for i in 1..self.n {
-            for j in 0..i {
-                let d = self.data[k];
-                k += 1;
-                row_max[i] = row_max[i].max(d);
-                row_max[j] = row_max[j].max(d);
+            let mut max_i = 0.0f64;
+            for (m, &d) in row_max[..i].iter_mut().zip(self.lower_row(i)) {
+                max_i = max_i.max(d);
+                *m = m.max(d);
             }
+            row_max[i] = max_i;
         }
         row_max.into_iter().fold(f64::INFINITY, f64::min)
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Conversions to the full form on this thread. Each test runs on its
+    /// own thread.
+    pub(crate) static SQUARE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl DistanceMatrix {
+    /// True when this matrix holds both triangles.
+    #[cfg(test)]
+    pub(crate) fn is_square(&self) -> bool {
+        self.square
+    }
+
+    /// The same distances in the full row-major form. Every constructor
+    /// builds the compact form, so this is the only way a run reaches the
+    /// full one.
+    ///
+    /// The caller keeps the compact matrix, so the conversion holds
+    /// `n * n + n(n-1)/2` entries at once: one and a half times the full
+    /// form, three times the compact one. The peak lasts as long as the
+    /// dense run.
+    pub(crate) fn to_square(&self) -> Self {
+        #[cfg(test)]
+        SQUARE_BUILDS.with(|c| c.set(c.get() + 1));
+        let n = self.n;
+        let mut data = vec![0.0f64; n * n];
+        for i in 1..n {
+            let row = self.lower_row(i);
+            data[i * n..i * n + i].copy_from_slice(row);
+            for (j, &d) in row.iter().enumerate() {
+                data[j * n + i] = d;
+            }
+        }
+        Self {
+            n,
+            data,
+            square: true,
+        }
+    }
+}
+
 /// Sparse dissimilarities: only listed pairs have finite distance. Every
-/// unlisted pair is an absent edge (+inf) that never enters the filtration.
-/// No metric assumptions, same entry rules as [`DistanceMatrix`].
+/// unlisted pair is an absent edge (+inf). No metric assumptions; same
+/// entry rules as [`DistanceMatrix`].
+///
+/// The neighbor lists live in one compressed block: an offset for each
+/// vertex, then the neighbor vertices as `u32` and their distances in two
+/// arrays of the same length. A list is sorted by neighbor vertex. The
+/// cofacet merge walks four bytes an entry and reads a distance only where
+/// two lists meet.
 #[derive(Debug, Clone)]
 pub struct SparseDistanceMatrix {
     n: usize,
-    /// Per-vertex neighbor lists, sorted by vertex index.
-    neighbors: Vec<Vec<(usize, f64)>>,
+    /// Where each vertex's neighbor list starts, plus the total at the end.
+    /// Length `n + 1`.
+    offsets: Vec<usize>,
+    /// Neighbor vertices, per vertex ascending. `from_triplets` rejects an
+    /// `n` above `u32::MAX`, so a vertex fits in a `u32`.
+    indices: Vec<u32>,
+    /// The distance to the neighbor at the same position in `indices`.
+    values: Vec<f64>,
+    /// The largest stored distance, or 0 when no pair is stored.
+    max_distance: f64,
 }
 
 impl SparseDistanceMatrix {
     /// Build from `(i, j, d)` triplets over `n` points. A repeated unordered
     /// pair must carry an identical distance. Entries must be finite and
-    /// non-negative. Omit a pair to make it absent.
+    /// non-negative. An omitted pair is absent. `n` must be at or below
+    /// `u32::MAX`.
     pub fn from_triplets(n: usize, triplets: &[(usize, usize, f64)]) -> Result<Self> {
-        let mut neighbors: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        if n > u32::MAX as usize {
+            return Err(Error::InvalidInput(format!(
+                "sparse matrix holds at most {} points, got {n}",
+                u32::MAX
+            )));
+        }
+        // A repeated pair is counted twice, so the offsets are an upper
+        // bound and the dedup below closes the gaps.
+        let mut degree = vec![0usize; n];
         for (idx, &(i, j, d)) in triplets.iter().enumerate() {
             if i >= n || j >= n {
                 return Err(Error::InvalidInput(format!(
@@ -147,11 +322,56 @@ impl SparseDistanceMatrix {
                     "triplet {idx}: distance must be finite and non-negative, got {d}"
                 )));
             }
-            let d = if d == 0.0 { 0.0 } else { d };
-            neighbors[i].push((j, d));
-            neighbors[j].push((i, d));
+            degree[i] += 1;
+            degree[j] += 1;
         }
-        for (v, list) in neighbors.iter_mut().enumerate() {
+        let mut offsets = vec![0usize; n + 1];
+        let mut total = 0usize;
+        for (v, &deg) in degree.iter().enumerate() {
+            offsets[v] = total;
+            total += deg;
+        }
+        offsets[n] = total;
+
+        let mut indices = vec![0u32; total];
+        let mut values = vec![0.0f64; total];
+        let mut cursor = offsets[..n].to_vec();
+        for &(i, j, d) in triplets {
+            let d = if d == 0.0 { 0.0 } else { d };
+            indices[cursor[i]] = j as u32;
+            values[cursor[i]] = d;
+            cursor[i] += 1;
+            indices[cursor[j]] = i as u32;
+            values[cursor[j]] = d;
+            cursor[j] += 1;
+        }
+
+        // Sort and dedup one list at a time. The write position never
+        // passes the read position, because a list only shrinks, so the
+        // block compacts in place. A list that already ascends with no
+        // repeat skips the buffer: triplets in row-major order, which is
+        // what the sparse reader and the collapse write, land that way.
+        let widest = degree.iter().copied().max().unwrap_or(0);
+        let mut list: Vec<(u32, f64)> = Vec::with_capacity(widest);
+        let mut write = 0usize;
+        for v in 0..n {
+            let (start, end) = (offsets[v], offsets[v + 1]);
+            offsets[v] = write;
+            if indices[start..end].is_sorted_by(|a, b| a < b) {
+                if start != write {
+                    indices.copy_within(start..end, write);
+                    values.copy_within(start..end, write);
+                }
+                write += end - start;
+                continue;
+            }
+            list.clear();
+            list.extend(
+                indices[start..end]
+                    .iter()
+                    .zip(&values[start..end])
+                    .map(|(&w, &d)| (w, d)),
+            );
             list.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
             for w in list.windows(2) {
                 if w[0].0 == w[1].0 && w[0].1 != w[1].1 {
@@ -162,8 +382,24 @@ impl SparseDistanceMatrix {
                 }
             }
             list.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+            for &(w, d) in &list {
+                indices[write] = w;
+                values[write] = d;
+                write += 1;
+            }
         }
-        Ok(Self { n, neighbors })
+        offsets[n] = write;
+        indices.truncate(write);
+        values.truncate(write);
+
+        let max_distance = triplets.iter().fold(0.0f64, |m, &(_, _, d)| m.max(d));
+        Ok(Self {
+            n,
+            offsets,
+            indices,
+            values,
+            max_distance,
+        })
     }
 
     /// Number of points.
@@ -178,7 +414,20 @@ impl SparseDistanceMatrix {
 
     /// Number of stored (present) edges.
     pub fn num_edges(&self) -> usize {
-        self.neighbors.iter().map(Vec::len).sum::<usize>() / 2
+        self.indices.len() / 2
+    }
+
+    /// Where vertex `v`'s neighbor list sits in `indices` and `values`.
+    #[inline]
+    fn span(&self, v: usize) -> (usize, usize) {
+        (self.offsets[v], self.offsets[v + 1])
+    }
+
+    /// How many neighbors vertex `v` has.
+    #[cfg(test)]
+    #[inline]
+    fn degree(&self, v: usize) -> usize {
+        self.offsets[v + 1] - self.offsets[v]
     }
 
     /// Distance between `i` and `j`; +inf when the pair is not listed.
@@ -188,8 +437,9 @@ impl SparseDistanceMatrix {
         if i == j {
             return 0.0;
         }
-        match self.neighbors[i].binary_search_by(|&(v, _)| v.cmp(&j)) {
-            Ok(pos) => self.neighbors[i][pos].1,
+        let (start, end) = self.span(i);
+        match self.indices[start..end].binary_search(&(j as u32)) {
+            Ok(pos) => self.values[start + pos],
             Err(_) => f64::INFINITY,
         }
     }
@@ -197,21 +447,127 @@ impl SparseDistanceMatrix {
     /// Visit every stored edge once, as `(u, v, value)` with `u < v`, in
     /// ascending `u` then `v` order.
     pub fn edges(&self) -> impl Iterator<Item = (usize, usize, f64)> + '_ {
-        self.neighbors.iter().enumerate().flat_map(|(u, list)| {
-            list.iter()
-                .filter(move |&&(v, _)| u < v)
-                .map(move |&(v, d)| (u, v, d))
+        (0..self.n).flat_map(move |u| {
+            let (start, end) = self.span(u);
+            self.indices[start..end]
+                .iter()
+                .zip(&self.values[start..end])
+                .filter(move |&(&v, _)| u < v as usize)
+                .map(move |(&v, &d)| (u, v as usize, d))
         })
     }
 }
 
-/// A cofacet produced during enumeration: its combinadic index, the position
-/// `k` of the added vertex in the cofacet (the coboundary sign exponent), and
-/// the cofacet's filtration diameter.
+/// A cofacet produced during enumeration.
+///
+/// `k` is the position of the added vertex in the cofacet, the coboundary
+/// sign exponent. `vertex` lets a caller build the cofacet's vertex set
+/// from the simplex without unranking.
+///
+/// Under `upper_only` every enumerator reports `k` as 0, not as `dim + 1`.
+/// No caller reads the position there.
 pub(crate) struct Cofacet {
     pub(crate) index: u64,
     pub(crate) k: usize,
+    pub(crate) vertex: usize,
     pub(crate) diameter: f64,
+}
+
+/// Cursor slots a sparse cofacet enumeration keeps on the stack. A simplex
+/// wider than this allocates its cursors once, on entry.
+const INLINE_VERTS: usize = 16;
+
+/// Untimed event counters for the sparse cofacet enumerator.
+///
+/// Only a test build has them. Elsewhere the `note_*` functions are empty.
+/// The counts are thread-local because tests run on several threads at once.
+#[cfg(test)]
+mod counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        static CANDIDATES: Cell<u64> = const { Cell::new(0) };
+        static CALLBACKS: Cell<u64> = const { Cell::new(0) };
+        static BREAKS: Cell<u64> = const { Cell::new(0) };
+        static SPILLS: Cell<u64> = const { Cell::new(0) };
+        static VACUOUS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// What one thread's enumerations did since the last [`reset`].
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(super) struct Events {
+        /// Neighbor-list entries the enumerator read.
+        pub(super) candidates: u64,
+        /// Calls the enumerator made to the caller's closure.
+        pub(super) callbacks: u64,
+        /// Breaks the enumerator honored.
+        pub(super) breaks: u64,
+        /// Enumerations that allocated their cursors instead of keeping
+        /// them on the stack.
+        pub(super) spills: u64,
+        /// Bounded walks whose bound rose to infinity, because no stored
+        /// distance reached it.
+        pub(super) vacuous: u64,
+    }
+
+    #[inline]
+    pub(super) fn note_candidate() {
+        CANDIDATES.with(|c| c.set(c.get() + 1));
+    }
+
+    #[inline]
+    pub(super) fn note_callback() {
+        CALLBACKS.with(|c| c.set(c.get() + 1));
+    }
+
+    #[inline]
+    pub(super) fn note_break() {
+        BREAKS.with(|c| c.set(c.get() + 1));
+    }
+
+    #[inline]
+    pub(super) fn note_spill() {
+        SPILLS.with(|c| c.set(c.get() + 1));
+    }
+
+    #[inline]
+    pub(super) fn note_vacuous_bound() {
+        VACUOUS.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Zero this thread's counters.
+    pub(super) fn reset() {
+        CANDIDATES.with(|c| c.set(0));
+        CALLBACKS.with(|c| c.set(0));
+        BREAKS.with(|c| c.set(0));
+        SPILLS.with(|c| c.set(0));
+        VACUOUS.with(|c| c.set(0));
+    }
+
+    /// Read this thread's counters.
+    pub(super) fn read() -> Events {
+        Events {
+            candidates: CANDIDATES.with(Cell::get),
+            callbacks: CALLBACKS.with(Cell::get),
+            breaks: BREAKS.with(Cell::get),
+            spills: SPILLS.with(Cell::get),
+            vacuous: VACUOUS.with(Cell::get),
+        }
+    }
+}
+
+#[cfg(not(test))]
+mod counters {
+    #[inline(always)]
+    pub(super) fn note_candidate() {}
+    #[inline(always)]
+    pub(super) fn note_callback() {}
+    #[inline(always)]
+    pub(super) fn note_break() {}
+    #[inline(always)]
+    pub(super) fn note_spill() {}
+    #[inline(always)]
+    pub(super) fn note_vacuous_bound() {}
 }
 
 /// What the solver needs from a distance source. Dense and sparse inputs
@@ -221,8 +577,15 @@ pub(crate) trait Distances {
     fn get(&self, i: usize, j: usize) -> f64;
     /// Threshold to use when the caller gives none.
     fn default_threshold(&self) -> f64;
+    /// The largest distance the source can report between distinct points,
+    /// or +inf when it knows no such limit. A bound at or above it drops
+    /// nothing, so [`Distances::for_each_cofacet_bounded`] raises it to
+    /// infinity.
+    fn max_distance(&self) -> f64 {
+        f64::INFINITY
+    }
     /// Visit every pair that could be an edge, as (i, j, d) with j < i.
-    fn for_each_edge(&self, f: &mut dyn FnMut(usize, usize, f64));
+    fn for_each_edge(&self, f: impl FnMut(usize, usize, f64));
 
     /// Enumerate cofacets of `simplex` (vertex set `verts`, ascending) in
     /// dimension `dim`, in strictly descending index order. `f` runs on each
@@ -233,6 +596,7 @@ pub(crate) trait Distances {
     ///
     /// The default walks the full combinadic cofacet set. A sparse source
     /// overrides it to visit only common neighbors.
+    #[inline]
     fn for_each_cofacet<T>(
         &self,
         bt: &BinomialTable,
@@ -240,20 +604,92 @@ pub(crate) trait Distances {
         verts: &[usize],
         dim: usize,
         upper_only: bool,
-        mut f: impl FnMut(Cofacet) -> ControlFlow<T>,
+        f: impl FnMut(Cofacet) -> ControlFlow<T>,
     ) -> Option<T> {
+        self.enumerate_cofacets::<false, T, _>(
+            bt,
+            simplex,
+            verts,
+            dim,
+            upper_only,
+            f64::INFINITY,
+            f,
+        )
+    }
+
+    /// [`Distances::for_each_cofacet`] restricted to the cofacets whose
+    /// diameter is at or below `bound`. Those reach `f` in the same order and
+    /// with the same bits as the unrestricted walk gives them; the rest never
+    /// reach `f` at all. `bound` must be at or above `simplex.diameter`.
+    ///
+    /// A cofacet diameter is the largest of the simplex diameter and the
+    /// distances from the added vertex to the simplex vertices, so the fold
+    /// can stop at the first distance above the bound.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    fn for_each_cofacet_bounded<T>(
+        &self,
+        bt: &BinomialTable,
+        simplex: Simplex,
+        verts: &[usize],
+        dim: usize,
+        upper_only: bool,
+        bound: f64,
+        f: impl FnMut(Cofacet) -> ControlFlow<T>,
+    ) -> Option<T> {
+        debug_assert!(bound >= simplex.diameter);
+        // A bound no distance reaches drops nothing. Raising it to infinity
+        // makes the walk's bound test a predicted branch and keeps one
+        // instance of the walk at the call site.
+        let mut bound = bound;
+        if bound >= self.max_distance() {
+            counters::note_vacuous_bound();
+            bound = f64::INFINITY;
+        }
+        self.enumerate_cofacets::<true, T, _>(bt, simplex, verts, dim, upper_only, bound, f)
+    }
+
+    /// The one cofacet walk behind [`Distances::for_each_cofacet`] and
+    /// [`Distances::for_each_cofacet_bounded`]. `BOUNDED` selects the bounded
+    /// form, and only that form reads `bound`. A distance source overrides
+    /// this method alone, so the two entry points cannot drift apart, and the
+    /// unbounded one carries no bound test.
+    #[allow(clippy::too_many_arguments)]
+    fn enumerate_cofacets<const BOUNDED: bool, T, F>(
+        &self,
+        bt: &BinomialTable,
+        simplex: Simplex,
+        verts: &[usize],
+        dim: usize,
+        upper_only: bool,
+        bound: f64,
+        mut f: F,
+    ) -> Option<T>
+    where
+        F: FnMut(Cofacet) -> ControlFlow<T>,
+    {
         let cofacet_diameter = |added: usize| {
-            verts
-                .iter()
-                .fold(simplex.diameter, |d, &v| d.max(self.get(added, v)))
+            let mut d = simplex.diameter;
+            for &v in verts {
+                let x = self.get(added, v);
+                if BOUNDED && x > bound {
+                    return None;
+                }
+                d = d.max(x);
+            }
+            Some(d)
         };
         let mut iter = CofacetIter::new(bt, simplex.index, dim, self.len());
         if upper_only {
             while let Some((index, vertex)) = iter.next_upper() {
+                let Some(diameter) = cofacet_diameter(vertex) else {
+                    continue;
+                };
                 let cofacet = Cofacet {
                     index,
                     k: 0,
-                    diameter: cofacet_diameter(vertex),
+                    vertex,
+                    diameter,
                 };
                 if let ControlFlow::Break(t) = f(cofacet) {
                     return Some(t);
@@ -261,10 +697,14 @@ pub(crate) trait Distances {
             }
         } else {
             while let Some((index, vertex, k)) = iter.next_all() {
+                let Some(diameter) = cofacet_diameter(vertex) else {
+                    continue;
+                };
                 let cofacet = Cofacet {
                     index,
                     k,
-                    diameter: cofacet_diameter(vertex),
+                    vertex,
+                    diameter,
                 };
                 if let ControlFlow::Break(t) = f(cofacet) {
                     return Some(t);
@@ -285,12 +725,112 @@ impl Distances for DistanceMatrix {
     fn default_threshold(&self) -> f64 {
         self.enclosing_radius()
     }
-    fn for_each_edge(&self, f: &mut dyn FnMut(usize, usize, f64)) {
+    fn for_each_edge(&self, mut f: impl FnMut(usize, usize, f64)) {
         for i in 1..self.n {
             for j in 0..i {
                 f(i, j, DistanceMatrix::get(self, i, j));
             }
         }
+    }
+
+    /// The dense walk, with a diameter fold that reads the storage form
+    /// directly instead of going through [`DistanceMatrix::get`].
+    ///
+    /// Both forms take the vertices in ascending position, as the default
+    /// does, so the diameters and the stopping point match bit for bit.
+    #[allow(clippy::too_many_arguments)]
+    fn enumerate_cofacets<const BOUNDED: bool, T, F>(
+        &self,
+        bt: &BinomialTable,
+        simplex: Simplex,
+        verts: &[usize],
+        dim: usize,
+        upper_only: bool,
+        bound: f64,
+        f: F,
+    ) -> Option<T>
+    where
+        F: FnMut(Cofacet) -> ControlFlow<T>,
+    {
+        let data = &self.data;
+        let n = self.n;
+        let square = self.square;
+        self.walk_cofacets(bt, simplex, dim, upper_only, f, |added| {
+            let mut d = simplex.diameter;
+            // The square form reads each simplex vertex's own row, which the
+            // descending candidates walk backward, one contiguous run at a
+            // time. The condensed form holds no row for the candidates above
+            // a vertex, so it reads what the trait default reads.
+            let row = added * added.saturating_sub(1) / 2;
+            for &v in verts {
+                let x = if square {
+                    data[v * n + added]
+                } else if v < added {
+                    data[row + v]
+                } else {
+                    data[v * (v - 1) / 2 + added]
+                };
+                if BOUNDED && x > bound {
+                    return None;
+                }
+                d = d.max(x);
+            }
+            Some(d)
+        })
+    }
+}
+
+impl DistanceMatrix {
+    /// The cofacet walk both storage forms share. `cofacet_diameter` folds
+    /// one candidate's diameter and returns `None` for a candidate the
+    /// caller's bound drops.
+    #[inline]
+    fn walk_cofacets<T, F, D>(
+        &self,
+        bt: &BinomialTable,
+        simplex: Simplex,
+        dim: usize,
+        upper_only: bool,
+        mut f: F,
+        cofacet_diameter: D,
+    ) -> Option<T>
+    where
+        F: FnMut(Cofacet) -> ControlFlow<T>,
+        D: Fn(usize) -> Option<f64>,
+    {
+        let mut iter = CofacetIter::new(bt, simplex.index, dim, self.n);
+        if upper_only {
+            while let Some((index, vertex)) = iter.next_upper() {
+                let Some(diameter) = cofacet_diameter(vertex) else {
+                    continue;
+                };
+                let cofacet = Cofacet {
+                    index,
+                    k: 0,
+                    vertex,
+                    diameter,
+                };
+                if let ControlFlow::Break(t) = f(cofacet) {
+                    return Some(t);
+                }
+            }
+        } else {
+            while let Some((index, vertex, k)) = iter.next_all() {
+                let Some(diameter) = cofacet_diameter(vertex) else {
+                    continue;
+                };
+                let cofacet = Cofacet {
+                    index,
+                    k,
+                    vertex,
+                    diameter,
+                };
+                if let ControlFlow::Break(t) = f(cofacet) {
+                    return Some(t);
+                }
+            }
+        }
+        None
     }
 }
 
@@ -306,9 +846,17 @@ impl Distances for SparseDistanceMatrix {
     fn default_threshold(&self) -> f64 {
         f64::INFINITY
     }
-    fn for_each_edge(&self, f: &mut dyn FnMut(usize, usize, f64)) {
-        for (i, list) in self.neighbors.iter().enumerate() {
-            for &(j, d) in list {
+    fn max_distance(&self) -> f64 {
+        self.max_distance
+    }
+    fn for_each_edge(&self, mut f: impl FnMut(usize, usize, f64)) {
+        for i in 0..self.n {
+            let (start, end) = self.span(i);
+            for (&j, &d) in self.indices[start..end]
+                .iter()
+                .zip(&self.values[start..end])
+            {
+                let j = j as usize;
                 if j < i {
                     f(i, j, d);
                 }
@@ -318,12 +866,144 @@ impl Distances for SparseDistanceMatrix {
 
     /// Enumerate cofacets from the neighbor lists, as ripser's sparse
     /// coboundary does. An in-complex cofacet adds a vertex adjacent to
-    /// every simplex vertex, so the enumeration intersects the vertices'
-    /// neighbor lists instead of scanning all `n` candidates. This
-    /// reproduces the dense enumerator's index and `k` exactly. It tracks
-    /// `idx_below`/`idx_above` as the added vertex descends past the simplex
-    /// vertices, the same way [`CofacetIter::advance`] does.
-    fn for_each_cofacet<T>(
+    /// every simplex vertex, so the enumeration merges the vertices'
+    /// neighbor lists from their high ends. Each cofacet reaches `f` as
+    /// soon as the merge finds it, so a `Break` stops the merge. A simplex
+    /// vertex never appears in its own neighbor list, so the merge excludes
+    /// the simplex vertices without a separate test.
+    ///
+    /// The index, `k`, and diameter match the dense default bit for bit.
+    /// The index recurrence is the one [`CofacetIter::advance`] runs, and
+    /// the diameter folds the same values in the same order. Cofacets of
+    /// infinite diameter are omitted.
+    ///
+    /// Under `BOUNDED` the merge drops a candidate as soon as one of its
+    /// distances exceeds `bound`. Cursors of lists it did not reach stay
+    /// where they stand. Every later candidate is smaller, so those
+    /// cursors pass the same entries then and read nothing twice.
+    #[allow(clippy::too_many_arguments)]
+    fn enumerate_cofacets<const BOUNDED: bool, T, F>(
+        &self,
+        bt: &BinomialTable,
+        simplex: Simplex,
+        verts: &[usize],
+        dim: usize,
+        upper_only: bool,
+        bound: f64,
+        mut f: F,
+    ) -> Option<T>
+    where
+        F: FnMut(Cofacet) -> ControlFlow<T>,
+    {
+        assert!(
+            !verts.is_empty(),
+            "cofacet enumeration needs a non-empty simplex"
+        );
+        let width = verts.len();
+        let indices = &self.indices[..];
+        let values = &self.values[..];
+        // Where each neighbor list starts, and one past the entry it has
+        // reached walking downward. The first simplex vertex drives the
+        // merge; the other lists follow it.
+        let mut inline = [(0usize, 0usize); INLINE_VERTS];
+        let mut spill: Vec<(usize, usize)>;
+        let cursor: &mut [(usize, usize)] = if width <= INLINE_VERTS {
+            &mut inline[..width]
+        } else {
+            counters::note_spill();
+            spill = vec![(0, 0); width];
+            &mut spill
+        };
+        for (slot, &v) in cursor.iter_mut().zip(verts) {
+            *slot = self.span(v);
+        }
+        // Under `upper_only` the walk ends at the highest simplex vertex: no
+        // candidate at or below it is above every simplex vertex, and the
+        // candidates descend. The driver's list is sorted, so one search
+        // finds where that is and the merge tests it no further.
+        let floor = if upper_only {
+            let (start, end) = cursor[0];
+            start + indices[start..end].partition_point(|&v| (v as usize) <= verts[width - 1])
+        } else {
+            cursor[0].0
+        };
+
+        // Move each simplex vertex the added vertex overtakes from the
+        // below-set to the above-set, exactly as `advance` does.
+        let mut idx_below = simplex.index;
+        let mut idx_above = 0u64;
+        let mut k = dim + 1;
+        'candidate: loop {
+            if cursor[0].1 == floor {
+                return None;
+            }
+            cursor[0].1 -= 1;
+            counters::note_candidate();
+            let at = cursor[0].1;
+            let w = indices[at];
+            let d0 = values[at];
+            if BOUNDED && d0 > bound {
+                continue 'candidate;
+            }
+            // The fold takes the vertices in ascending position, as the
+            // dense default does, so the diameter matches bit for bit.
+            let mut diameter = simplex.diameter.max(d0);
+            for slot in cursor[1..].iter_mut() {
+                let lo = slot.0;
+                loop {
+                    if slot.1 == lo {
+                        // This list holds nothing at or below `w`, and
+                        // every later candidate is smaller.
+                        return None;
+                    }
+                    counters::note_candidate();
+                    let at = slot.1 - 1;
+                    let x = indices[at];
+                    if x > w {
+                        slot.1 = at;
+                        continue;
+                    }
+                    if x < w {
+                        continue 'candidate;
+                    }
+                    slot.1 = at;
+                    if BOUNDED && values[at] > bound {
+                        continue 'candidate;
+                    }
+                    diameter = diameter.max(values[at]);
+                    break;
+                }
+            }
+
+            let w = w as usize;
+            while k >= 1 && verts[k - 1] > w {
+                idx_below -= bt.get(verts[k - 1], k);
+                idx_above += bt.get(verts[k - 1], k + 1);
+                k -= 1;
+            }
+            debug_assert!(!upper_only || k == dim + 1);
+            let cofacet = Cofacet {
+                index: idx_above + bt.get(w, k + 1) + idx_below,
+                k: if upper_only { 0 } else { k },
+                vertex: w,
+                diameter,
+            };
+            counters::note_callback();
+            if let ControlFlow::Break(t) = f(cofacet) {
+                counters::note_break();
+                return Some(t);
+            }
+        }
+    }
+}
+
+/// The sparse cofacet enumerator of 0.5.0, kept verbatim as the reference
+/// the shipped enumerator is tested against. It builds the whole candidate
+/// set before it emits anything, so it honors a `Break` in the callbacks
+/// alone. Do not change it.
+#[cfg(test)]
+impl SparseDistanceMatrix {
+    pub(crate) fn for_each_cofacet_reference<T>(
         &self,
         bt: &BinomialTable,
         simplex: Simplex,
@@ -338,10 +1018,12 @@ impl Distances for SparseDistanceMatrix {
         // mutual neighbors, so they surface here and must be excluded.
         let pivot = *verts
             .iter()
-            .min_by_key(|&&v| self.neighbors[v].len())
+            .min_by_key(|&&v| self.degree(v))
             .expect("cofacet enumeration needs a non-empty simplex");
+        let (start, end) = self.span(pivot);
         let mut candidates: Vec<(usize, f64)> = Vec::new();
-        'w: for &(w, _) in &self.neighbors[pivot] {
+        'w: for &w in &self.indices[start..end] {
+            let w = w as usize;
             if verts.binary_search(&w).is_ok() {
                 continue;
             }
@@ -375,6 +1057,7 @@ impl Distances for SparseDistanceMatrix {
             let cofacet = Cofacet {
                 index,
                 k: if upper_only { 0 } else { k },
+                vertex: w,
                 diameter,
             };
             if let ControlFlow::Break(t) = f(cofacet) {
@@ -387,7 +1070,7 @@ impl Distances for SparseDistanceMatrix {
 
 /// Scaled two-norm: exact where the naive sum of squares would overflow or
 /// underflow. Finite coordinates whose difference still overflows f64 give
-/// +inf. The complex treats +inf as an absent edge.
+/// +inf.
 fn euclidean(a: &[f64], b: &[f64]) -> f64 {
     let m = a
         .iter()
@@ -433,7 +1116,14 @@ mod tests {
         }
     }
 
-    // Collect the full (index, k, diameter) sequence for a base simplex.
+    // Index, sign position, and diameter bits. Diameter is compared by bits,
+    // not by f64 equality.
+    type Bits = (u64, usize, u64);
+
+    fn bits(cf: &Cofacet) -> Bits {
+        (cf.index, cf.k, cf.diameter.to_bits())
+    }
+
     fn cofacets<D: Distances>(
         d: &D,
         bt: &BinomialTable,
@@ -441,16 +1131,48 @@ mod tests {
         verts: &[usize],
         dim: usize,
         upper_only: bool,
-    ) -> Vec<(u64, usize, f64)> {
+    ) -> Vec<Bits> {
         let mut out = Vec::new();
         d.for_each_cofacet(bt, simplex, verts, dim, upper_only, |cf| {
-            out.push((cf.index, cf.k, cf.diameter));
+            out.push(bits(&cf));
             ControlFlow::<()>::Continue(())
         });
         out
     }
 
-    // Rank a sorted vertex set into its combinadic index.
+    fn bounded_cofacets<D: Distances>(
+        d: &D,
+        bt: &BinomialTable,
+        simplex: Simplex,
+        verts: &[usize],
+        dim: usize,
+        upper_only: bool,
+        bound: f64,
+    ) -> Vec<Bits> {
+        let mut out = Vec::new();
+        d.for_each_cofacet_bounded(bt, simplex, verts, dim, upper_only, bound, |cf| {
+            out.push(bits(&cf));
+            ControlFlow::<()>::Continue(())
+        });
+        out
+    }
+
+    fn reference_cofacets(
+        sparse: &SparseDistanceMatrix,
+        bt: &BinomialTable,
+        simplex: Simplex,
+        verts: &[usize],
+        dim: usize,
+        upper_only: bool,
+    ) -> Vec<Bits> {
+        let mut out = Vec::new();
+        sparse.for_each_cofacet_reference(bt, simplex, verts, dim, upper_only, |cf| {
+            out.push(bits(&cf));
+            ControlFlow::<()>::Continue(())
+        });
+        out
+    }
+
     fn rank(bt: &BinomialTable, verts: &[usize]) -> u64 {
         verts
             .iter()
@@ -459,11 +1181,395 @@ mod tests {
             .sum()
     }
 
-    // A random sparse graph plus the dense matrix that uses +inf for every
-    // absent pair. The dense default then enumerates the same cofacets. It
-    // gives the missing ones an infinite diameter that the sparse side omits.
+    // The dense matrix of a sparse graph: +inf at every absent pair.
+    fn densify(sparse: &SparseDistanceMatrix) -> DistanceMatrix {
+        let n = sparse.len();
+        let mut condensed = Vec::new();
+        for i in 1..n {
+            for j in 0..i {
+                condensed.push(SparseDistanceMatrix::get(sparse, i, j));
+            }
+        }
+        DistanceMatrix::from_condensed(condensed).unwrap()
+    }
+
+    fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
+        fn go(start: usize, n: usize, k: usize, cur: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+            if cur.len() == k {
+                out.push(cur.clone());
+                return;
+            }
+            for v in start..n {
+                cur.push(v);
+                go(v + 1, n, k, cur, out);
+                cur.pop();
+            }
+        }
+        let mut out = Vec::new();
+        go(0, n, k, &mut Vec::new(), &mut out);
+        out
+    }
+
+    // Every simplex of the graph up to `max_dim`. A vertex set is a simplex
+    // when every pair is present.
+    fn simplices(
+        dense: &DistanceMatrix,
+        bt: &BinomialTable,
+        max_dim: usize,
+    ) -> Vec<(Simplex, Vec<usize>, usize)> {
+        let mut out = Vec::new();
+        for dim in 0..=max_dim {
+            for verts in combinations(dense.len(), dim + 1) {
+                let mut diameter = 0.0f64;
+                let mut real = true;
+                for a in 0..verts.len() {
+                    for b in 0..a {
+                        let d = dense.get(verts[a], verts[b]);
+                        if !d.is_finite() {
+                            real = false;
+                        }
+                        diameter = diameter.max(d);
+                    }
+                }
+                if !real {
+                    continue;
+                }
+                let simplex = Simplex {
+                    diameter,
+                    index: rank(bt, &verts),
+                };
+                out.push((simplex, verts, dim));
+            }
+        }
+        out
+    }
+
+    // The three-way gate on one base simplex. The shipped enumerator, the
+    // frozen reference, and the dense default with its infinite diameters
+    // removed must give the same bits in the same order, and the order must
+    // strictly descend.
+    fn check_bits(
+        label: &str,
+        sparse: &SparseDistanceMatrix,
+        dense: &DistanceMatrix,
+        bt: &BinomialTable,
+        simplex: Simplex,
+        verts: &[usize],
+        dim: usize,
+    ) {
+        for upper_only in [false, true] {
+            let expected: Vec<Bits> = cofacets(dense, bt, simplex, verts, dim, upper_only)
+                .into_iter()
+                .filter(|&(_, _, diameter)| f64::from_bits(diameter).is_finite())
+                .collect();
+            let reference = reference_cofacets(sparse, bt, simplex, verts, dim, upper_only);
+            assert_eq!(
+                reference, expected,
+                "{label}: reference against dense, verts {verts:?}, upper_only {upper_only}"
+            );
+            for w in expected.windows(2) {
+                assert!(
+                    w[0].0 > w[1].0,
+                    "{label}: cofacet indices must strictly descend, verts {verts:?}"
+                );
+            }
+            let shipped = cofacets(sparse, bt, simplex, verts, dim, upper_only);
+            assert_eq!(
+                shipped, expected,
+                "{label}: shipped against dense, verts {verts:?}, upper_only {upper_only}"
+            );
+        }
+    }
+
+    fn previous_positive_float(value: f64) -> f64 {
+        debug_assert!(value.is_finite() && value > 0.0);
+        f64::from_bits(value.to_bits() - 1)
+    }
+
+    // Every bound worth testing on one base simplex: the simplex diameter,
+    // which is the bound the engine passes, each cofacet diameter and a
+    // value just below it, and the two bounds that keep everything.
+    fn bounds(simplex: Simplex, full: &[Bits]) -> Vec<f64> {
+        let mut out = vec![simplex.diameter, f64::MAX, f64::INFINITY];
+        for &(_, _, diameter) in full {
+            let d = f64::from_bits(diameter);
+            if d.is_finite() && d > simplex.diameter {
+                out.push(d);
+                out.push(previous_positive_float(d));
+            }
+        }
+        out.sort_unstable_by(f64::total_cmp);
+        out.dedup();
+        out
+    }
+
+    // The bounded entry point on one base simplex. It must give the
+    // unbounded sequence filtered to the bound, bits and order alike, on
+    // the dense source and on the sparse one.
+    fn check_bounded(
+        label: &str,
+        sparse: &SparseDistanceMatrix,
+        dense: &DistanceMatrix,
+        bt: &BinomialTable,
+        simplex: Simplex,
+        verts: &[usize],
+        dim: usize,
+    ) {
+        for upper_only in [false, true] {
+            let dense_full = cofacets(dense, bt, simplex, verts, dim, upper_only);
+            let sparse_full = cofacets(sparse, bt, simplex, verts, dim, upper_only);
+            for bound in bounds(simplex, &dense_full) {
+                let under = |full: &[Bits]| -> Vec<Bits> {
+                    full.iter()
+                        .copied()
+                        .filter(|&(_, _, diameter)| f64::from_bits(diameter) <= bound)
+                        .collect()
+                };
+                let got = bounded_cofacets(dense, bt, simplex, verts, dim, upper_only, bound);
+                assert_eq!(
+                    got,
+                    under(&dense_full),
+                    "{label}: bounded dense at {bound}, verts {verts:?}, upper_only {upper_only}"
+                );
+                let got = bounded_cofacets(sparse, bt, simplex, verts, dim, upper_only, bound);
+                assert_eq!(
+                    got,
+                    under(&sparse_full),
+                    "{label}: bounded sparse at {bound}, verts {verts:?}, upper_only {upper_only}"
+                );
+            }
+        }
+    }
+
+    // The Break gate on one base simplex: the value passes through, the
+    // callbacks stop at the break, and the enumerator reads no neighbor
+    // list entry after it. `bound` picks the bounded entry point.
+    fn check_breaks(
+        label: &str,
+        sparse: &SparseDistanceMatrix,
+        bt: &BinomialTable,
+        simplex: Simplex,
+        verts: &[usize],
+        dim: usize,
+        bound: Option<f64>,
+    ) {
+        let enumerate =
+            |f: &mut dyn FnMut(Cofacet) -> ControlFlow<u64>, upper_only: bool| match bound {
+                Some(bound) => {
+                    sparse.for_each_cofacet_bounded(bt, simplex, verts, dim, upper_only, bound, f)
+                }
+                None => sparse.for_each_cofacet(bt, simplex, verts, dim, upper_only, f),
+            };
+        for upper_only in [false, true] {
+            let full = match bound {
+                Some(bound) => bounded_cofacets(sparse, bt, simplex, verts, dim, upper_only, bound),
+                None => cofacets(sparse, bt, simplex, verts, dim, upper_only),
+            };
+
+            // A run that never breaks: no Break value, and one mark of the
+            // candidate counter per callback.
+            counters::reset();
+            let mut marks = Vec::new();
+            let out = enumerate(
+                &mut |_| {
+                    marks.push(counters::read().candidates);
+                    ControlFlow::<u64>::Continue(())
+                },
+                upper_only,
+            );
+            let events = counters::read();
+            assert_eq!(out, None, "{label}: a run without a Break");
+            assert_eq!(events.callbacks as usize, full.len(), "{label}: callbacks");
+            assert_eq!(events.breaks, 0, "{label}: breaks without a Break");
+
+            for m in 0..full.len() {
+                let sentinel = 0xbeef_0000_u64 + m as u64;
+                counters::reset();
+                let mut seen = Vec::new();
+                let mut done = false;
+                let out = enumerate(
+                    &mut |cf| {
+                        assert!(!done, "{label}: called back after a Break at {m}");
+                        seen.push(bits(&cf));
+                        if seen.len() == m + 1 {
+                            done = true;
+                            ControlFlow::Break(sentinel)
+                        } else {
+                            ControlFlow::Continue(())
+                        }
+                    },
+                    upper_only,
+                );
+                let events = counters::read();
+                assert_eq!(out, Some(sentinel), "{label}: Break value at {m}");
+                assert_eq!(seen, full[..=m], "{label}: callback prefix at {m}");
+                assert_eq!(
+                    events.callbacks as usize,
+                    m + 1,
+                    "{label}: callbacks at {m}"
+                );
+                assert_eq!(events.breaks, 1, "{label}: breaks at {m}");
+                assert_eq!(
+                    events.candidates, marks[m],
+                    "{label}: neighbor list entries read after the Break at {m}"
+                );
+            }
+        }
+    }
+
+    fn check_graph(label: &str, sparse: &SparseDistanceMatrix, max_dim: usize) {
+        let dense = densify(sparse);
+        let n = sparse.len();
+        let bt = BinomialTable::new(n.max(1), max_dim + 2).unwrap();
+        for (simplex, verts, dim) in simplices(&dense, &bt, max_dim) {
+            check_bits(label, sparse, &dense, &bt, simplex, &verts, dim);
+            check_bounded(label, sparse, &dense, &bt, simplex, &verts, dim);
+            check_breaks(label, sparse, &bt, simplex, &verts, dim, None);
+            check_breaks(
+                label,
+                sparse,
+                &bt,
+                simplex,
+                &verts,
+                dim,
+                Some(simplex.diameter),
+            );
+        }
+    }
+
+    fn graph(n: usize, triplets: &[(usize, usize, f64)]) -> SparseDistanceMatrix {
+        SparseDistanceMatrix::from_triplets(n, triplets).unwrap()
+    }
+
+    // Graphs that defeat a plausible enumerator shortcut.
+    fn adversarial_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
+        let mut out: Vec<(&'static str, SparseDistanceMatrix)> = Vec::new();
+
+        // A star. The shortest neighbor list belongs to a leaf, the least
+        // selective pivot.
+        let star: Vec<_> = (1..7).map(|v| (0, v, 1.0 + v as f64)).collect();
+        out.push(("star", graph(7, &star)));
+
+        // Two cliques joined by one edge. Every intersection across the
+        // join is empty.
+        let mut joined = Vec::new();
+        for a in 0..4 {
+            for b in 0..a {
+                joined.push((a, b, 1.0));
+                joined.push((a + 4, b + 4, 2.0));
+            }
+        }
+        joined.push((3, 4, 3.0));
+        out.push(("joined cliques", graph(8, &joined)));
+
+        // Complete bipartite. No two vertices of a part are adjacent, so
+        // half the base simplices do not exist. The rest intersect across
+        // the parts.
+        let mut bipartite = Vec::new();
+        for a in 0..3 {
+            for b in 3..6 {
+                bipartite.push((a, b, 1.0 + a as f64));
+            }
+        }
+        out.push(("bipartite", graph(6, &bipartite)));
+
+        // Every distance equal. Every cofacet carries the base diameter, so
+        // an apparent-pair Break fires at the first candidate.
+        let mut all_equal = Vec::new();
+        for a in 0..6 {
+            for b in 0..a {
+                all_equal.push((a, b, 2.0));
+            }
+        }
+        out.push(("all equal", graph(6, &all_equal)));
+
+        // Vertices 0, 1, and 2 coincide, so the graph carries zero-length
+        // edges beside longer ones.
+        let mut duplicates = Vec::new();
+        for a in 0..6 {
+            for b in 0..a {
+                let d = if a < 3 { 0.0 } else { 1.0 + b as f64 };
+                duplicates.push((a, b, d));
+            }
+        }
+        out.push(("duplicate points", graph(6, &duplicates)));
+
+        // The shortest list is the least selective one: vertex 0 has two
+        // neighbors and both are adjacent to everything, while the long
+        // lists disagree.
+        let mut skewed = vec![(0, 1, 1.0), (0, 2, 1.0)];
+        for a in 1..7 {
+            for b in 1..a {
+                if (a + b) % 3 != 0 {
+                    skewed.push((a, b, 1.0 + (a * b) as f64 / 8.0));
+                }
+            }
+        }
+        out.push(("least selective pivot", graph(7, &skewed)));
+
+        // Cut at a threshold that is itself an edge length. A dense input
+        // the caller thresholds reaches the sparse enumerator this way, and
+        // the pairs at the cut are the ones a comparison can get wrong. The
+        // distances take four values, so 1.0 and 3.0 sit on a tie and 2.5
+        // sits between two of them.
+        let quantized = |a: usize, b: usize| 1.0 + ((a * 7 + b) % 4) as f64;
+        for (label, threshold) in [
+            ("threshold at the smallest edge", 1.0),
+            ("threshold at a tie", 3.0),
+            ("threshold between edge values", 2.5),
+        ] {
+            let mut cut = Vec::new();
+            for a in 0..7 {
+                for b in 0..a {
+                    let d = quantized(b, a);
+                    if d <= threshold {
+                        cut.push((a, b, d));
+                    }
+                }
+            }
+            out.push((label, graph(7, &cut)));
+        }
+
+        // Disconnected: two triangles and an isolated vertex.
+        out.push((
+            "disconnected",
+            graph(
+                7,
+                &[
+                    (0, 1, 1.0),
+                    (0, 2, 1.0),
+                    (1, 2, 1.0),
+                    (3, 4, 2.0),
+                    (3, 5, 2.0),
+                    (4, 5, 2.0),
+                ],
+            ),
+        ));
+
+        // Complete: the sparse enumerator must reproduce the whole dense
+        // sequence.
+        let mut complete = Vec::new();
+        for a in 0..7 {
+            for b in 0..a {
+                complete.push((a, b, 1.0 + ((a * 5 + b) % 4) as f64));
+            }
+        }
+        out.push(("dense as sparse", graph(7, &complete)));
+
+        // The small ends of the contract: one point, two points, and an
+        // edge that touches both ends of the vertex range.
+        out.push(("one point", graph(1, &[])));
+        out.push(("two points", graph(2, &[(0, 1, 1.0)])));
+        out.push(("edge across the range", graph(5, &[(0, 4, 1.0)])));
+
+        out
+    }
+
+    // A random sparse graph and the dense matrix with +inf at every absent
+    // pair. The dense default enumerates the same cofacets and gives the
+    // missing ones an infinite diameter that the sparse side omits.
     fn random_graph(rng: &mut Rng, n: usize) -> (SparseDistanceMatrix, DistanceMatrix) {
-        // Duplicates and a zero make sure the diameter fold is exercised.
+        // Duplicates and a zero so the diameter fold is exercised.
         let palette = [0.0, 1.0, 1.0, 2.0, 2.0, 3.0];
         let mut triplets = Vec::new();
         let mut condensed = Vec::new();
@@ -484,9 +1590,30 @@ mod tests {
         )
     }
 
-    // The sparse override must yield exactly what the dense default yields
-    // once its infinite-diameter (absent-neighbor) cofacets are dropped: the
-    // same indices, k, diameters, and descending order.
+    // A random graph with the density and distance palette the caller asks
+    // for. `present` is the chance in a thousand that a pair is an edge.
+    fn random_graph_shaped(
+        rng: &mut Rng,
+        n: usize,
+        present: usize,
+        palette: &[f64],
+    ) -> SparseDistanceMatrix {
+        let mut triplets = Vec::new();
+        for i in 1..n {
+            for j in 0..i {
+                if rng.below(1000) < present {
+                    triplets.push((i, j, palette[rng.below(palette.len())]));
+                }
+            }
+        }
+        SparseDistanceMatrix::from_triplets(n, &triplets).unwrap()
+    }
+
+    // The sparse override must yield what the dense default yields once
+    // infinite-diameter cofacets are dropped: the same indices, k,
+    // diameters, and descending order. The frozen reference stands between
+    // the two, so the shipped enumerator is compared against the body it
+    // replaced as well as against the dense one.
     #[test]
     fn sparse_cofacets_match_dense_default() {
         let mut rng = Rng::new(0xc0fa_ce75_0000_0001);
@@ -526,14 +1653,8 @@ mod tests {
                 diameter,
                 index: rank(&bt, &verts),
             };
-            for upper_only in [false, true] {
-                let got = cofacets(&sparse, &bt, simplex, &verts, dim, upper_only);
-                let expected: Vec<_> = cofacets(&dense, &bt, simplex, &verts, dim, upper_only)
-                    .into_iter()
-                    .filter(|&(_, _, diam)| diam.is_finite())
-                    .collect();
-                assert_eq!(got, expected, "verts {verts:?}, upper_only {upper_only}");
-            }
+            check_bits("random", &sparse, &dense, &bt, simplex, &verts, dim);
+            check_bounded("random", &sparse, &dense, &bt, simplex, &verts, dim);
             trials += 1;
         }
         assert!(
@@ -543,8 +1664,8 @@ mod tests {
     }
 
     // Degenerate intersections stay in lockstep with the dense default: an
-    // empty pivot neighbor list (isolated vertex), an empty intersection with
-    // both endpoints non-empty, and an ordinary non-empty case.
+    // empty pivot neighbor list (isolated vertex), an empty intersection
+    // with both endpoints non-empty, and an ordinary non-empty case.
     #[test]
     fn sparse_cofacets_empty_intersections() {
         // Triangle {0,1,2}, a disjoint edge 3-4, and an isolated vertex 5.
@@ -573,14 +1694,339 @@ mod tests {
                 diameter: d01,
                 index: rank(&bt, &verts),
             };
-            for upper_only in [false, true] {
-                let got = cofacets(&sparse, &bt, simplex, &verts, 1, upper_only);
-                let expected: Vec<_> = cofacets(&dense, &bt, simplex, &verts, 1, upper_only)
-                    .into_iter()
-                    .filter(|&(_, _, d)| d.is_finite())
-                    .collect();
-                assert_eq!(got, expected, "verts {verts:?}, upper_only {upper_only}");
+            check_bits("degenerate", &sparse, &dense, &bt, simplex, &verts, 1);
+        }
+    }
+
+    #[test]
+    fn adversarial_graphs_match_the_reference() {
+        for (label, sparse) in adversarial_fixtures() {
+            check_graph(label, &sparse, 3.min(sparse.len().saturating_sub(1)));
+        }
+    }
+
+    // Shapes the fixed graphs do not reach: complete, thin, all-equal, and
+    // duplicate points. Every simplex of every draw is checked.
+    #[test]
+    fn random_shapes_match_the_reference() {
+        let mut rng = Rng::new(0x5ea5_0f17_0000_0003);
+        let shapes: [(&str, usize, &[f64]); 4] = [
+            ("complete", 1000, &[1.0, 2.0, 3.0]),
+            ("thin", 120, &[1.0, 2.0]),
+            ("all equal", 700, &[2.0]),
+            ("duplicate points", 700, &[0.0, 0.0, 1.0]),
+        ];
+        for (label, present, palette) in shapes {
+            for _ in 0..12 {
+                let n = 5 + rng.below(4);
+                let sparse = random_graph_shaped(&mut rng, n, present, palette);
+                check_graph(label, &sparse, 3.min(n - 1));
             }
+        }
+    }
+
+    // A simplex wider than the inline cursor array must enumerate from the
+    // heap and stay bit-exact. Nothing narrower may allocate.
+    #[test]
+    fn wide_simplices_spill_to_the_heap() {
+        let n = 20;
+        let mut triplets = Vec::new();
+        for a in 0..n {
+            for b in 0..a {
+                triplets.push((a, b, 1.0 + ((a * 3 + b) % 5) as f64));
+            }
+        }
+        let sparse = graph(n, &triplets);
+        let dense = densify(&sparse);
+        let bt = BinomialTable::new(n, INLINE_VERTS + 4).unwrap();
+        // Widths on both sides of the inline bound, including the first
+        // width that spills.
+        for width in [
+            INLINE_VERTS - 1,
+            INLINE_VERTS,
+            INLINE_VERTS + 1,
+            INLINE_VERTS + 2,
+        ] {
+            let verts: Vec<usize> = (0..width).collect();
+            let dim = width - 1;
+            let mut diameter = 0.0f64;
+            for a in 0..width {
+                for b in 0..a {
+                    diameter = diameter.max(dense.get(verts[a], verts[b]));
+                }
+            }
+            let simplex = Simplex {
+                diameter,
+                index: rank(&bt, &verts),
+            };
+            check_bits("wide", &sparse, &dense, &bt, simplex, &verts, dim);
+            check_bounded("wide", &sparse, &dense, &bt, simplex, &verts, dim);
+            check_breaks("wide", &sparse, &bt, simplex, &verts, dim, None);
+
+            counters::reset();
+            let got = cofacets(&sparse, &bt, simplex, &verts, dim, false);
+            let spills = counters::read().spills;
+            assert!(!got.is_empty(), "width {width}: nothing to enumerate");
+            if width > INLINE_VERTS {
+                assert_eq!(spills, 1, "width {width}: the cursors must spill once");
+            } else {
+                assert_eq!(spills, 0, "width {width}: the cursors must not allocate");
+            }
+        }
+    }
+
+    struct Counting<'a> {
+        inner: &'a DistanceMatrix,
+        reads: std::cell::Cell<usize>,
+    }
+
+    impl Distances for Counting<'_> {
+        fn len(&self) -> usize {
+            self.inner.len()
+        }
+        fn get(&self, i: usize, j: usize) -> f64 {
+            self.reads.set(self.reads.get() + 1);
+            self.inner.get(i, j)
+        }
+        fn default_threshold(&self) -> f64 {
+            self.inner.enclosing_radius()
+        }
+        fn for_each_edge(&self, f: impl FnMut(usize, usize, f64)) {
+            Distances::for_each_edge(self.inner, f)
+        }
+    }
+
+    // The edge {0,1} of this four-point matrix has cofacets 3 then 2.
+    // Vertex 3 is far from vertex 0, so it costs one read and no callback.
+    // Vertex 2 is near both, so it costs two reads and reaches the
+    // callback. The unbounded walk reads all four distances and reports
+    // both cofacets.
+    #[test]
+    fn the_bounded_fold_stops_at_the_first_distance_above_the_bound() {
+        // Condensed order: (1,0), (2,0), (2,1), (3,0), (3,1), (3,2).
+        let dense = DistanceMatrix::from_condensed(vec![1.0, 1.0, 1.0, 5.0, 1.0, 1.0]).unwrap();
+        let counting = Counting {
+            inner: &dense,
+            reads: std::cell::Cell::new(0),
+        };
+        let bt = BinomialTable::new(4, 3).unwrap();
+        let verts = [0usize, 1usize];
+        let simplex = Simplex {
+            diameter: 1.0,
+            index: rank(&bt, &verts),
+        };
+
+        let full = cofacets(&counting, &bt, simplex, &verts, 1, false);
+        assert_eq!(counting.reads.replace(0), 4, "reads of the unbounded walk");
+        assert_eq!(full.len(), 2, "cofacets of the unbounded walk");
+
+        let got = bounded_cofacets(&counting, &bt, simplex, &verts, 1, false, simplex.diameter);
+        assert_eq!(counting.reads.replace(0), 3, "reads of the bounded walk");
+        let expected: Vec<Bits> = full
+            .into_iter()
+            .filter(|&(_, _, diameter)| f64::from_bits(diameter) <= simplex.diameter)
+            .collect();
+        assert_eq!(got, expected, "cofacets of the bounded walk");
+    }
+
+    // Under `upper_only` the merge stops at the first candidate that is not
+    // above every simplex vertex. The fixture puts two qualifying candidates
+    // above the edge {2, 3} and two failing ones below it, so a walk that
+    // read past the boundary would confirm 1 and 0 against the second list
+    // and count more entries.
+    #[test]
+    fn the_upper_only_merge_stops_at_the_top_simplex_vertex() {
+        let far = 5.0;
+        let near = 1.0;
+        let mut triplets = vec![(2usize, 3usize, near)];
+        for v in [0usize, 1] {
+            triplets.push((2, v, far));
+            triplets.push((3, v, far));
+        }
+        for v in [4usize, 5] {
+            triplets.push((2, v, near));
+            triplets.push((3, v, near));
+        }
+        let sparse = SparseDistanceMatrix::from_triplets(6, &triplets).unwrap();
+        let bt = BinomialTable::new(6, 3).unwrap();
+        let verts = [2usize, 3usize];
+        let simplex = Simplex {
+            diameter: near,
+            index: rank(&bt, &verts),
+        };
+
+        counters::reset();
+        let got = bounded_cofacets(&sparse, &bt, simplex, &verts, 1, true, simplex.diameter);
+        let events = counters::read();
+        assert_eq!(got.len(), 2, "cofacets above the edge");
+        // The two entries of vertex 2's list above the edge, and one entry of
+        // vertex 3's list per confirmed candidate. Nothing below the edge is
+        // read at all.
+        assert_eq!(events.candidates, 4, "neighbor list entries read");
+    }
+
+    #[test]
+    fn a_vacuous_bound_drops_nothing() {
+        let mut rng = Rng::new(0x51ed_2701);
+        let (sparse, _) = random_graph(&mut rng, 7);
+        let bt = BinomialTable::new(7, 3).unwrap();
+        let (u, v) = sparse
+            .edges()
+            .map(|(u, v, _)| (u, v))
+            .find(|&(u, v)| u > 0 && v < 6)
+            .expect("the fixture needs an edge with room on both sides");
+        let verts = [u, v];
+        let simplex = Simplex {
+            diameter: sparse.get(u, v),
+            index: rank(&bt, &verts),
+        };
+        for upper_only in [false, true] {
+            counters::reset();
+            let plain = cofacets(&sparse, &bt, simplex, &verts, 1, upper_only);
+            let unbounded = counters::read().candidates;
+            for bound in [sparse.max_distance(), f64::MAX, f64::INFINITY] {
+                counters::reset();
+                let got = bounded_cofacets(&sparse, &bt, simplex, &verts, 1, upper_only, bound);
+                let events = counters::read();
+                assert_eq!(got, plain, "bits at the vacuous bound {bound}");
+                assert_eq!(events.vacuous, 1, "raised bounds at {bound}");
+                assert_eq!(
+                    events.candidates, unbounded,
+                    "entries read at the vacuous bound {bound}"
+                );
+            }
+            // A bound under the largest stored distance keeps the test in
+            // the merge.
+            counters::reset();
+            bounded_cofacets(
+                &sparse,
+                &bt,
+                simplex,
+                &verts,
+                1,
+                upper_only,
+                previous_positive_float(sparse.max_distance()),
+            );
+            assert_eq!(
+                counters::read().vacuous,
+                0,
+                "a bound that a distance reaches"
+            );
+        }
+    }
+
+    // The engine passes the simplex diameter as the bound. A simplex of
+    // identical points has diameter zero. Both zeros are legal there, and
+    // neither drops a cofacet at distance zero.
+    #[test]
+    fn a_zero_bound_keeps_the_cofacets_at_zero() {
+        let triplets: Vec<(usize, usize, f64)> = (1..5)
+            .flat_map(|i| (0..i).map(move |j| (i, j, 0.0)))
+            .collect();
+        let sparse = SparseDistanceMatrix::from_triplets(5, &triplets).unwrap();
+        let dense = densify(&sparse);
+        let bt = BinomialTable::new(5, 3).unwrap();
+        let verts = [1usize, 2usize];
+        let simplex = Simplex {
+            diameter: 0.0,
+            index: rank(&bt, &verts),
+        };
+        for upper_only in [false, true] {
+            let expected = cofacets(&dense, &bt, simplex, &verts, 1, upper_only);
+            for bound in [0.0f64, -0.0f64] {
+                let got = bounded_cofacets(&dense, &bt, simplex, &verts, 1, upper_only, bound);
+                assert_eq!(got, expected, "dense at bound {bound}");
+                let got = bounded_cofacets(&sparse, &bt, simplex, &verts, 1, upper_only, bound);
+                assert_eq!(got, expected, "sparse at bound {bound}");
+            }
+        }
+    }
+
+    // The dense source overrides the walk; `Counting` does not, so it runs
+    // the default body on the same distances. The two must agree in bits and
+    // in order, bounded and unbounded alike.
+    #[test]
+    fn the_dense_walk_matches_the_default_fold() {
+        let mut rng = Rng::new(0x9e37_79b9);
+        for n in [3usize, 5, 7] {
+            for round in 0..4 {
+                let (_, dense) = random_graph(&mut rng, n);
+                let max_dim = if round % 2 == 0 { 1 } else { 2 };
+                let bt = BinomialTable::new(n, max_dim + 2).unwrap();
+                let plain = Counting {
+                    inner: &dense,
+                    reads: std::cell::Cell::new(0),
+                };
+                for (simplex, verts, dim) in simplices(&dense, &bt, max_dim) {
+                    for upper_only in [false, true] {
+                        let expected = cofacets(&plain, &bt, simplex, &verts, dim, upper_only);
+                        for square in [false, true] {
+                            let form = if square {
+                                dense.to_square()
+                            } else {
+                                dense.clone()
+                            };
+                            let got = cofacets(&form, &bt, simplex, &verts, dim, upper_only);
+                            assert_eq!(
+                                got, expected,
+                                "n {n}, verts {verts:?}, upper {upper_only}, square {square}"
+                            );
+                            for bound in bounds(simplex, &expected) {
+                                let want = bounded_cofacets(
+                                    &plain, &bt, simplex, &verts, dim, upper_only, bound,
+                                );
+                                let got = bounded_cofacets(
+                                    &form, &bt, simplex, &verts, dim, upper_only, bound,
+                                );
+                                assert_eq!(
+                                    got, want,
+                                    "n {n}, verts {verts:?}, upper {upper_only},                                      bound {bound}, square {square}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Both storage forms answer every query with the same bits.
+    #[test]
+    fn the_two_storage_forms_agree() {
+        let mut rng = Rng::new(0x2f19_a7c3);
+        let (_, condensed) = random_graph(&mut rng, 9);
+        let square = condensed.to_square();
+        assert!(
+            !condensed.is_square(),
+            "every constructor builds the compact form"
+        );
+        assert!(square.is_square());
+        for i in 0..condensed.len() {
+            for j in 0..condensed.len() {
+                assert_eq!(
+                    square.get(i, j).to_bits(),
+                    condensed.get(i, j).to_bits(),
+                    "get({i}, {j})"
+                );
+            }
+        }
+        assert_eq!(
+            square.enclosing_radius().to_bits(),
+            condensed.enclosing_radius().to_bits(),
+            "enclosing radius"
+        );
+        for threshold in [0.0, 1.0, 2.0, f64::INFINITY] {
+            assert_eq!(
+                square.count_edges_at(threshold),
+                condensed.count_edges_at(threshold),
+                "edges at {threshold}"
+            );
+            let a = square.to_sparse_at(threshold).unwrap();
+            let b = condensed.to_sparse_at(threshold).unwrap();
+            let edges = |m: &SparseDistanceMatrix| -> Vec<(usize, usize, u64)> {
+                m.edges().map(|(u, v, d)| (u, v, d.to_bits())).collect()
+            };
+            assert_eq!(edges(&a), edges(&b), "graph at {threshold}");
         }
     }
 

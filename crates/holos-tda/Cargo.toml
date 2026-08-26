@@ -1,6 +1,6 @@
 [package]
 name = "holos-tda"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Vietoris-Rips persistent homology with an implicit ripser-class engine"
@@ -21,6 +21,7 @@ include = [
 
 [dependencies]
 rustc-hash = "2"
+fast-float2 = "0.2"
 clap = { version = "4", features = ["derive", "string"] }
 rayon = "1"
 dashmap = "6"

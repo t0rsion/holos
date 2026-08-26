@@ -1,5 +1,5 @@
-//! Python bindings for holos-tda. The Python-facing API lives in
-//! `python/holos_tda/__init__.py`. This module stays a thin shim.
+//! Python bindings for holos-tda. The Python API is in
+//! `python/holos_tda/__init__.py`. This module is a thin shim.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -28,7 +28,7 @@ fn to_err(e: holos_tda::Error) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
 
-/// Essential bars keep death = f64::INFINITY. pyo3 converts it to math.inf.
+/// Essential bars have death = f64::INFINITY. pyo3 converts that to math.inf.
 fn to_bars(mut diagram: holos_tda::Diagram) -> Bars {
     diagram.canonicalize();
     diagram
@@ -60,11 +60,12 @@ fn rips_points(
     })
 }
 
-/// Reorder a `pdist` layout into the layout the core constructor wants.
+/// Reorder a `pdist` layout into the lower-triangle layout
+/// `DistanceMatrix::from_condensed` takes.
 ///
 /// SciPy's `pdist` emits the upper triangle row by row (d01, d02, ..., d12,
-/// ...). The core constructor wants the lower triangle (d10, d20, d21, ...).
-/// The Python contract is the pdist one.
+/// ...). The constructor takes the lower triangle (d10, d20, d21, ...).
+/// The Python API takes the pdist layout.
 fn pdist_to_lower(data: Vec<f64>) -> Result<Vec<f64>, holos_tda::Error> {
     let m = data.len();
     let n = ((1.0 + 8.0 * m as f64).sqrt() as usize).div_ceil(2);

@@ -1,0 +1,1101 @@
+# Engineering corpus for the serial reduction. NOT a registered study.
+#
+# This file is a tuning and landing instrument, not a preregistration. It
+# carries no decision rule, no grade, and no protocol that a result could
+# unlock. Nothing here may be cited as evidence for a public performance
+# claim; the registered studies do that, against their own frozen corpora.
+#
+# PLAN.md section 17 requires the work this corpus serves: "Tune on
+# disclosed engineering data and decide landing on a disjoint untouched
+# engineering set before the registered corpus freezes." The two sets below
+# are that pair. PLAN.md section 19 requires the strata: the corpus covers
+# the input regimes the engine has to meet, and every result is reported by
+# stratum, never by an overall median alone.
+
+[meta]
+version = 2
+date = "2026-08-18"
+study = "engineering, not registered"
+runner = "benchmarks/engine_bench.sh"
+driver = "crates/engine-bench"
+plan = "PLAN.md sections 17 and 19, the streaming, routing, and strata MUSTs"
+sets = """
+tuning   Disclosed. Look at it as often as you like, rerun it after every
+         change, and choose constants from it. Its numbers are development
+         data and support no claim.
+landing  Disjoint from the tuning set in seed and in size. It runs once,
+         after the tuning is finished and the constants are frozen, to
+         decide whether the change lands. The runner refuses to overwrite
+         an existing landing record unless ALLOW_RERUN=1, which the record
+         then discloses.
+"""
+strata = """
+Every entry names a stratum, and the summary reports a median per stratum
+before any overall median. A stratum is an input regime the engine has to
+meet, not a size class.
+
+baseline    Uniform, spherical, toroidal, and clustered clouds at several
+            thresholds. The set the corpus started from.
+knn         k nearest neighbour graphs, k = 8, 15, and 30, as native sparse
+            input. Degrees are near-uniform and the graph is connected.
+lowthresh   Large vertex counts with a threshold far below the enclosing
+            radius: isolated vertices, trees, and many components.
+quantized   Inputs whose distances repeat exactly: a regular lattice,
+            duplicated points, and identical points. tau = 1.0 puts the
+            threshold exactly on a realised distance, so the boundary
+            carries ties.
+skewed      Degree-skewed and clustered graphs: preferential attachment for
+            a heavy degree tail, planted blocks for community structure.
+nearclique  Clustered and spherical clouds at tau = 1.0, where almost every
+            pair is an edge.
+embedding   Euclidean clouds in 8, 32, and 128 dimensions, where distances
+            concentrate and the threshold has to sit near the enclosing
+            radius to keep any edge at all.
+nonmetric   Weighted dissimilarities that satisfy no triangle inequality,
+            with absent edges at +inf and disconnected inputs.
+deepdim     Homology in dimensions 2, 3, and 4 on small inputs.
+oddprime    Coefficients in Z/3 and Z/5.
+collapsed   Real collapsed graphs: an ordinary input, reduced by the
+            certified edge collapse, then read back as native sparse input.
+memory      A sparse graph whose widening to a full matrix is quick and
+            whose full matrix is not small. It measures routing regret in
+            peak RSS, not in time.
+"""
+threshold_rule = """
+Cloud entries: T = tau * R, where R is the enclosing radius of the cloud,
+the minimum over i of the maximum over j of d(i, j). tau = 1.0 reproduces
+the dense default threshold exactly. benchmarks/densify_to_sparse.py
+computes R and T from the cloud and writes the lower-distance file and the
+triplet file from the same distances, so holos and ripser read one file and
+one threshold.
+
+Graph entries: T = tau * (the largest weight the generator drew).
+benchmarks/gen_graph.py drops the edges above T, so the file holds the
+thresholded graph and the runner passes the same T to both tools.
+
+tau = 1.0 puts T exactly on a realised value in both rules, which is the
+threshold-boundary tie case.
+"""
+sampling_rule = """
+Cloud entries take one cloud from gen_cloud.py N COORD_DIM SEED FAMILY.
+Graph entries take one graph from gen_graph.py GENERATOR N SEED TAU PARAM
+OUT. Tuning seeds are 5501 to 5573 odd, landing seeds are 7701 to 7749 odd.
+The two sets share no seed and no point count, so a landing input can never
+be a tuning input at another threshold. The lattice and equal families
+ignore the seed; there the differing point count is what separates the
+sets.
+
+None of the seeds of the registered corpora appears here: not 42, 4201,
+5301, 777, 778, 9137, 9138, 9139, 6607, 8821, 8823, 8825, or 8827. An
+engineering run must not touch a registered cloud.
+"""
+entry_fields = """
+Every entry carries id, stratum, n, tau, max_dim, modulus, seed, headline,
+competitor, and input. The rest depend on input.
+
+input = "cloud"   family and coord_dim name the cloud. The runner writes
+                  both a lower-distance file and a triplet file from the
+                  same distances.
+input = "graph"   generator and param name the graph. The runner writes a
+                  triplet file only, because no dense file of the input
+                  exists to write.
+collapse = true   the runner collapses the entry's graph with the certified
+                  serial edge collapse and runs the reduced graph instead.
+                  The barcode is unchanged, and the input becomes sparse
+                  only.
+driver_modes      which configurations the in-process driver times. The
+                  default is "dense,sparse,auto" for an input with a dense
+                  file and "sparse" for a graph. The memory stratum
+                  overrides it to keep the dense arm on a graph input.
+competitor        "ripser" runs the external arm, "none" skips it. The
+                  reference ripser build reads no odd modulus, so the
+                  oddprime stratum has no external arm; its entries still
+                  compare the dense and sparse engines against each other
+                  inside the driver.
+"""
+configurations = """
+The primary total is a fresh process, timed with benchmarks/measure.py:
+holos and ripser both start, read the same file at the same threshold, and
+exit. Both get one warm-up run and the same number of timed repetitions.
+The in-process driver keeps running beside it and supplies the phase
+clocks, which are a diagnostic and not the headline.
+
+The runner takes a list of holos builds, so one run can time the working
+tree beside earlier commits. Each build times each configuration, and the
+tables carry one column per arm.
+
+auto          holos routes the input by the frozen density rule
+forced-dense  holos reduces the distance matrix as it stands
+forced-sparse holos converts to the thresholded graph first
+
+All three read one file, so the routing rule is the only difference among
+them, and ripser reads that file once. An arm built before
+`holos --engine auto|dense|sparse` existed has no routing to force, so its
+axis is the input file instead:
+
+dense    holos reads the lower-distance file; ripser reads the same file
+sparse   holos reads the triplet file with --format sparse; ripser reads
+         the same file with --format sparse
+
+The runner probes each arm's --help and picks the axis per arm.
+
+Every configuration of every build must agree with the reference diagram
+bar for bar, and holos must agree with ripser to the comparison tolerance.
+A mismatch voids the entry.
+"""
+measures = """
+per-arm total: the median fresh-process wall time of each arm, over the
+timed repetitions, and the same for ripser on the same file.
+ratio: holos over ripser, one per arm and configuration. Below 1.0 means
+holos is faster. An entry with competitor = "none" has no ratio.
+phase split: parse, distance, graph, and reduce medians from the driver,
+for the working-tree build only. The reduce phase is the engine alone.
+peak RSS: from the timed fresh-process runs, plus one extra
+single-repetition driver process per engine entry point. The memory
+stratum reads that pair.
+stratum summary: the median ratio inside each stratum, per arm, with the
+entry count. It is reported before any overall median, and an overall
+median never stands alone.
+"""
+cost_note = """
+The tuning set targets a runtime near an hour on four physical cores with
+one arm, so it can be rerun after every change. Every further arm costs
+about as much again. Most entries are small on purpose: the strata are for
+coverage, not for scale.
+
+The sparse engine on a near-complete graph is what sets the size of an
+entry. Its cost grows faster than n^4 there, so a cloud at tau = 1.0 stays
+at a few hundred points while a cloud at tau = 0.3 reaches n = 3000. The
+sizes here keep every configuration of every entry to a few seconds. Graph
+entries reach n = 40000, because a sparse graph with 40000 vertices still
+holds about 35000 edges.
+
+Cloud generation and thresholding are Python and cost O(n^2) per entry.
+Graph generation is O(n * param), except knn, which is O(n^2). None of it
+is timed, and on a small entry it can dominate the wall time.
+
+ONLY takes a comma-separated list of globs over entry ids, so one stratum
+can be rerun alone.
+"""
+headline_note = """
+headline = true marks an entry whose ratio enters the overall median the
+summary reports. Every entry enters its own stratum median, headline or
+not. A near-clique probe, an all-equal probe, and the memory entry carry
+headline = false: they test a code path rather than the geometry the engine
+meets in practice.
+"""
+
+[[tuning]]
+id = "t-cube-t10-n500"
+stratum = "baseline"
+input = "cloud"
+family = "cube"
+n = 500
+coord_dim = 3
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 5501
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-cube-t08-n620"
+stratum = "baseline"
+input = "cloud"
+family = "cube"
+n = 620
+coord_dim = 3
+max_dim = 1
+tau = 0.8
+modulus = 2
+seed = 5501
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-cube-t05-n1250"
+stratum = "baseline"
+input = "cloud"
+family = "cube"
+n = 1250
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 2
+seed = 5501
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-cube-t03-n3000"
+stratum = "baseline"
+input = "cloud"
+family = "cube"
+n = 3000
+coord_dim = 3
+max_dim = 1
+tau = 0.3
+modulus = 2
+seed = 5501
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-sphere-t03-n1500"
+stratum = "baseline"
+input = "cloud"
+family = "sphere"
+n = 1500
+coord_dim = 3
+max_dim = 1
+tau = 0.3
+modulus = 2
+seed = 5503
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-sphere-t05-n500"
+stratum = "baseline"
+input = "cloud"
+family = "sphere"
+n = 500
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 2
+seed = 5503
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-torus-t03-n2000"
+stratum = "baseline"
+input = "cloud"
+family = "torus"
+n = 2000
+coord_dim = 3
+max_dim = 1
+tau = 0.3
+modulus = 2
+seed = 5505
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-torus-t08-n630"
+stratum = "baseline"
+input = "cloud"
+family = "torus"
+n = 630
+coord_dim = 3
+max_dim = 1
+tau = 0.8
+modulus = 2
+seed = 5505
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-clusters-t05-n1150"
+stratum = "baseline"
+input = "cloud"
+family = "clusters"
+n = 1150
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 2
+seed = 5507
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-clusters-t10-n500"
+stratum = "nearclique"
+input = "cloud"
+family = "clusters"
+n = 500
+coord_dim = 3
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 5507
+headline = false
+competitor = "ripser"
+
+[[tuning]]
+id = "t-cube-d2-t03-n800"
+stratum = "baseline"
+input = "cloud"
+family = "cube"
+n = 800
+coord_dim = 3
+max_dim = 2
+tau = 0.3
+modulus = 2
+seed = 5501
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-sphere-d2-t03-n500"
+stratum = "baseline"
+input = "cloud"
+family = "sphere"
+n = 500
+coord_dim = 3
+max_dim = 2
+tau = 0.3
+modulus = 2
+seed = 5503
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-knn-k08-n4000"
+stratum = "knn"
+input = "graph"
+generator = "knn"
+n = 4000
+param = 8
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 5521
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-knn-k15-n4000"
+stratum = "knn"
+input = "graph"
+generator = "knn"
+n = 4000
+param = 15
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 5521
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-knn-k30-n4000"
+stratum = "knn"
+input = "graph"
+generator = "knn"
+n = 4000
+param = 30
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 5521
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-low-t005-n2400"
+stratum = "lowthresh"
+input = "cloud"
+family = "cube"
+n = 2400
+coord_dim = 3
+max_dim = 1
+tau = 0.05
+modulus = 2
+seed = 5533
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-low-forest-n40000"
+stratum = "lowthresh"
+input = "graph"
+generator = "forest"
+n = 40000
+param = 60
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 5535
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-quant-lattice-n640"
+stratum = "quantized"
+input = "cloud"
+family = "lattice"
+n = 640
+coord_dim = 3
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 5537
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-quant-dup-n700"
+stratum = "quantized"
+input = "cloud"
+family = "duplicate"
+n = 700
+coord_dim = 3
+max_dim = 1
+tau = 0.6
+modulus = 2
+seed = 5539
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-quant-equal-n150"
+stratum = "quantized"
+input = "cloud"
+family = "equal"
+n = 150
+coord_dim = 3
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 5541
+headline = false
+competitor = "ripser"
+
+[[tuning]]
+id = "t-skew-powerlaw-n20000"
+stratum = "skewed"
+input = "graph"
+generator = "powerlaw"
+n = 20000
+param = 3
+max_dim = 1
+tau = 0.8
+modulus = 2
+seed = 5543
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-skew-block-n20000"
+stratum = "skewed"
+input = "graph"
+generator = "block"
+n = 20000
+param = 12
+max_dim = 1
+tau = 0.9
+modulus = 2
+seed = 5545
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-clique-clusters-n650"
+stratum = "nearclique"
+input = "cloud"
+family = "clusters"
+n = 650
+coord_dim = 3
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 5547
+headline = false
+competitor = "ripser"
+
+[[tuning]]
+id = "t-clique-sphere-n550"
+stratum = "nearclique"
+input = "cloud"
+family = "sphere"
+n = 550
+coord_dim = 3
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 5549
+headline = false
+competitor = "ripser"
+
+[[tuning]]
+id = "t-emb-d8-n1100"
+stratum = "embedding"
+input = "cloud"
+family = "cube"
+n = 1100
+coord_dim = 8
+max_dim = 1
+tau = 0.8
+modulus = 2
+seed = 5551
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-emb-d32-n700"
+stratum = "embedding"
+input = "cloud"
+family = "cube"
+n = 700
+coord_dim = 32
+max_dim = 1
+tau = 0.95
+modulus = 2
+seed = 5553
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-emb-d128-n400"
+stratum = "embedding"
+input = "cloud"
+family = "cube"
+n = 400
+coord_dim = 128
+max_dim = 1
+tau = 0.95
+modulus = 2
+seed = 5555
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-nonmetric-t07-n1300"
+stratum = "nonmetric"
+input = "graph"
+generator = "nonmetric"
+n = 1300
+param = 5
+max_dim = 1
+tau = 0.7
+modulus = 2
+seed = 5557
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-nonmetric-t04-n1600"
+stratum = "nonmetric"
+input = "graph"
+generator = "nonmetric"
+n = 1600
+param = 8
+max_dim = 1
+tau = 0.4
+modulus = 2
+seed = 5557
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-dim2-sphere-n400"
+stratum = "deepdim"
+input = "cloud"
+family = "sphere"
+n = 400
+coord_dim = 3
+max_dim = 2
+tau = 0.5
+modulus = 2
+seed = 5559
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-dim3-cube-n250"
+stratum = "deepdim"
+input = "cloud"
+family = "cube"
+n = 250
+coord_dim = 3
+max_dim = 3
+tau = 0.6
+modulus = 2
+seed = 5561
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-dim4-cube-n150"
+stratum = "deepdim"
+input = "cloud"
+family = "cube"
+n = 150
+coord_dim = 3
+max_dim = 4
+tau = 0.5
+modulus = 2
+seed = 5563
+headline = true
+competitor = "ripser"
+
+[[tuning]]
+id = "t-prime3-cube-n1100"
+stratum = "oddprime"
+input = "cloud"
+family = "cube"
+n = 1100
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 3
+seed = 5565
+headline = true
+competitor = "none"
+
+[[tuning]]
+id = "t-prime5-torus-n1300"
+stratum = "oddprime"
+input = "cloud"
+family = "torus"
+n = 1300
+coord_dim = 3
+max_dim = 1
+tau = 0.4
+modulus = 5
+seed = 5567
+headline = true
+competitor = "none"
+
+[[tuning]]
+id = "t-collapse-cube-n1100"
+stratum = "collapsed"
+input = "cloud"
+family = "cube"
+n = 1100
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 2
+seed = 5569
+headline = true
+competitor = "ripser"
+collapse = true
+
+[[tuning]]
+id = "t-collapse-clusters-n1600"
+stratum = "collapsed"
+input = "cloud"
+family = "clusters"
+n = 1600
+coord_dim = 3
+max_dim = 1
+tau = 0.6
+modulus = 2
+seed = 5571
+headline = true
+competitor = "ripser"
+collapse = true
+
+[[tuning]]
+id = "t-memory-block-n2400"
+stratum = "memory"
+input = "graph"
+generator = "block"
+n = 2400
+param = 8
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 5573
+headline = false
+competitor = "ripser"
+driver_modes = "dense,sparse"
+
+[[landing]]
+id = "l-cube-t10-n450"
+stratum = "baseline"
+input = "cloud"
+family = "cube"
+n = 450
+coord_dim = 3
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 7701
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-cube-t08-n580"
+stratum = "baseline"
+input = "cloud"
+family = "cube"
+n = 580
+coord_dim = 3
+max_dim = 1
+tau = 0.8
+modulus = 2
+seed = 7701
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-cube-t03-n2500"
+stratum = "baseline"
+input = "cloud"
+family = "cube"
+n = 2500
+coord_dim = 3
+max_dim = 1
+tau = 0.3
+modulus = 2
+seed = 7701
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-sphere-t05-n600"
+stratum = "baseline"
+input = "cloud"
+family = "sphere"
+n = 600
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 2
+seed = 7703
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-torus-t03-n1800"
+stratum = "baseline"
+input = "cloud"
+family = "torus"
+n = 1800
+coord_dim = 3
+max_dim = 1
+tau = 0.3
+modulus = 2
+seed = 7705
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-torus-t05-n1200"
+stratum = "baseline"
+input = "cloud"
+family = "torus"
+n = 1200
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 2
+seed = 7705
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-clusters-t05-n1200"
+stratum = "baseline"
+input = "cloud"
+family = "clusters"
+n = 1200
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 2
+seed = 7707
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-cube-d2-t03-n600"
+stratum = "baseline"
+input = "cloud"
+family = "cube"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.3
+modulus = 2
+seed = 7701
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-knn-k08-n3400"
+stratum = "knn"
+input = "graph"
+generator = "knn"
+n = 3400
+param = 8
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 7721
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-knn-k30-n3400"
+stratum = "knn"
+input = "graph"
+generator = "knn"
+n = 3400
+param = 30
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 7721
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-low-t005-n2100"
+stratum = "lowthresh"
+input = "cloud"
+family = "cube"
+n = 2100
+coord_dim = 3
+max_dim = 1
+tau = 0.05
+modulus = 2
+seed = 7723
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-low-forest-n32000"
+stratum = "lowthresh"
+input = "graph"
+generator = "forest"
+n = 32000
+param = 50
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 7723
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-quant-lattice-n560"
+stratum = "quantized"
+input = "cloud"
+family = "lattice"
+n = 560
+coord_dim = 3
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 7725
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-quant-dup-n660"
+stratum = "quantized"
+input = "cloud"
+family = "duplicate"
+n = 660
+coord_dim = 3
+max_dim = 1
+tau = 0.6
+modulus = 2
+seed = 7727
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-quant-equal-n130"
+stratum = "quantized"
+input = "cloud"
+family = "equal"
+n = 130
+coord_dim = 3
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 7729
+headline = false
+competitor = "ripser"
+
+[[landing]]
+id = "l-skew-powerlaw-n16000"
+stratum = "skewed"
+input = "graph"
+generator = "powerlaw"
+n = 16000
+param = 3
+max_dim = 1
+tau = 0.8
+modulus = 2
+seed = 7731
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-skew-block-n16000"
+stratum = "skewed"
+input = "graph"
+generator = "block"
+n = 16000
+param = 12
+max_dim = 1
+tau = 0.9
+modulus = 2
+seed = 7733
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-clique-clusters-n600"
+stratum = "nearclique"
+input = "cloud"
+family = "clusters"
+n = 600
+coord_dim = 3
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 7735
+headline = false
+competitor = "ripser"
+
+[[landing]]
+id = "l-emb-d8-n980"
+stratum = "embedding"
+input = "cloud"
+family = "cube"
+n = 980
+coord_dim = 8
+max_dim = 1
+tau = 0.8
+modulus = 2
+seed = 7737
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-emb-d32-n660"
+stratum = "embedding"
+input = "cloud"
+family = "cube"
+n = 660
+coord_dim = 32
+max_dim = 1
+tau = 0.95
+modulus = 2
+seed = 7739
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-emb-d128-n360"
+stratum = "embedding"
+input = "cloud"
+family = "cube"
+n = 360
+coord_dim = 128
+max_dim = 1
+tau = 0.95
+modulus = 2
+seed = 7741
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-nonmetric-t07-n1050"
+stratum = "nonmetric"
+input = "graph"
+generator = "nonmetric"
+n = 1050
+param = 5
+max_dim = 1
+tau = 0.7
+modulus = 2
+seed = 7743
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-dim3-cube-n220"
+stratum = "deepdim"
+input = "cloud"
+family = "cube"
+n = 220
+coord_dim = 3
+max_dim = 3
+tau = 0.6
+modulus = 2
+seed = 7745
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-dim4-cube-n130"
+stratum = "deepdim"
+input = "cloud"
+family = "cube"
+n = 130
+coord_dim = 3
+max_dim = 4
+tau = 0.5
+modulus = 2
+seed = 7745
+headline = true
+competitor = "ripser"
+
+[[landing]]
+id = "l-prime3-cube-n980"
+stratum = "oddprime"
+input = "cloud"
+family = "cube"
+n = 980
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 3
+seed = 7747
+headline = true
+competitor = "none"
+
+[[landing]]
+id = "l-prime5-torus-n1050"
+stratum = "oddprime"
+input = "cloud"
+family = "torus"
+n = 1050
+coord_dim = 3
+max_dim = 1
+tau = 0.4
+modulus = 5
+seed = 7747
+headline = true
+competitor = "none"
+
+[[landing]]
+id = "l-collapse-cube-n980"
+stratum = "collapsed"
+input = "cloud"
+family = "cube"
+n = 980
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 2
+seed = 7749
+headline = true
+competitor = "ripser"
+collapse = true
+
+[[landing]]
+id = "l-memory-block-n2100"
+stratum = "memory"
+input = "graph"
+generator = "block"
+n = 2100
+param = 8
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 7749
+headline = false
+competitor = "ripser"
+driver_modes = "dense,sparse"

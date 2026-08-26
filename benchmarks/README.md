@@ -2,8 +2,9 @@
 
 `run.sh` measures holos against [ripser](https://github.com/Ripser/ripser).
 It writes every measurement to `results.txt` (the full log) and `results.md`
-(a provenance header and a markdown table). Both files are gitignored. The
-table in the top-level README is pasted verbatim from `results.md`. A rerun of
+(a provenance header and a markdown table). Both files are gitignored. It is
+an engineering instrument: the registered north-star study below carries the
+public engine numbers, and no public claim may cite `results.md`. A rerun of
 this script must reproduce every number quoted anywhere.
 
 If the diagrams of any run disagree, the script exits nonzero. A timing whose
@@ -25,8 +26,8 @@ RIPSER_BIN=/path/to/ripser ./run.sh
   distances from coordinates.
 - Fair threshold pairing. The "default" run passes no threshold to either
   tool. holos and ripser then both fall back to the enclosing radius, so the
-  run compares full persistence on equal terms. The "fixed" runs pass the same
-  explicit `--threshold` to both tools. One maxdim-2 case (N=500, threshold
+  run compares full persistence. The "fixed" runs pass the same explicit
+  `--threshold` to both tools. One maxdim-2 case (N=500, threshold
   0.4) exercises the dimension-generic path.
 - Single-threaded. Both binaries are serial. The results record the thread
   count (1).
@@ -155,9 +156,9 @@ Every entry is reduced three ways from one distance computation:
    through `--format sparse` without collapse;
 3. the same triplets with `--collapse-edges`.
 
-Mode 2 sits between the other two on purpose. Mode 3 against mode 1 mixes two
-effects, the sparse enumerator and the collapse; mode 3 against mode 2
-isolates the collapse alone. A claim about collapse rests on both numbers.
+Mode 2 sits between the other two. Mode 3 against mode 1 mixes two effects,
+the sparse enumerator and the collapse; mode 3 against mode 2 isolates the
+collapse alone. A claim about collapse rests on both numbers.
 
 `densify_to_sparse.py` does the conversion. It writes the dense and the sparse
 input from one set of `math.dist` results, so the two carry bit-identical
@@ -252,7 +253,7 @@ thresholded graph built from the same cloud:
 - arm b, both reducers on one externally collapsed graph, collapse off on both
   sides. GUDHI collapses the graph once, so the arm times the two reducers and
   nothing else. This is the equal-core comparison. Neither product can emit a
-  collapsed graph, so an external collapser is the only honest way to feed both
+  collapsed graph, so an external collapser is the only way to feed both
   the same reduced input;
 - arm c, end to end, each product running its own collapse.
 
@@ -315,3 +316,317 @@ CARGO="cargo +1.92" taskset -c 0-7 ./collapse_scaling_ordered.sh --confirm
 The tables that these runners write are the records behind the performance
 statements in the changelog. `crates/collapse-bench --help` documents every
 field the runners parse.
+
+## Registered north-star study
+
+`north_star.sh` measures the shipped engine against ripser and giotto-ph on a
+held-out corpus. It is the study behind the public performance statements of
+this release. Nothing else may be cited for them. The engineering benchmark
+below tunes the engine; its numbers decide landing.
+
+| study | corpus | runner | records |
+|---|---|---|---|
+| north-star engine study, run 1 (revealed) | `north_star_corpus.toml` | `north_star.sh` | `results_north_star.*`, `results_north_star_manifest.txt` |
+| north-star engine study, confirmation | `north_star_confirm_corpus.toml` | `CORPUS=north_star_confirm_corpus.toml ./north_star.sh` | the same names; the record header names the corpus |
+
+Run 1 ran on `north_star_corpus.toml` at the first freeze and revealed that
+corpus (its amendment 3 says how). The public claims of 0.6.0 read the
+confirmation corpus, which repeats every entry with a new seed and the same
+rules; run 1's records are archived beside the release as the revealed run.
+
+The corpus carries the decision rule, the noise rule, the pinning rule, the
+validity rule, the arms, the competitors, the timing protocol, and the sampling
+rule, so a result cannot pick its criterion afterwards. It is frozen: the
+entries, sizes, seeds, thresholds, thread counts, and rules do not change in
+response to a result, and every later change adds a numbered amendment.
+
+Amendment 1, dated 2026-08-18, came before any registered timing. It puts a
+floor under every graded ratio, moves the measurement controller off the timed
+cores, says what a complete study is, and requires the routing constants of the
+grading strata to be audited against H3 at the freeze. `[meta.amendments]` of
+the corpus carries its text and the list of what it changed.
+
+### Protocol
+
+One frozen pass, in three parts. There is no screen and no confirmation set:
+the corpus is held out as a whole, and it runs once.
+
+- serial. Every holos arm, the A/A control, and one ripser build, each a fresh
+  process on one physical core. The serial grade reads it.
+- multicore. H3 and giotto-ph 0.2.4, both at four physical cores, on the
+  entries the corpus marks `multicore = true`. The multicore grade reads it.
+- CPU scaling. The `[[scaling]]` entries at 1, 2, and 4 physical cores, with H2
+  at four cores as the attribution diagnostic. It is descriptive and carries no
+  grade.
+
+Four holos arms are frozen: H0 is public 0.5.0, H1 adds sparse cofacet
+streaming, H2 adds dense low-threshold routing on H1, and H3 is the release.
+`HOLOS_ARMS` defaults to the commits in the corpus. No arm is forced to an
+engine or a storage form; each build runs the path it ships, and the tables
+carry one column per arm.
+
+The competitors are the stock f32 ripser build, the same source built with
+`-D USE_COEFFICIENTS` for the odd-prime entries, the audited matched-precision
+double build, and giotto-ph 0.2.4. The double build is a diagnostic: it gets a
+table of its own, it is never pooled with the stock arm, and no grade reads it.
+Ripser++ is not an arm.
+
+### Timing
+
+holos and ripser are fresh processes, timed by `measure.py`, which pins the
+child to the run's CPU list through `MEASURE_AFFINITY`. Pinning the child
+instead of running it under `taskset` keeps `argv[0]` the target binary, which
+is what the peak RSS sampler matches on. giotto-ph has no command-line tool, so
+it is timed in process the way `giotto_compare.sh` times it: one monotonic
+clock around the `ripser_parallel` call alone. That clock excludes process
+start and input parse, which holos pays inside its own number, so the
+comparison favors giotto-ph. The record says so.
+
+Each command gets one warm-up run, which is also its agreement run, and then
+the timed repetitions. One repetition runs every command of the entry once, and
+each repetition starts the cycle one place further on. The repetition count is
+the smallest multiple of the command count at or above `REPS` (default 5), so
+every command takes every position equally often.
+
+Every arm and every competitor is compared against the H3 diagram as interval
+multisets within `TOLERANCE`. A mismatch voids the entry.
+
+### The A/A control and the noise band
+
+A second copy of the H3 binary, checked to hash the same, runs as its own arm
+on every entry of every pass. Its per-entry ratio against H3 is what the
+harness reports for two identical binaries. The band of a pass is the 95th
+percentile of the absolute distance from 1.0 of those ratios, and a per-entry
+ratio inside the band is a tie. The per-entry limit is therefore the wider of
+5% and the band.
+
+Amendment 1 puts a floor under every graded ratio. A ratio whose denominator
+median is under 20 ms is descriptive: the tables report it, and it enters no
+pass or fail median, no per-entry clause, no regression aggregate, and no band.
+The denominator is the competitor median for a serial or multicore ratio, the
+fastest earlier arm for a regression ratio, and the H3 median for an A/A ratio.
+Every median covers the graded entries alone, and the tables mark each
+descriptive entry and name the count behind each median.
+
+### Grading strata
+
+The decision rule grades four strata. They are derived, not declared:
+`dense-selected` and `sparse-selected` from the engine the frozen routing rule
+of H3 selects for the entry, `maxdim-1` and `maxdim-2` from the entry's
+dimension. The runner computes the routing decision from the point count and
+the edge count at the threshold, records both tests behind it, and never reads
+a timing to classify an entry. It also prints the routing constants it used on
+the `routing_rule` line of the manifest; Amendment 2 audits that line against
+the routing rule in `crates/holos-tda/src/lib.rs` at H3, which is when H3 is a
+named commit. Every entry also names one of the twelve input strata of the
+engineering corpus, and the tables report the input strata first.
+
+### Pinning
+
+The pinning rule names physical cores, so four cores means four cores without
+SMT: one logical CPU per core. The corpus holds the lists for the study
+machine, `0`, `0,2`, and `0,2,12,14`. The runner refuses to start when the
+topology is unknown, when a listed CPU is outside the allowed set, or when a
+list does not hold the physical cores it claims. It checks the one logical CPU
+per core assumption against the kernel's own sibling lists,
+`/sys/devices/system/cpu/cpu*/topology/thread_siblings_list`, and records the
+check in the manifest. `ALLOW_ANY_TOPOLOGY=1` overrides the refusal and marks
+the run void.
+
+Amendment 1 moves the measurement controller off the timed cores. The runner
+re-execs itself under `taskset` on one logical CPU outside every timed physical
+core, so its own process, `measure.py`, and the peak RSS sampler inside it
+never share a core with a run they time. The CPU is
+`[meta.pinning].controller_cpu`, logical CPU 8 on the study machine, and
+`NS_CONTROLLER_CPU` overrides it. A controller CPU that is a timed CPU or the
+SMT sibling of one is refused, and there is no override for that. Timed
+children set their own affinity, through `MEASURE_AFFINITY` for holos and
+ripser and through `taskset` for giotto-ph, so none of them inherits the
+controller's pin. Untimed work, the arm builds and the input generation, runs
+on the allowed CPU set.
+
+### Freeze checks
+
+The runner hashes the corpus before it generates the first input and again
+before it times the first run, and stops if the two differ. It refuses a dirty
+worktree unless `ALLOW_DIRTY=1`, which the record discloses. It refuses a
+version 0 corpus unless `ALLOW_DRAFT=1`, a giotto-ph other than the registered
+version unless `ALLOW_ANY_GPH_VERSION=1`, and a missing competitor build that
+`[meta.required_competitors]` asks for unless `ALLOW_MISSING_COMPETITORS=1`;
+each override voids what it touches. `results_north_star_manifest.txt` records
+the corpus version and sha256, every arm's commit and binary sha256, every
+competitor's hash or version, the CPU lists, the controller CPU and its check,
+the topology check, the routing constants, the kernel, the toolchain, and the
+date.
+
+### A complete study
+
+Amendment 1 says what makes a study complete, and the manifest writes
+`study_valid=yes` only for a complete study: a clean worktree, the frozen
+corpus at version 1 or later, the frozen arms of `[meta.arm_commits]`, every
+competitor build the corpus requires, giotto-ph importable at the registered
+0.2.4, a verified topology and controller placement, no `NS_ONLY` filter, and
+no void entry. Anything else writes `study_valid=no` and lists every reason,
+both in the manifest and at the top of the markdown record.
+
+```sh
+CARGO="cargo +1.92" RIPSER_BIN=/path/to/ripser \
+    RIPSER_COEFF_BIN=/path/to/ripser-coeff RIPSER_F64_BIN=/path/to/ripser-f64 \
+    taskset -c 0-3,12-15 ./north_star.sh
+```
+
+`NS_ONLY` takes a comma-separated list of id globs, so one stratum can be rerun
+by hand; a filtered run is recorded as filtered and grades nothing.
+`north_star_tables.py` turns the record into the tables, the noise band, and
+the grades; it measures nothing. The grades print the strata first, and the
+overall median is never read alone.
+
+## Engineering benchmark (not registered)
+
+`engine_bench.sh` measures holos against ripser on identical inputs. It is an
+engineering instrument, not a study: it has no decision rule, no manifest, and
+no protocol gate, and no public claim may cite its numbers. A change is tuned
+on disclosed data and landed on a disjoint set that was never looked at
+during tuning.
+
+The corpus is `engineering_corpus.toml`. It holds two sets. The tuning set is
+disclosed: rerun it after every change and pick constants from it. The landing
+set uses disjoint seeds and disjoint point counts, and it runs once, after the
+constants are frozen. The runner refuses to overwrite an existing landing
+record unless `ALLOW_RERUN=1`, and the record then discloses the rerun.
+
+### Strata
+
+Every entry names a stratum, an input regime the engine has to meet. The
+tuning and the landing set both carry every stratum, with disjoint seeds and
+sizes inside each one. The summary reports a median per stratum first; an
+overall median never stands alone, because a median over unlike regimes hides
+the regime that lost.
+
+| stratum | what it holds |
+|:--|:--|
+| `baseline` | uniform, spherical, toroidal, and clustered clouds at several thresholds |
+| `knn` | k nearest neighbour graphs, k = 8, 15, and 30, as native sparse input |
+| `lowthresh` | large vertex counts far below the enclosing radius: isolates, trees, many components |
+| `quantized` | lattice, duplicated, and identical points; ties at the threshold boundary |
+| `skewed` | preferential attachment and planted blocks: heavy degree tails and communities |
+| `nearclique` | clouds at `tau = 1.0`, where almost every pair is an edge |
+| `embedding` | Euclidean clouds in 8, 32, and 128 dimensions |
+| `nonmetric` | weights that satisfy no triangle inequality, absent edges at +inf, disconnected input |
+| `deepdim` | homology in dimensions 2, 3, and 4 on small inputs |
+| `oddprime` | coefficients in Z/3 and Z/5 |
+| `collapsed` | a real collapsed graph, read back as native sparse input |
+| `memory` | a sparse graph whose widening to a full matrix is quick and whose matrix is not small |
+
+### Inputs
+
+A cloud entry takes one seeded cloud from `gen_cloud.py` and one threshold
+`T = tau * enclosing radius`. `densify_to_sparse.py` writes the condensed
+lower-distance file and the triplet file from the same distances, so both
+tools read one input at one threshold.
+
+A graph entry takes one seeded graph from `gen_graph.py`, which writes the
+triplet file alone: a kNN graph, preferential attachment, planted blocks, a
+random forest, or independent nonmetric weights. Its threshold is
+`T = tau * (the largest weight drawn)`. There is no dense file of such an
+input, so every configuration of a graph entry reads the triplet file.
+
+An entry with `collapse = true` has its graph reduced first, by the certified
+serial edge collapse, through `engine-bench --emit-collapsed`. The collapse is
+untimed, the barcode does not change, and the reduced graph is then a native
+sparse input.
+
+`tau = 1.0` puts the threshold exactly on a realised distance under both
+rules, which is the threshold-boundary tie case.
+
+Sizes follow the cost of the slowest configuration. The sparse engine on a
+near-complete graph grows faster than `n^4`, so a cloud at `tau = 1.0` stays at
+a few hundred points while a cloud at `tau = 0.3` reaches `n = 3000`. One arm
+reruns the tuning set in about an hour on four physical cores, and every
+further arm costs about as much again.
+
+### Timing and arms
+
+The primary total is a fresh process. holos and ripser both start, read the
+same file at the same threshold, and exit; `measure.py` times them and reads
+their peak RSS. Both get one warm-up run and the same number of timed
+repetitions, `REPS` (default 5).
+
+`HOLOS_ARMS` names the holos builds to time, as a space-separated
+`label=commit` list; the default is `tree=@`, the working tree. Any other
+value is a git commit. The runner checks it out under `HIST_DIR/<sha>/` with
+`git worktree add --detach`, builds `holos-tda` there into that checkout's own
+target directory, and records the sha of every binary in the provenance
+header. An existing binary is reused unless `REBUILD_HIST=1`. Remove a
+checkout with `git worktree remove` when it is no longer wanted. Every arm
+runs every entry, and the tables carry one column per arm and configuration.
+
+`HIST_DIR` defaults to `benchmarks/data/hist`. One arm holds one full release
+build, so four arms need a few gigabytes; point `HIST_DIR` at a filesystem
+with room to spare, and set `CARGO_TARGET_DIR` to move the working tree's own
+build the same way. The runner honours cargo's variable and keeps the absolute
+path out of the record.
+
+An arm whose `holos` takes `--engine auto|dense|sparse` runs `auto`,
+`forced-dense`, and `forced-sparse` on one input file, and `sparse-file` on
+the triplet file. In `sparse-file` holos reads the triplet file with
+`--format sparse --engine auto`, and ripser reads it with `--format sparse`,
+at the same threshold and the same dimension. Routing holds the file fixed
+and varies the engine. `sparse-file` holds the format fixed, so every
+stratum carries one sparse-input ratio that compares like with like. An arm
+built before routing has no such flag, so its configurations are the input
+files instead: `dense` reads the lower-distance file and `sparse` reads the
+triplet file. The runner probes each arm's `--help` and picks the axis per
+arm; nothing else changes.
+
+On an entry whose primary file is already the triplet file, which is every
+graph entry and every collapsed entry, `sparse-file` is the `auto`
+configuration again. The runner keys an arm's timings by file and engine, so
+it runs that command once and reports both columns from it. The tables carry
+the `sparse-file` column beside the routing columns, and the section named
+Sparse-file comparison gives its stratum medians with the entry count behind
+each one.
+
+The dense storage form is a second axis, and the runner does not walk it. A
+tree arm and `crates/engine-bench` both take `--dense-storage
+auto|compact|square`, so either can time the compact and the full matrix
+against each other on one entry. Running both doubles every dense
+configuration, so the runner times the shipped rule alone and the storage
+tuning runs by hand.
+
+The in-process driver `crates/engine-bench` runs beside the fresh processes
+and times the parse, the distance build, the graph build, and the reduction on
+separate clocks. Those phase medians are a diagnostic table, not the headline,
+and only the working tree has a driver. It also supplies the peak RSS of one
+engine entry point at a time, from one extra single-repetition process per
+entry point, which is what the `memory` stratum reads.
+
+The driver computes the entry's reference diagram and checks its own engine
+entry points against each other bar for bar. Every arm and every ripser run is
+then compared against that reference within the tolerance. A mismatch voids
+the entry and fails the run.
+
+The reference ripser build reads no odd modulus and no `--modulus` flag, so an
+entry marks `competitor = "none"` where ripser cannot read its input. The
+runner skips the external arm for such an entry, reports no ratio for it, and
+still checks the entry against the driver's reference.
+
+```sh
+CARGO="cargo +1.92" RIPSER_BIN=/path/to/ripser taskset -c 0-7 ./engine_bench.sh
+# one stratum, two builds:
+HOLOS_ARMS="h0=<sha> tree=@" ONLY='t-knn-*' \
+    CARGO="cargo +1.92" RIPSER_BIN=/path/to/ripser taskset -c 0-7 ./engine_bench.sh
+# once, after the tuning is finished:
+CARGO="cargo +1.92" RIPSER_BIN=/path/to/ripser taskset -c 0-7 ./engine_bench.sh --landing
+```
+
+Results land in `results_engine_tuning.{txt,md}` and
+`results_engine_landing.{txt,md}`, both gitignored. `ONLY` takes a
+comma-separated list of id globs, so one stratum can be rerun alone.
+`ONLY_CONFIGS` takes a comma-separated list of configuration names, so one
+configuration can be timed again without repeating the rest; the record
+names both filters.
+`DRIVER_REPS` (default 3) is the driver's minimum repetition count, rounded up
+per entry to keep the rotation balanced. `engine_tables.py` turns the record
+into the markdown tables and the stratum medians; it measures nothing.
+`crates/engine-bench --help` documents every field the runner parses.

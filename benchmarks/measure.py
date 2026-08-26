@@ -8,13 +8,19 @@ a pipe: a pipe's 64 KB buffer fills up on a large diagram output and deadlocks
 the child. Stderr is discarded, unless MEASURE_STDERR names a file to keep it
 in. That file is also a real file, for the same reason.
 
+MEASURE_AFFINITY, when set, is a comma-separated CPU list. The child is
+pinned to it before it execs. Pinning here, instead of under taskset, keeps
+argv[0] the target binary, which is what the peak RSS sampler matches on.
+The parent keeps its own affinity, so the sampler never competes with the
+run it times. Unset, nothing is pinned.
+
 Wall time is time.monotonic around the process. Peak RSS is VmHWM from
 /proc/PID/status, the kernel's own high-water mark, in kB. The sampling
 interval is 0.5 ms for the first 20 ms and 10 ms after that, so a short-lived
-process is still caught. A sample counts only once /proc/PID/cmdline shows the
-target argv[0]. Before exec the child still maps the parent's image, and
-ru_maxrss or a pre-exec VmHWM would report that image instead (a ~13 MB floor
-as measured here). A sub-millisecond child can report 0. Linux only.
+process is still caught. A sample counts only once /proc/PID/cmdline shows
+the target argv[0]. Before exec the child still maps the parent's image, and
+ru_maxrss or a pre-exec VmHWM would report that image instead (a ~13 MB
+floor as measured here). A sub-millisecond child can report 0. Linux only.
 
 Prints one line: "wall_s=<float> max_rss_kb=<int>". Exits with the child's
 exit code.
@@ -40,11 +46,35 @@ def vmhwm_kb(pid, want_argv0):
     return None
 
 
+def cpu_list(text):
+    """The CPU numbers of a comma-separated list, "0,2,12,14" style."""
+    cpus = set()
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            cpus.update(range(int(lo), int(hi) + 1))
+        else:
+            cpus.add(int(part))
+    if not cpus:
+        sys.exit(f"MEASURE_AFFINITY={text!r} names no CPU")
+    return cpus
+
+
 def main():
     if len(sys.argv) < 3:
         sys.exit("usage: measure.py OUTFILE CMD [ARG...]")
     outfile, cmd = sys.argv[1], sys.argv[2:]
     errfile = os.environ.get("MEASURE_STDERR")
+    affinity = os.environ.get("MEASURE_AFFINITY")
+    pin = None
+    if affinity:
+        cpus = cpu_list(affinity)
+        def pin():  # noqa: E306  (set in the child, between fork and exec)
+            os.sched_setaffinity(0, cpus)
+
     want_argv0 = os.fsencode(cmd[0])
     peak = 0
     with open(outfile, "wb") as out:
@@ -52,7 +82,10 @@ def main():
         try:
             start = time.monotonic()
             proc = subprocess.Popen(
-                cmd, stdout=out, stderr=err if err else subprocess.DEVNULL
+                cmd,
+                stdout=out,
+                stderr=err if err else subprocess.DEVNULL,
+                preexec_fn=pin,
             )
             while proc.poll() is None:
                 hwm = vmhwm_kb(proc.pid, want_argv0)

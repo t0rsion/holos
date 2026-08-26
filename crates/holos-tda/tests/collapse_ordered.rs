@@ -497,8 +497,6 @@ fn assert_trace_sparse(
         .unwrap_or_else(|e| panic!("{name}: verifier rejected the ordered certificate: {e}"));
 }
 
-// A. The trace gate.
-
 #[test]
 fn ordered_matches_serial_v1_and_reference() {
     // Small tie-heavy graphs with zeros and absent pairs, over the three
@@ -591,8 +589,6 @@ fn bipartite_k4_dense() -> DistanceMatrix {
     }
     DistanceMatrix::from_condensed(data).unwrap()
 }
-
-// B. The invariance gate.
 
 /// Inputs with different pass shapes, yields, and densities.
 fn invariance_inputs() -> Vec<(String, DistanceMatrix, Option<f64>)> {
@@ -693,8 +689,6 @@ fn ordered_is_invariant_across_workers_and_windows() {
         }
     }
 }
-
-// C. The equality battery.
 
 fn params(
     max_dim: usize,
@@ -869,8 +863,6 @@ fn ordered_preserves_the_diagram() {
     );
     assert_ordered_preserves_diagram("non_metric", &non_metric, 5.0);
 }
-
-// D. Named scheduler fixtures.
 
 /// Run one fixture through the ordered path and gate it against both
 /// references, then return the ordered result for the fixture's own

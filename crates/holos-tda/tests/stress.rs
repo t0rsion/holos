@@ -232,7 +232,7 @@ fn maximum_prime_modulus() {
 
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data/projective_plane.lower_distance_matrix");
-    let dist = holos_tda::io::read_lower_distance_matrix(&path).unwrap();
+    let dist = holos_tda::io::read_lower_distance_matrix(&path, 1).unwrap();
     let d = rips_persistence(&dist, &RipsParams::new(2).with_modulus(p)).unwrap();
     assert_eq!(d.in_dim(1).count(), 0);
     assert_eq!(d.in_dim(2).count(), 0);

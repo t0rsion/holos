@@ -16,7 +16,7 @@ Usage: parallel_scaling.sh [-h]
 
 Reduce one seeded point cloud at threads {1,2,4,8,16}, report wall time and
 speedup vs threads=1, and assert the diagram is identical at every thread
-count. No external tools required.
+count.
 
 Environment:
   CARGO        cargo invocation (may carry a toolchain), default "cargo"

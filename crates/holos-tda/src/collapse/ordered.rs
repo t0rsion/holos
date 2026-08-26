@@ -48,8 +48,8 @@ fn nanos(d: Duration) -> u64 {
 /// Run the ordered schedule on a dense distance matrix.
 ///
 /// Workers test a window of due edges in parallel, then the run retires
-/// them in serial order. `threshold` follows the engine's rule: `None` means the
-/// enclosing radius. The output equals the output of
+/// them in serial order. `threshold` follows the engine's rule: `None`
+/// means the enclosing radius. The output equals the output of
 /// [`super::collapse_dense`] at any `threads`; 0 and 1 run the serial
 /// implementation. A standalone call owns its thread pool for the
 /// duration.
@@ -105,7 +105,7 @@ pub fn collapse_sparse_ordered_with_window(
 }
 
 /// Build an owned pool for the call and run the ordered collapse on it.
-/// One worker has nothing to speculate on, so it runs the shipped serial
+/// One worker has nothing to speculate on, so it runs the serial
 /// implementation.
 fn collapse_ordered_owned<D: Distances + Sync>(
     dist: &D,
@@ -140,12 +140,10 @@ pub(crate) fn collapse_ordered_in<D: Distances + Sync>(
     }
 }
 
-/// The serial version 1 run, reported as an ordered run. Its logical
-/// trace is its own test sequence, so the logical count is the physical
-/// count.
-///
-/// The run has no stages, so it keeps the window counters at zero and the
-/// default timings the serial implementation reports.
+/// The serial schedule, used when the ordered schedule has nothing to
+/// speculate on. Its logical trace is its own test sequence, so the
+/// logical count is the physical count. The run has no stages, so window
+/// counters stay at zero and timings are the serial defaults.
 fn serial<D: Distances>(dist: &D, threshold: Option<f64>) -> Result<CollapsedRips> {
     super::collapse_impl(dist, threshold)
 }
@@ -156,8 +154,8 @@ fn serial<D: Distances>(dist: &D, threshold: Option<f64>) -> Result<CollapsedRip
 /// positions from the cursor without touching a dirty flag. TEST
 /// evaluates the predicate for every member against the frozen graph.
 /// RETIRE walks every position of the window span in schedule order and
-/// commits it exactly as version 1 would, reusing a member's cached
-/// verdict when no earlier removal of this stage conflicts with it.
+/// commits it exactly as the serial schedule would, reusing a member's
+/// cached verdict when no earlier removal of this stage conflicts with it.
 fn collapse_ordered_core<D: Distances + Sync>(
     dist: &D,
     threshold: Option<f64>,
@@ -174,9 +172,9 @@ fn collapse_ordered_core<D: Distances + Sync>(
     let mut stats = CollapseStats::new(edges.len());
     let mut steps: Vec<RemovalStep> = Vec::new();
     let mut scratch = Scratch::default();
-    // Same pruning contract as v1: a pass tests the edges the previous
-    // removals marked dirty, or every live edge after a removal whose
-    // neighborhood was too large to mark finely.
+    // Same pruning contract as the serial schedule: a pass tests the
+    // edges the previous removals marked dirty, or every live edge after
+    // a removal whose neighborhood was too large to mark finely.
     let mut dirty: Vec<bool> = vec![false; edges.len()];
     let mut test_all = true;
     let mut members: Vec<usize> = Vec::new();
@@ -190,7 +188,7 @@ fn collapse_ordered_core<D: Distances + Sync>(
         let mut test_all_next = false;
         let mut c = 0usize;
         while c < edges.len() {
-            // FORM. Dirty flags stay as they are: a member is due because
+            // FORM leaves dirty flags as they are: a member is due because
             // its flag is set, and only its own retirement may clear it.
             members.clear();
             let mut scan = c;
@@ -208,8 +206,8 @@ fn collapse_ordered_core<D: Distances + Sync>(
             stats.window_slots_offered = stats.window_slots_offered.saturating_add(window);
             stats.window_members_formed += members.len();
 
-            // TEST. Read-only against the frozen graph, collected in
-            // member order, so the worker count cannot reach the output.
+            // TEST is read-only against the frozen graph. Results collect
+            // in member order, so the worker count cannot reach the output.
             stats.edge_tests += members.len();
             let predicate_start = Instant::now();
             let mut cached: Vec<(Option<Witnesses>, usize)> = match pool {
@@ -239,9 +237,9 @@ fn collapse_ordered_core<D: Distances + Sync>(
             stale.clear();
             stale.resize(members.len(), false);
 
-            // RETIRE. Every position of the span, in schedule order, with
-            // v1's state at each step: the graph, the dirty flags,
-            // `test_all`, and the pass number.
+            // RETIRE walks every position of the span in schedule order,
+            // with the serial schedule's state at each step: the graph,
+            // the dirty flags, `test_all`, and the pass number.
             let retirement_start = Instant::now();
             let mut next = 0usize;
             for j in c..=last {
@@ -562,8 +560,8 @@ mod tests {
     // removable against the frozen graph, but after (0,1), (0,2), and
     // (1,2) fall, the three edges at vertex 3 have no common neighbor
     // left. Their cached verdicts are stale positives; the repairs turn
-    // them into refusals and the star at 3 survives, as in v1. Reusing a
-    // stale cache here would delete the whole graph.
+    // them into refusals and the star at 3 survives, as in the serial
+    // schedule. Reusing a stale cache here would delete the whole graph.
     #[test]
     fn stale_member_repair_flips_a_verdict() {
         let d = unit_k4();

@@ -1,7 +1,7 @@
 //! Property tests: invariances the barcode must satisfy regardless of the
 //! reduction strategy, plus input edge cases.
 
-use holos_tda::{rips_persistence, Diagram, DistanceMatrix, RipsParams};
+use holos_tda::{rips_persistence, Diagram, DistanceMatrix, Engine, RipsParams};
 use proptest::prelude::*;
 
 fn canonical(d: &Diagram) -> Vec<(usize, f64, f64)> {
@@ -89,11 +89,35 @@ proptest! {
     #![proptest_config(ProptestConfig::default())]
 
     #[test]
+    fn every_engine_gives_one_diagram(
+        n in 2..=7usize,
+        seed_data in prop::collection::vec(entry_with_inf(), 21),
+        max_dim in 0..=2usize,
+        threshold in prop_oneof![Just(None), (0.5f64..3.0).prop_map(Some)],
+    ) {
+        // Bits, not values: the routed run must reproduce the dense one
+        // exactly, and equal bits admits no rounding.
+        let data = seed_data[..n * (n - 1) / 2].to_vec();
+        let dist = DistanceMatrix::from_condensed(data).unwrap();
+        let max_dim = max_dim.min(n - 2);
+        let mut params = RipsParams::new(max_dim);
+        params.threshold = threshold;
+        let dense = rips_persistence(&dist, &params.clone().with_engine(Engine::Dense)).unwrap();
+        let reference: Vec<_> = dense.bars.iter()
+            .map(|b| (b.dim, b.birth.to_bits(), b.death.to_bits())).collect();
+        for engine in [Engine::Auto, Engine::Sparse] {
+            let got = rips_persistence(&dist, &params.clone().with_engine(engine)).unwrap();
+            let got: Vec<_> = got.bars.iter()
+                .map(|b| (b.dim, b.birth.to_bits(), b.death.to_bits())).collect();
+            prop_assert_eq!(got, reference.clone(), "{:?}", engine);
+        }
+    }
+
+    #[test]
     fn permutation_invariance((n, data, perm, max_dim) in matrix_perm_and_dim()) {
         let max_dim = max_dim.min(n - 2);
         let dist = DistanceMatrix::from_condensed(data.clone()).unwrap();
         let pdist = DistanceMatrix::from_condensed(permuted(n, &data, &perm)).unwrap();
-        // Same entries reordered: the canonical multisets must match exactly.
         prop_assert_eq!(
             canonical(&compute(&dist, max_dim, None)),
             canonical(&compute(&pdist, max_dim, None))
@@ -137,7 +161,6 @@ proptest! {
         let diagram = compute(&dist, 0, threshold);
         let essential = diagram.in_dim(0).filter(|b| b.is_essential()).count();
         prop_assert_eq!(essential, components(n, &dist, effective));
-        // Every finite dim-0 bar is born at 0.
         prop_assert!(diagram.in_dim(0).all(|b| b.birth == 0.0));
     }
 
@@ -157,14 +180,12 @@ proptest! {
                 .filter(|b| b.is_essential())
                 .count()
         };
-        // Growing the threshold can only merge components.
         prop_assert!(essential(t1) >= essential(t2));
     }
 
-    // The solver-facing shape of boundary-of-boundary. Build the oracle-style
-    // filtration-ordered Z/2 boundary matrix from explicit vertex lists (no
-    // combinadic code), then check D*D = 0. That means every included simplex
-    // has all its faces included, and each codim-2 face cancels.
+    // Oracle-style filtration-ordered Z/2 boundary matrix from explicit
+    // vertex lists, with no combinadic encoding. D*D = 0 means every
+    // included simplex has all its faces, and each codim-2 face cancels.
     #[test]
     fn boundary_matrix_squares_to_zero(
         n in 3..=7usize,

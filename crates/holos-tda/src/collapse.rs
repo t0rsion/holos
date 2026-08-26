@@ -1,31 +1,22 @@
 //! Filtered edge collapse for flag filtrations.
 //!
 //! The collapse removes edges that are dominated at every scale from their
-//! birth to the terminal level (the filtration-wide multi-witness criterion
-//! of Boissonnat and Pritam). The flag filtration of the reduced graph has
-//! the same persistence diagram as the input, in every dimension. Each
-//! removal is recorded in a replayable [`CollapseCertificate`] that the
-//! independent checker in [`verify`] can validate.
+//! birth to the terminal level. The flag filtration of the reduced graph
+//! has the same persistence diagram as the input, in every dimension.
+//! Each removal is recorded in a [`CollapseCertificate`] that [`verify`]
+//! can replay.
 //!
-//! Three schedules exist. [`collapse_dense`] and [`collapse_sparse`] run
-//! the serial schedule: passes over the edges with immediate deletion.
-//! This is what [`crate::rips_persistence`] and the CLI run by default,
-//! and in the registered studies the fastest end to end on most inputs;
-//! [`crate::CollapseSchedule`] selects the others.
+//! [`collapse_dense`] and [`collapse_sparse`] run the serial schedule.
 //! [`collapse_dense_ordered_parallel`] and
 //! [`collapse_sparse_ordered_parallel`] run the ordered schedule: the same
-//! removals, tested speculatively in parallel, so their output is the
-//! serial one, field for field, at every worker count. Both schedules
-//! write an algorithm version 1 certificate.
-//! [`collapse_dense_rounds_parallel`] and
-//! [`collapse_sparse_rounds_parallel`] run the rounds schedule, which
-//! writes a version 2 certificate: each round tests the live edges against
-//! a frozen graph and deletes a batch of provably independent removals,
-//! also byte-identical at every worker count. All are deterministic given
-//! the vertex labeling. No reduced graph is canonical, and the rounds
-//! schedule can keep a different edge set from the other two: a
-//! relabeling or a schedule change can move the surviving set, but never
-//! the barcode.
+//! removals, tested speculatively in parallel, so the output is the serial
+//! one at every worker count. Both write an algorithm version 1
+//! certificate. [`collapse_dense_rounds_parallel`] and
+//! [`collapse_sparse_rounds_parallel`] run the rounds schedule and write
+//! an algorithm version 2 certificate. The rounds graph is not the serial
+//! graph. A relabeling or a schedule change can move the surviving set,
+//! never the barcode. All three are deterministic given the vertex
+//! labeling.
 
 mod ordered;
 mod parallel;
@@ -71,10 +62,10 @@ impl RemovalStep {
         self.epoch
     }
 
-    /// Witness segments as `(start value, apex vertex)`. Segment `i` covers
-    /// scales from its start value up to the next segment's start; the last
-    /// segment covers through the terminal level. The first start value is
-    /// the edge value.
+    /// Witness segments as `(start value, apex vertex)` pairs. Segment `i`
+    /// covers scales from its start value up to the next segment's start;
+    /// the last segment covers through the terminal level. The first start
+    /// value is the edge value.
     pub fn witnesses(&self) -> &[(f64, usize)] {
         &self.witnesses
     }
@@ -84,8 +75,7 @@ impl RemovalStep {
 ///
 /// The certificate plus the collapsed matrix reconstruct the thresholded
 /// input, and [`verify`] can replay and check every removal. The
-/// certificate is not a chain map: it certifies that the removals preserve
-/// the diagram, and does not transport representatives.
+/// certificate is not a chain map and does not transport representatives.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollapseCertificate {
     algorithm_version: u32,
@@ -98,7 +88,8 @@ pub struct CollapseCertificate {
 }
 
 impl CollapseCertificate {
-    /// Version of the collapse scheme that produced this certificate.
+    /// Algorithm version of this certificate: 1 for serial and ordered, 2
+    /// for rounds.
     pub fn algorithm_version(&self) -> u32 {
         self.algorithm_version
     }
@@ -209,8 +200,7 @@ impl CollapseStats {
 ///
 /// Zero on the serial and rounds schedules, which have no speculative
 /// phases to separate. The ordered schedule reports the parallel test
-/// phase, the serial retirement walk, and the repairs inside it, so a
-/// study can weigh repair cost against predicate cost directly. Timings
+/// phase, the serial retirement walk, and the repairs inside it. Timings
 /// are diagnostics: they vary between runs and never affect an output
 /// field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -228,17 +218,17 @@ pub struct CollapseTimings {
 /// A collapsed filtration: the reduced graph, the certificate that the
 /// reduction preserves the diagram, run counters, and wall-clock timings.
 ///
-/// Pass the matrix straight to [`crate::rips_persistence_sparse`]. One
-/// collapse can serve many downstream runs: the reduction is independent of
-/// modulus, homology dimension, optimization toggles, and thread count.
-/// The schedule does change which edges survive.
+/// The matrix is a valid input to [`crate::rips_persistence_sparse`]. The
+/// reduced graph does not depend on modulus, homology dimension,
+/// optimization toggles, or thread count. The schedule can change which
+/// edges survive.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CollapsedRips {
     /// The reduced graph. Surviving edge values are the input values, bit
     /// for bit.
     pub matrix: SparseDistanceMatrix,
-    /// Replayable proof of every removal.
+    /// Replayable record of every removal.
     pub certificate: CollapseCertificate,
     /// Run counters.
     pub stats: CollapseStats,
@@ -250,8 +240,8 @@ pub struct CollapsedRips {
 ///
 /// `threshold` follows the engine's rule: `None` means the enclosing
 /// radius. Edges above the resolved threshold are dropped before the
-/// collapse and are not part of the certified input. The parallel forms
-/// are [`collapse_dense_ordered_parallel`] and
+/// collapse and are not part of the certified input. See
+/// [`collapse_dense_ordered_parallel`] and
 /// [`collapse_dense_rounds_parallel`].
 pub fn collapse_dense(dist: &DistanceMatrix, threshold: Option<f64>) -> Result<CollapsedRips> {
     collapse_impl(dist, threshold)
@@ -260,7 +250,7 @@ pub fn collapse_dense(dist: &DistanceMatrix, threshold: Option<f64>) -> Result<C
 /// Collapse a sparse distance matrix with the serial schedule.
 ///
 /// `threshold` follows the engine's rule: `None` keeps every listed edge.
-/// The parallel forms are [`collapse_sparse_ordered_parallel`] and
+/// See [`collapse_sparse_ordered_parallel`] and
 /// [`collapse_sparse_rounds_parallel`].
 pub fn collapse_sparse(
     dist: &SparseDistanceMatrix,
@@ -303,15 +293,15 @@ struct Prepared {
 /// Which execution produced a run. It fixes the two output fields the
 /// three executions do not share.
 enum Execution {
-    /// The serial version 1 run: certificate version 1, and the physical
-    /// test sequence is the logical one.
+    /// The serial schedule. Writes an algorithm version 1 certificate,
+    /// and the physical test sequence is the logical one.
     Serial,
-    /// The ordered speculative version 1 run: certificate version 1, and
-    /// the execution counts its own logical trace, which the physical
+    /// The ordered schedule. Writes an algorithm version 1 certificate,
+    /// and the execution counts its own logical trace, which the physical
     /// count can exceed.
     Ordered,
-    /// The version 2 rounds schedule: certificate version 2, and the
-    /// physical test sequence is the logical one.
+    /// The rounds schedule. Writes an algorithm version 2 certificate,
+    /// and the physical test sequence is the logical one.
     Snapshot,
 }
 
@@ -323,7 +313,7 @@ fn prepare<D: Distances>(dist: &D, threshold: Option<f64>) -> Result<Prepared> {
     let resolved = threshold.unwrap_or_else(|| dist.default_threshold());
 
     let mut edges: Vec<EdgeRec> = Vec::new();
-    dist.for_each_edge(&mut |i, j, d| {
+    dist.for_each_edge(|i, j, d| {
         if d.is_finite() && d <= resolved {
             edges.push(EdgeRec {
                 u: j,
@@ -382,9 +372,9 @@ fn finish(
     stats.removed_edges = steps.len();
     stats.output_edges = input_edges - steps.len();
     if !matches!(execution, Execution::Ordered) {
-        // The serial and rounds executions test exactly the logical
-        // sequence, so the physical count is the logical count. The
-        // ordered execution counts its logical trace as it retires.
+        // Serial and rounds test exactly the logical sequence, so the
+        // physical count is the logical count. The ordered schedule
+        // counts its logical trace as it retires.
         stats.logical_tests = stats.edge_tests;
     }
 
@@ -538,9 +528,8 @@ fn test_edge(
     terminal: f64,
     s: &mut Scratch,
 ) -> Option<Vec<(f64, usize)>> {
-    // C by sorted merge of the two adjacency lists. Tombstones read as
-    // +inf and drop out through the finiteness checks. Neither list holds
-    // its own vertex, so u and v never enter the intersection.
+    // Tombstones read as +inf and drop out through the finiteness checks.
+    // Neither list holds its own vertex, so u and v never enter C.
     s.cands.clear();
     let (lu, lv) = (&adj[u], &adj[v]);
     let (mut i, mut j) = (0, 0);
@@ -632,10 +621,9 @@ fn for_each_induced_edge(
 ) -> bool {
     let (lu, lv) = (&adj[u], &adj[v]);
     if let Some(limit) = limit {
-        // The whole point of fine marking is to beat a plain retest, so
-        // its own cost must stay near-constant. Long adjacency lists mean
-        // a dense neighborhood where a retest is cheap per edge anyway:
-        // bail before walking anything.
+        // Fine marking must stay cheaper than a retest. Long adjacency
+        // lists mean a dense neighborhood where a retest is cheap per
+        // edge: bail before walking anything.
         if lu.len().min(lv.len()) > 2 * limit {
             return false;
         }
@@ -665,7 +653,6 @@ fn for_each_induced_edge(
     s.marks.sort_unstable();
     for (a, &p) in s.marks.iter().enumerate() {
         let list = &adj[p];
-        // A long list gets probed per pair; a short one merges.
         if s.marks.len() * 16 < list.len() {
             for &q in &s.marks[a + 1..] {
                 if let Ok(pos) = list.binary_search_by(|probe| probe.0.cmp(&q)) {
@@ -714,7 +701,7 @@ fn mark_dirty(
     for_each_induced_edge(adj, u, v, s, Some(MARK_LIMIT), |idx| dirty[idx] = true)
 }
 
-/// The serial version 1 collapse for the pipeline.
+/// The serial schedule for the pipeline.
 pub(crate) fn collapse_serial_in<D: Distances>(
     dist: &D,
     threshold: Option<f64>,

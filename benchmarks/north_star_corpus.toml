@@ -1,0 +1,1129 @@
+# Corpus for the registered north-star engine study of public 0.6.0
+# (internal v0.7).
+#
+# FROZEN at version 1 on 2026-08-18. The entries, sizes, seeds, thresholds,
+# thread counts, and rules do not change in response to a result. Two arm
+# commits are still marked unset: H2 and H3 are named at the freeze of the
+# release, and filling them takes a numbered amendment that changes nothing
+# else. benchmarks/north_star.sh refuses a version 0 corpus unless
+# ALLOW_DRAFT=1, and marks any such run void.
+#
+# Amendment 1, dated 2026-08-18, is the design reviewer's ratification
+# amendment. It came before any registered timing. [meta.amendments] carries
+# its text and what it changed.
+#
+# PLAN.md is the maintainer's registration document. It is local and not
+# published; this file quotes every rule it depends on, so the corpus
+# carries its own criterion.
+#
+# This study, and only this study, produces the public performance
+# statements of the release. The engineering harness
+# (benchmarks/engine_bench.sh with benchmarks/engineering_corpus.toml) tunes
+# the engine and decides landing; no claim may cite it.
+
+[meta]
+version = 1
+date = "2026-08-18"
+study = "north-star engine study: holos against ripser and giotto-ph"
+runner = "benchmarks/north_star.sh"
+tables = "benchmarks/north_star_tables.py"
+plan = "PLAN.md section 19, the registered north-star study"
+frozen = """
+FROZEN at version 1 on 2026-08-18, before any run of this corpus. The
+preconditions of PLAN.md section 19 are met in order: the four holos arms
+are defined, the engineering landing matrix has run on a disjoint set, and
+the competitors are built and hashed. The seeds here appear in no other
+corpus, registered or engineering, so no entry of this study has been
+looked at.
+
+Two fields wait for the release freeze: arm_commits.h2 and arm_commits.h3
+read "unset".
+The routing commit that H2 carries and the final commit that H3 names are
+fixed when the release branch closes. Writing them in is a numbered
+amendment that changes no entry, size, seed, threshold, thread count,
+measure, or rule. The runner refuses to start while an arm it would run is
+unset.
+"""
+decision_rule = """
+Frozen at registration, quoted from PLAN.md section 19.
+
+"The internal competitive target requires H3 serial median time at or below
+stock f32 ripser, dense-selected, sparse-selected, maxdim-1, and maxdim-2
+strata each at or below ripser, no entry more than 5% slower outside the
+frozen noise rule, no material H3 regression against the best earlier Holos
+state, and the same stratified P-core rule against the named giotto-ph
+build for a multicore success claim."
+
+"The registered CPU scaling stratum compares H3 with giotto-ph at 1, 2, 4,
+and P physical cores without SMT, with H2 at P as an attribution
+diagnostic; while P is four, claims name the exact four-core machine, and
+broad multicore wording still requires at least eight physical cores.
+Ripser++ belongs to a separate accelerator arena and contributes to no CPU
+grade."
+
+"Until the registered study runs, public performance wording is limited to
+mechanism statements and 'Performance assessment is WIP.'"
+
+P is four on the study machine, so the scaling points are 1, 2, and 4
+physical cores and the P point is the 4-core point. The four strata the
+rule names are grading strata, not input strata: dense-selected and
+sparse-selected come from what the frozen routing rule chose for the entry,
+maxdim-1 and maxdim-2 from the entry's max_dim. Every entry names an input
+stratum as well, and the tables report the input strata first.
+
+How each clause is read:
+
+serial grade   The median H3 ratio over stock f32 ripser is at or below
+               1.00 in each of the four grading strata and over all
+               headline entries. A stratum median is a median of per-entry
+               ratios, one ratio per entry, over the graded entries of the
+               stratum. Amendment 1 says which entries those are: the ones
+               whose ripser median is at or above the short-run floor of
+               the noise rule.
+per-entry      No graded entry has an H3 ratio above the per-entry limit of
+               the noise rule below.
+regression     No material H3 regression against the best earlier arm: for
+               each grading stratum, the median of H3 over the fastest of
+               H0, H1, and H2 on the same entry is at or below 1.05, and no
+               graded entry exceeds the per-entry limit against that arm.
+               Here the floor reads the fastest earlier arm, which is the
+               denominator of the ratio.
+multicore      The same four stratum medians and the same per-entry limit,
+               with H3 at four physical cores against giotto-ph 0.2.4 at
+               four physical cores, over the entries that carry
+               multicore = true. Here the floor reads the giotto-ph
+               median.
+scaling        Descriptive. The CPU scaling table reports H3 and giotto-ph
+               wall time at 1, 2, and 4 physical cores, the speedup of each
+               product against its own 1-core time, and the ratio between
+               them, with H2 at four cores beside them as the attribution
+               diagnostic. It carries no pass or fail.
+
+A grade is reported per clause, with the numbers behind it. The tables
+print the strata before any overall median.
+"""
+noise_rule = """
+Frozen at registration. Two entries of one pass can differ by more than the
+effect this study measures, so the per-entry clause needs a stated floor
+and a stated band.
+
+Short runs. Amendment 1 puts a floor under every graded ratio. A ratio
+whose denominator is under 20 ms is descriptive: the record reports it, and
+it enters no pass or fail median, no per-entry clause, no regression
+aggregate, and no A/A band. Under 20 ms the process start, the file read,
+and the sampling clock of benchmarks/measure.py are a large part of the
+run.
+
+The denominator differs by measure. A serial ratio divides by the entry's
+competitor median, a multicore ratio by the giotto-ph median, a regression
+ratio by the median of the fastest earlier arm, and an A/A ratio by the H3
+median. An entry is graded in a clause when the median that clause divides
+by is at or above the floor, and it is descriptive in that clause
+otherwise. One entry can be graded in one clause and descriptive in
+another.
+
+Medians are computed over graded entries only. That holds for a median
+inside an input stratum, for a median inside a grading stratum, for the
+overall median over the headline entries, and for the regression
+aggregate. benchmarks/north_star_tables.py marks every descriptive entry
+and states how many entries each median covers.
+
+The band. The study runs an A/A control: a second copy of the H3 binary,
+byte for byte identical to the first, timed as its own arm on every entry
+of every pass. Its per-entry ratio is the median of the copy over the
+median of H3, and it measures what this harness reports for two identical
+binaries. The band of a pass is the 95th percentile of the absolute
+distance from 1.0 of those control ratios, over the graded entries of that
+pass. An A/A ratio divides by the H3 median, so an entry whose H3 median is
+under the floor is descriptive here and enters no band. An entry the pass
+does not grade enters no band either: the band is what grades an entry, and
+an entry that no clause grades does not set the limit for the rest. A
+per-entry ratio within the band is a tie.
+
+The per-entry limit is therefore max(1.05, 1 + band): an entry fails the
+per-entry clause when its ratio is above 1.05 and outside the band. The
+band grades entries, never stratum medians. A median over the entries of a
+stratum is already an average, and the decision rule grades it at 1.00.
+
+benchmarks/north_star_tables.py computes the band from the A/A rows of the
+same record. No band is typed in, and a pass whose A/A arm did not run has
+no band and grades on 1.05 alone, which the record states.
+"""
+pinning_rule = """
+Every timed run is pinned, and the rule names physical cores. Four physical
+cores without SMT means one logical CPU per core, so a thread cannot share
+a core with another thread of the same run.
+
+The study machine is a 13th Gen Intel Core i9-13900KS. Its P-cores carry
+two logical CPUs each, and the maintainer's allowed set is 0-3 and 12-15,
+which is four P-cores: logical 0 and 1 share one core, 2 and 3 the next, 12
+and 13 the next, 14 and 15 the last. One logical CPU per core gives the
+frozen lists in [meta.pinning]:
+
+  1 physical core   taskset -c 0
+  2 physical cores  taskset -c 0,2
+  4 physical cores  taskset -c 0,2,12,14
+
+The serial pass runs on the 1-core list, holos arms and ripser alike. The
+multicore pass and the 4-core points of the CPU scaling stratum run on the
+4-core list, holos and giotto-ph alike. Nothing else runs on the machine
+during a pass.
+
+The measurement controller. Amendment 1 keeps the harness off the timed
+cores. The runner's own process, benchmarks/measure.py, and the peak RSS
+sampler inside it run on one logical CPU outside every timed physical core:
+controller_cpu in [meta.pinning], logical CPU 8, which the NS_CONTROLLER_CPU
+environment variable overrides. Logical CPU 8 sits on the fifth P-core of
+the study machine, and the timed lists cover the first, second, seventh, and
+eighth. The runner refuses to start when the controller CPU is a timed CPU
+or the SMT sibling of one. It reads the siblings from
+/sys/devices/system/cpu/cpu*/topology/thread_siblings_list, checks there
+that no two CPUs of the 4-core list share a physical core, and records both
+checks in the manifest.
+
+Untimed work is not pinned to the controller CPU. The arm builds and the
+input generation run on the allowed CPU set. Nothing is timed while they
+run.
+
+The rule is registered, not the numbers. If the study machine changes
+before the run, the lists are re-read from its topology at the freeze and
+written here by an amendment. The runner enforces the rule: it refuses to
+start when the topology of the allowed CPU set is unknown, when a listed
+CPU is outside the allowed set, or when the 4-core list does not hold four
+distinct physical cores. ALLOW_ANY_TOPOLOGY=1 overrides the refusal and
+marks the run void.
+"""
+arms = """
+Four holos arms, frozen. Each is a git commit; the runner builds each one
+in a detached checkout of its own and records the sha256 of every binary.
+
+h0  Public 0.5.0, commit 9262d24. The released engine, before any 0.6 work.
+h1  Sparse cofacet streaming, commit 2acd8d4 (tag h1-streaming). H0 plus
+    the descending k-way cursor merge and nothing else.
+h2  H1 plus the dense low-threshold routing commit, cherry-picked onto the
+    h1-streaming branch point. Commit: unset until the release freeze.
+h3  The frozen final commit of the release: serial kernel parity, the
+    accepted micro-optimizations, and the parallel dim-0 apparent-cofacet
+    prefilter. Commit: unset until the release freeze. H3 is the arm every
+    grade reads.
+
+h3aa  The A/A control. The runner copies the h3 binary to a second path and
+      checks that the copy hashes the same, then times it as an arm of its
+      own. It measures the harness, not a build, and it defines the noise
+      band. It enters no grade of its own.
+
+An arm older than the routing flag takes no --engine. No arm is forced:
+every arm of an entry runs one command line, with the routing left at its
+own default, which is the shipped path of that build. The routing axis
+belongs to the engineering harness.
+"""
+competitors = """
+ripser        The stock upstream build, value_t = float. It is the arm the
+              serial grade reads. The manifest records its sha256 and, when
+              a Makefile sits beside the binary, its compile flags.
+ripser-coeff  The same upstream source built with -D USE_COEFFICIENTS, for
+              the entries whose modulus is an odd prime. Stock ripser reads
+              no --modulus, so those entries name this competitor instead.
+              Its ratios are reported in the odd-prime input stratum and
+              enter the grading strata like any other entry.
+ripser-f64    The audited matched-precision build (local/ripser_f64, a
+              one-line value_t patch on the same upstream commit, same
+              flags, hashes recorded). It is a diagnostic: holos stores f64
+              and stock ripser stores f32, so this arm says what the
+              precision difference costs. It is reported in a table of its
+              own and is never pooled with the stock arm, and no grade
+              reads it.
+giotto-ph     Version 0.2.4, by version string, through
+              gph.ripser_parallel. It is the arm the multicore grade reads
+              and the second product of the CPU scaling stratum. The runner
+              refuses another version unless ALLOW_ANY_GPH_VERSION=1, which
+              marks the multicore grade void.
+
+Ripser++ is not an arm. PLAN.md section 19 puts it in a separate
+accelerator arena, and it contributes to no CPU grade.
+
+[meta.required_competitors] says which builds a complete study needs: the
+stock build always, the odd-prime build when an entry names an odd prime,
+and the matched-precision build only when its field is true. That field is
+false at version 1, because the f64 arm is a diagnostic and no grade reads
+it.
+"""
+timing_protocol = """
+The primary measurement is a fresh process. holos and ripser both start,
+read the same file at the same threshold, and exit; benchmarks/measure.py
+times them with a monotonic wall clock and reads their peak RSS from VmHWM.
+
+Every command of an entry gets one warm-up run and then REPS timed
+repetitions, REPS default 5. The warm-up run is also the agreement run: its
+output is compared against the H3 diagram before any timing counts.
+
+The timed repetitions are rotated. One repetition runs every command of the
+entry once, and repetition r starts the command cycle one place further on,
+so no command keeps the first position while the machine warms. The
+repetition count of an entry is the smallest multiple of its command count
+at or above REPS, so every command takes every position equally often. The
+record states the count, and an unbalanced entry is void.
+
+The figure of an arm is the median of its timed repetitions. The peak RSS
+of an arm is the largest VmHWM of those same runs.
+
+The CPU scaling stratum is the one exception, and it is stated here rather
+than hidden in the runner: giotto-ph has no command-line tool, so it is
+timed in process, exactly the way benchmarks/giotto_compare.sh times it. A
+Python process reads the input, and one monotonic clock wraps the
+ripser_parallel call alone. holos is timed as a fresh process there as
+everywhere else. The giotto-ph clock therefore excludes process start and
+input parse, which holos pays inside its number. The comparison favors
+giotto-ph, and the table says so. The multicore pass reads the same clocks
+for the same reason.
+
+No number in this study comes from subtracting one command line from
+another, and no phase clock enters a grade.
+"""
+threshold_rule = """
+Cloud entries: T = tau * R, where R is the enclosing radius of the cloud,
+the minimum over i of the maximum over j of d(i, j). tau = 1.0 reproduces
+the dense default threshold exactly. benchmarks/densify_to_sparse.py
+computes R and T from the cloud and writes the condensed lower-distance
+file and the triplet file from the same distances, so every product reads
+one geometry at one threshold.
+
+Graph entries: T = tau * (the largest weight the generator drew).
+benchmarks/gen_graph.py drops the edges above T, so the file holds the
+thresholded graph and the runner passes the same T to every product.
+
+tau = 1.0 puts T exactly on a realised value under both rules, which is the
+threshold-boundary tie case.
+"""
+sampling_rule = """
+One seeded input per entry. Cloud entries take one cloud from gen_cloud.py
+N COORD_DIM SEED FAMILY. Graph entries take one graph from gen_graph.py
+GENERATOR N SEED TAU PARAM OUT. No entry is resampled: a rerun of the
+runner regenerates the same bytes.
+
+The seeds are 9901 to 9949, odd, and they are new. This corpus is held out
+against everything the engine was tuned or landed on, and against every
+earlier registered corpus. None of the engineering seeds appears here
+(5501 to 5573 odd, the tuning set; 7701 to 7749 odd, the landing set), and
+none of the registered seeds does either (42, 4201, 5301, 777, 778, 9137,
+9138, 9139, 6607, 8821, 8823, 8825, 8827). The lattice and equal families
+ignore the seed; there the point count is what separates this corpus from
+the others, and no entry here shares a point count with an engineering
+entry of the same family.
+"""
+strata = """
+Every entry names one input stratum, an input regime the engine has to
+meet, not a size class. The twelve are the strata of the engineering
+corpus, so the held-out study covers what the engine was built against.
+
+baseline    Uniform, spherical, toroidal, and clustered clouds at several
+            thresholds, in dimension 1 and dimension 2.
+knn         k nearest neighbour graphs, k = 8 and 30, as native sparse
+            input. Degrees are near-uniform and the graph is connected.
+lowthresh   Large vertex counts with a threshold far below the enclosing
+            radius: isolated vertices, trees, and many components.
+quantized   Inputs whose distances repeat exactly: a regular lattice,
+            duplicated points, and identical points.
+skewed      Degree-skewed and clustered graphs: preferential attachment for
+            a heavy degree tail, planted blocks for community structure.
+nearclique  A clustered cloud at tau = 1.0, where almost every pair is an
+            edge.
+embedding   Euclidean clouds in 8, 32, and 128 dimensions, where distances
+            concentrate.
+nonmetric   Weighted dissimilarities that satisfy no triangle inequality,
+            with absent edges at +inf and disconnected input.
+deepdim     Homology in dimensions 3 and 4 on small inputs.
+oddprime    Coefficients in Z/3 and Z/5, against ripser-coeff.
+collapsed   A real collapsed graph: an ordinary input, reduced by the
+            certified serial edge collapse, then read back as native sparse
+            input.
+memory      A sparse graph whose widening to a full matrix is quick and
+            whose full matrix is not small. It reads peak RSS.
+
+The [[scaling]] entries are the CPU scaling stratum. They are a stratum of
+the study, not of this list: they carry their own table, they are timed at
+three core counts, and they enter no serial or multicore grade.
+"""
+grading_strata = """
+The decision rule grades four strata. They are derived, never declared.
+
+dense-selected   Entries where the frozen routing rule of H3 keeps the
+                 distance matrix.
+sparse-selected  Entries where it builds the thresholded graph, plus every
+                 entry whose input file is already a graph: sparse input
+                 always uses the sparse engine.
+maxdim-1         Entries with max_dim = 1.
+maxdim-2         Entries with max_dim = 2.
+
+The routing classification is the frozen routing rule at H3, computed by
+the runner from the point count n and the edge count m at the resolved
+threshold, both of which the input generator reports. The rule, from
+crates/holos-tda/src/lib.rs at H3: a dense input routes to the graph when
+n >= 32, the threshold is not negative, 5m <= 4 * C(n, 2), and
+24m + 24n + 8 <= max(32 MiB, C(n, 2) * 8) bytes (amendment 3; before it,
+56m <= max(32 MiB, C(n, 2) * 8 / 10)). A sparse input file is a graph
+already and needs no rule. The runner records the decision, the counts, and
+the two tests per entry, so the classification can be checked by hand.
+
+The classification is a property of the input and the frozen constants, not
+of a measurement. It does not change with a result.
+
+The derived strata use the frozen H3 routing rule, and Amendment 1 requires
+an audit of it. The runner prints the constants it used on the routing_rule
+line of the manifest. At the release freeze, when H3 is a named commit,
+compare that line against the routing rule in crates/holos-tda/src/lib.rs at
+H3. Amendment 2 records the audit. The strata are valid only when the two
+agree.
+
+Every entry falls in dense-selected or sparse-selected. The deepdim entries
+carry max_dim 3 and 4 and fall in neither maxdim stratum; they are reported
+in their input stratum and in their routing stratum.
+"""
+measures = """
+serial ratio: median H3 fresh-process wall time over median ripser wall
+time on the same file at the same threshold, one ratio per entry. Below
+1.00 means holos is faster.
+arm ratios: the same ratio for H0, H1, and H2, so the study reports where a
+gain came from and whether H3 gave any of it back.
+regression ratio: median H3 over the fastest of H0, H1, and H2 on the same
+entry.
+A/A ratio: median of the H3 copy over median H3, one per entry. It defines
+the noise band and enters no grade.
+multicore ratio: median H3 at four physical cores over median giotto-ph at
+four physical cores, over the entries with multicore = true.
+CPU scaling: H3 and giotto-ph wall time at 1, 2, and 4 physical cores, the
+self-speedup of each product against its own 1-core time, and the ratio
+between the two products at each point. H2 runs at four cores as well, as
+the attribution diagnostic.
+f64 diagnostic: median H3 over median ripser-f64, in a table of its own.
+peak RSS: the largest VmHWM of the timed runs of each arm and competitor,
+by entry. The memory stratum reads it; no grade does.
+stratum medians: the median ratio inside each input stratum and inside each
+grading stratum, with the entry count. They are reported before any overall
+median, and an overall median never stands alone.
+"""
+cost_note = """
+Sizes are at or above the engineering landing set and are capped by the
+rule that no single timed run should take about 30 seconds. They were
+chosen from the disclosed tuning-set timings and the cost model of the
+engineering corpus, with no probe of this corpus: nothing here has been
+run.
+
+An entry runs one warm-up plus the rotated timed repetitions for every
+command it carries: four holos arms, the A/A copy, one ripser build, and
+the f64 diagnostic when its binary is given. That is seven commands, so a
+repetition count of seven, and 56 runs an entry. The entries with
+multicore = true add two more commands at four cores. A scaling entry adds
+three core points of two products plus the attribution arm.
+
+Input generation is Python and untimed. It is O(n^2) for a cloud and for a
+kNN graph, and O(n * param) for the other generators, so the kNN and the
+large cloud entries cost minutes of generation before anything is timed.
+The whole study is meant to fit a few hours on the pinned set.
+
+NS_ONLY takes a comma-separated list of globs over entry ids, so one
+stratum can be rerun by hand. A filtered run is recorded as filtered and
+grades nothing.
+"""
+entry_fields = """
+Every entry carries id, stratum, input, n, max_dim, tau, modulus, seed,
+headline, and competitor. The rest depend on input.
+
+input = "cloud"   family and coord_dim name the cloud. The runner writes
+                  both a lower-distance file and a triplet file from the
+                  same distances, and the products read the
+                  lower-distance file.
+input = "graph"   generator and param name the graph. The runner writes a
+                  triplet file only, and the products read it.
+collapse = true   the runner reduces the entry's graph once with the
+                  certified serial edge collapse, untimed, and every
+                  product then reads the reduced graph. The barcode does
+                  not change.
+multicore         false keeps the entry out of the multicore pass. The
+                  odd-prime entries and the memory entry carry false: the
+                  giotto-ph arm is registered at coefficients in Z/2, and
+                  the memory entry measures RSS.
+headline          true marks an entry whose ratio enters the overall
+                  median. Every entry enters its input stratum and its
+                  grading strata, headline or not. The all-equal probe, the
+                  near-clique probe, and the memory entry carry false: they
+                  test a code path rather than a regime the engine meets in
+                  practice.
+competitor        "ripser" is the stock f32 build, "ripser-coeff" the
+                  odd-prime build, "none" no external arm. An entry whose
+                  competitor binary is not given runs its holos arms, is
+                  recorded, and carries no ratio.
+"""
+validity_rule = """
+Frozen by Amendment 1. A complete study is one whole registered run, and
+only a complete study grades anything. The manifest writes study_valid=yes
+for a complete study and study_valid=no with the reasons for anything else.
+A complete study needs all of:
+
+  clean tree      the worktree has no uncommitted change, so no ALLOW_DIRTY
+  frozen corpus   version 1 or later, so no ALLOW_DRAFT, and the same
+                  sha256 before generation and before the first timed run
+  frozen arms     the arms of [meta.arm_commits], none of them "unset" and
+                  none of them replaced by hand through HOLOS_ARMS
+  competitors     every build [meta.required_competitors] requires
+  giotto-ph       importable at the registered version, so no ALLOW_NO_GPH
+                  and no ALLOW_ANY_GPH_VERSION
+  topology        the pinning lists and the controller CPU verified against
+                  the machine, so no ALLOW_ANY_TOPOLOGY
+  full corpus     every entry of the corpus ran, so no NS_ONLY filter
+  no void entry   every entry kept its agreement pass and every command
+                  exited zero
+
+The manifest lists every reason it found, not only the first one.
+"""
+discipline = """
+Version 0 is a draft and carries no amendments: a draft is edited in place,
+and only before the freeze. From the version 1 freeze on, every change adds
+a numbered entry to [meta.amendments], dated, saying what it changes and
+what it leaves alone. The version stays at the freeze version, and the
+amendment number counts the changes. No entry, size, seed, threshold,
+thread count, or rule changes in response to a result. The corpus of the
+ordered collapse study, benchmarks/collapse_corpus_v06.toml, is the model.
+
+The runner hashes this file before it generates the first input and again
+before it times the first run, and refuses to continue if the two differ.
+The manifest records the hash it ran under.
+"""
+
+[meta.pinning]
+physical_cores = 4
+cores_1 = "0"
+cores_2 = "0,2"
+cores_4 = "0,2,12,14"
+controller_cpu = 8
+
+# Which competitor builds a complete study needs. "if-odd-prime" requires
+# the build when an entry of this corpus names an odd modulus.
+[meta.required_competitors]
+ripser = true
+ripser_coeff = "if-odd-prime"
+ripser_f64 = false
+
+[meta.arm_commits]
+h0 = "9262d24"
+h1 = "2acd8d4"
+h2 = "0f10383"
+h3 = "@"
+
+[meta.scaling]
+threads = [1, 2, 4]
+attribution_arm = "h2"
+attribution_threads = 4
+
+[meta.competitor_versions]
+gph_version = "0.2.4"
+
+[meta.noise]
+short_run_s = 0.020
+entry_slack = 0.05
+band_percentile = 95
+
+[[meta.amendments]]
+number = 1
+date = "2026-08-18"
+title = "the design reviewer's ratification amendment"
+text = """
+Ratification, 2026-08-18: I ratify the registered north-star study subject
+to numbered Amendment 1 before any registered timing. A ratio whose
+denominator is under 20 ms is descriptive and enters no pass/fail median,
+per-entry clause, regression aggregate, or A/A band. The measurement
+controller runs outside every timed physical core. A complete study is valid
+only from a clean, unfiltered run with the frozen corpus and arms, every
+required competitor, the registered giotto-ph version, verified topology,
+and no void entry. The runner's derived routing strata must match frozen H3.
+With these amendments, the remaining protocol is ratified as written.
+"""
+changes = """
+It changes four rule texts and adds a fifth. In noise_rule the 20 ms floor
+now covers the denominator of every graded ratio, and every median is taken
+over graded entries only. In pinning_rule the measurement controller runs on
+a logical CPU outside every timed physical core, and the runner checks that
+placement and the one logical CPU per physical core assumption against the
+machine. In grading_strata the runner prints the routing constants it used,
+for Amendment 2 to audit against H3. In competitors the corpus says which
+builds a complete study needs. validity_rule is the new one, and it names
+what study_valid=yes requires.
+
+It adds controller_cpu to [meta.pinning] and the whole of
+[meta.required_competitors]. It changes no entry, size, seed, threshold,
+thread count, arm, competitor, measure, or grade threshold. It was written
+before any registered timing.
+
+The next amendment, number 2, fills arm_commits.h2 and arm_commits.h3 at the
+release freeze and records the routing audit of the grading strata. It
+changes nothing else.
+"""
+
+[[meta.amendments]]
+number = 2
+date = "2026-08-18"
+title = "the release freeze: arms and the routing audit"
+text = """
+H2 is 0f10383, the streaming enumerator commit 2acd8d4 with the routing
+commit 71bf5f1 cherry-picked onto it (tag h2-arm; the benchmark-file
+conflicts of that pick were resolved to the routing commit's side, and no
+library file conflicted). H3 is 83276b2, the last engine commit before this
+amendment. Both are on the public history at the release.
+
+Routing audit. crates/holos-tda/src/lib.rs at 83276b2 routes a dense input
+to the sparse engine when n >= N_MIN = 32, the threshold is at or above
+zero, RHO_MAX_DEN * m <= RHO_MAX_NUM * C(n, 2) with 4/5 (that is 5 m <= 4
+C(n, 2)), and CONVERSION_BYTES_PER_EDGE * m = 56 m is at most the larger of
+MIN_CONVERSION_BYTES = 32 MiB and C(n, 2) * 8 / 10. The runner's
+route_decision uses the same three tests with the same constants and calls
+every sparse input sparse-selected. Every entry of this corpus has a
+threshold, so the sign test always passes. The audit found no difference.
+"""
+changes = """
+It fills arm_commits.h2 and arm_commits.h3 and records the routing audit.
+It changes nothing else, and it was written before any registered timing.
+"""
+
+[[meta.amendments]]
+number = 3
+date = "2026-08-19"
+title = "run 1 revealed; the routing memory clause fixed; H3 moved"
+text = """
+The study ran once at H3 = 83276b2 on 2026-08-18 (local/records/
+north_star_run1_revealed/, study_valid=yes, every clause passed). Its CPU
+scaling table showed s-cube-d1-t03-n6000 running the dense engine at 2.2
+times giotto-ph's wall at one core: the routing memory clause of that H3,
+56 bytes an edge against the larger of 32 MiB and a tenth of the matrix,
+refused a graph of 896,373 edges on a matrix of 144 MB. The design reviewer
+ratified reopening the freeze for that clause alone. At f930439 the
+conversion is counted as it is built (24 bytes an edge, 24 a point, and 8)
+against the larger of 32 MiB and the bytes of the compact matrix; nothing
+else changed. H3 is f930439. H0, H1, and H2 stay.
+
+Because run 1 revealed this corpus, a rerun on it is a paired audit and not
+a held-out study. Public competitive claims come from the confirmation
+corpus benchmarks/north_star_confirm_corpus.toml, which repeats every entry
+of this corpus with new seeds and the same rules, arms, and thresholds. Run
+1's records are archived beside the release as the revealed run.
+"""
+changes = """
+It fills arm_commits.h3 with f930439, updates the routing rule text of
+grading_strata to the memory clause at f930439, and names the confirmation
+corpus. It changes nothing else.
+"""
+
+[[meta.amendments]]
+number = 4
+date = "2026-08-19"
+title = "H3 is the release commit"
+text = """
+H3 is 6c63c98, the 0.6.0 release commit. Its library code is that of
+f930439; the commit changes the crate versions to 0.6.0 and the changelog
+heading and nothing else, so the binary reports version 0.6.0. The
+confirmation corpus ran once at f930439 (archived as the first
+confirmation run, superseded) and runs again at 6c63c98 for the record the
+release cites. Nothing else changes.
+"""
+changes = """
+It fills arm_commits.h3 with 6c63c98. It changes nothing else.
+"""
+
+[[meta.amendments]]
+number = 5
+date = "2026-08-26"
+title = "H3 resolves to the squashed public release commit"
+text = """
+The public 0.6.0 history is one commit on public 0.5.0. The internal H1 and
+H2 attribution commits remain local. H3 is now `@`, which the runner resolves
+to the clean commit checked out for the release record. Its production source
+is the source measured at 6c63c98. The public commit also contains release
+documentation and an MSRV-compatible test helper. No corpus entry, arm
+configuration, threshold, seed, timing rule, routing rule, or grade changes.
+"""
+changes = """
+It replaces arm_commits.h3 with `@`. The runner records the exact checked-out
+commit and refuses a dirty release record. It changes nothing else.
+"""
+
+[[entry]]
+id = "n-cube-t10-n560"
+stratum = "baseline"
+input = "cloud"
+family = "cube"
+n = 560
+coord_dim = 3
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 9901
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-cube-t08-n640"
+stratum = "baseline"
+input = "cloud"
+family = "cube"
+n = 640
+coord_dim = 3
+max_dim = 1
+tau = 0.8
+modulus = 2
+seed = 9901
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-cube-t06-n2400"
+stratum = "baseline"
+input = "cloud"
+family = "cube"
+n = 2400
+coord_dim = 3
+max_dim = 1
+tau = 0.6
+modulus = 2
+seed = 9901
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-cube-t05-n1400"
+stratum = "baseline"
+input = "cloud"
+family = "cube"
+n = 1400
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 2
+seed = 9901
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-cube-t03-n3200"
+stratum = "baseline"
+input = "cloud"
+family = "cube"
+n = 3200
+coord_dim = 3
+max_dim = 1
+tau = 0.3
+modulus = 2
+seed = 9901
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-torus-t03-n2200"
+stratum = "baseline"
+input = "cloud"
+family = "torus"
+n = 2200
+coord_dim = 3
+max_dim = 1
+tau = 0.3
+modulus = 2
+seed = 9905
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-clusters-t05-n1300"
+stratum = "baseline"
+input = "cloud"
+family = "clusters"
+n = 1300
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 2
+seed = 9907
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-cube-d2-t03-n700"
+stratum = "baseline"
+input = "cloud"
+family = "cube"
+n = 700
+coord_dim = 3
+max_dim = 2
+tau = 0.3
+modulus = 2
+seed = 9901
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-sphere-d2-t04-n900"
+stratum = "baseline"
+input = "cloud"
+family = "sphere"
+n = 900
+coord_dim = 3
+max_dim = 2
+tau = 0.4
+modulus = 2
+seed = 9903
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-knn-k08-n3800"
+stratum = "knn"
+input = "graph"
+generator = "knn"
+n = 3800
+param = 8
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 9909
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-knn-k30-n3800"
+stratum = "knn"
+input = "graph"
+generator = "knn"
+n = 3800
+param = 30
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 9909
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-knn-d2-k08-n1500"
+stratum = "knn"
+input = "graph"
+generator = "knn"
+n = 1500
+param = 8
+max_dim = 2
+tau = 1.0
+modulus = 2
+seed = 9909
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-low-t005-n2400"
+stratum = "lowthresh"
+input = "cloud"
+family = "cube"
+n = 2400
+coord_dim = 3
+max_dim = 1
+tau = 0.05
+modulus = 2
+seed = 9911
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-low-forest-n36000"
+stratum = "lowthresh"
+input = "graph"
+generator = "forest"
+n = 36000
+param = 50
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 9913
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-quant-lattice-n700"
+stratum = "quantized"
+input = "cloud"
+family = "lattice"
+n = 700
+coord_dim = 3
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 9915
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-quant-dup-n720"
+stratum = "quantized"
+input = "cloud"
+family = "duplicate"
+n = 720
+coord_dim = 3
+max_dim = 1
+tau = 0.6
+modulus = 2
+seed = 9917
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-quant-equal-n150"
+stratum = "quantized"
+input = "cloud"
+family = "equal"
+n = 150
+coord_dim = 3
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 9919
+headline = false
+competitor = "ripser"
+multicore = false
+
+[[entry]]
+id = "n-skew-powerlaw-n18000"
+stratum = "skewed"
+input = "graph"
+generator = "powerlaw"
+n = 18000
+param = 3
+max_dim = 1
+tau = 0.8
+modulus = 2
+seed = 9921
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-skew-block-n18000"
+stratum = "skewed"
+input = "graph"
+generator = "block"
+n = 18000
+param = 12
+max_dim = 1
+tau = 0.9
+modulus = 2
+seed = 9923
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-clique-clusters-n700"
+stratum = "nearclique"
+input = "cloud"
+family = "clusters"
+n = 700
+coord_dim = 3
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 9925
+headline = false
+competitor = "ripser"
+
+[[entry]]
+id = "n-emb-d8-n1100"
+stratum = "embedding"
+input = "cloud"
+family = "cube"
+n = 1100
+coord_dim = 8
+max_dim = 1
+tau = 0.8
+modulus = 2
+seed = 9927
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-emb-d32-n760"
+stratum = "embedding"
+input = "cloud"
+family = "cube"
+n = 760
+coord_dim = 32
+max_dim = 1
+tau = 0.95
+modulus = 2
+seed = 9929
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-emb-d128-n420"
+stratum = "embedding"
+input = "cloud"
+family = "cube"
+n = 420
+coord_dim = 128
+max_dim = 1
+tau = 0.95
+modulus = 2
+seed = 9931
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-emb-d2-d8-n420"
+stratum = "embedding"
+input = "cloud"
+family = "cube"
+n = 420
+coord_dim = 8
+max_dim = 2
+tau = 0.6
+modulus = 2
+seed = 9927
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-nonmetric-t07-n1200"
+stratum = "nonmetric"
+input = "graph"
+generator = "nonmetric"
+n = 1200
+param = 5
+max_dim = 1
+tau = 0.7
+modulus = 2
+seed = 9933
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-dim3-cube-n240"
+stratum = "deepdim"
+input = "cloud"
+family = "cube"
+n = 240
+coord_dim = 3
+max_dim = 3
+tau = 0.6
+modulus = 2
+seed = 9935
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-dim4-cube-n150"
+stratum = "deepdim"
+input = "cloud"
+family = "cube"
+n = 150
+coord_dim = 3
+max_dim = 4
+tau = 0.5
+modulus = 2
+seed = 9935
+headline = true
+competitor = "ripser"
+
+[[entry]]
+id = "n-prime3-cube-n1100"
+stratum = "oddprime"
+input = "cloud"
+family = "cube"
+n = 1100
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 3
+seed = 9937
+headline = true
+competitor = "ripser-coeff"
+multicore = false
+
+[[entry]]
+id = "n-prime5-torus-n1200"
+stratum = "oddprime"
+input = "cloud"
+family = "torus"
+n = 1200
+coord_dim = 3
+max_dim = 1
+tau = 0.4
+modulus = 5
+seed = 9939
+headline = true
+competitor = "ripser-coeff"
+multicore = false
+
+[[entry]]
+id = "n-collapse-cube-n1100"
+stratum = "collapsed"
+input = "cloud"
+family = "cube"
+n = 1100
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 2
+seed = 9941
+headline = true
+competitor = "ripser"
+collapse = true
+
+[[entry]]
+id = "n-memory-block-n2400"
+stratum = "memory"
+input = "graph"
+generator = "block"
+n = 2400
+param = 8
+max_dim = 1
+tau = 1.0
+modulus = 2
+seed = 9943
+headline = false
+competitor = "ripser"
+multicore = false
+
+[[scaling]]
+id = "s-cube-d1-t03-n6000"
+input = "cloud"
+family = "cube"
+n = 6000
+coord_dim = 3
+max_dim = 1
+tau = 0.3
+modulus = 2
+seed = 9945
+
+[[scaling]]
+id = "s-cube-d1-t05-n3000"
+input = "cloud"
+family = "cube"
+n = 3000
+coord_dim = 3
+max_dim = 1
+tau = 0.5
+modulus = 2
+seed = 9945
+
+[[scaling]]
+id = "s-torus-d2-t025-n2400"
+input = "cloud"
+family = "torus"
+n = 2400
+coord_dim = 3
+max_dim = 2
+tau = 0.25
+modulus = 2
+seed = 9947
+
+[[scaling]]
+id = "s-knn-d2-k15-n6000"
+input = "graph"
+generator = "knn"
+n = 6000
+param = 15
+max_dim = 2
+tau = 1.0
+modulus = 2
+seed = 9949

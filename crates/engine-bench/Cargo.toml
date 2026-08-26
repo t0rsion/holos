@@ -1,5 +1,5 @@
 [package]
-name = "collapse-bench"
+name = "engine-bench"
 version = "0.6.0"
 edition = "2021"
 rust-version = "1.85"

@@ -163,8 +163,6 @@ fn from_triplets_rejects_invalid_input() {
     assert_eq!(ok.num_edges(), 1);
 }
 
-// Differential against ripser's sparse format.
-
 fn ripser_bin() -> Option<String> {
     match std::env::var("RIPSER_BIN") {
         Ok(path) if !path.is_empty() => Some(path),

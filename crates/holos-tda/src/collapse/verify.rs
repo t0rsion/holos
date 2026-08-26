@@ -1,9 +1,8 @@
 //! Independent checker for [`CollapseCertificate`].
 //!
 //! The checker re-derives the thresholded input and replays every
-//! recorded removal against the spec text. It shares no sweep,
-//! scheduling, or witness-selection code with the collapser. It is slow
-//! by design: its job is to catch a wrong collapse.
+//! recorded removal. It shares no sweep, scheduling, or witness-selection
+//! code with the collapser. It is slow by design.
 //!
 //! The checker dispatches on the certificate's algorithm version.
 //! Version 1 replays the serial schedule: each step is checked against
@@ -21,7 +20,7 @@
 //!   value, and at every critical value of the reference graph the
 //!   active witness apex satisfies the domination inequalities. The
 //!   reference graph is the current replay state for version 1 and the
-//!   pre-round snapshot for version 2. Every witness segment starts at
+//!   pre-round graph for version 2. Every witness segment starts at
 //!   an independently recomputed critical value at or below the terminal
 //!   level, so every segment is the active segment at its own start and
 //!   no segment escapes the apex check.
@@ -36,22 +35,20 @@
 //!   index of the endpoint pair.
 //! - Round independence, version 2 only: for every ordered pair of steps
 //!   in one round, the closed common neighborhood of the first edge,
-//!   taken in the snapshot, does not contain both endpoints of the
-//!   second. A round that groups conflicting removals is rejected even
-//!   when replaying its steps one after the other would succeed.
+//!   taken in the pre-round graph, does not contain both endpoints of
+//!   the second. A round that groups conflicting removals is rejected
+//!   even when replaying its steps one after the other would succeed.
 //! - Output and fixed point: after the last step the live edges equal the
 //!   output matrix bit for bit, and no live edge is still removable.
 //!
-//! The checker does not certify schedule completeness, in either
-//! version. Every recorded step is checked, but nothing proves the
-//! schedule visited every edge: a certificate may skip a removable edge,
-//! remove it later than the frozen schedule would, or leave it out
-//! entirely as long as the final graph is a fixed point. For version 2
-//! nothing proves a round is a greedy-maximal batch either. Removing a
-//! different safe subset in a different order or grouping therefore
-//! verifies. Only a full re-run establishes the canonical production
-//! trace; the test suite does that by comparing production certificates
-//! against unpruned reference collapsers.
+//! The checker does not certify schedule completeness in either version.
+//! Every recorded step is checked, but nothing proves the schedule
+//! visited every edge: a certificate may skip a removable edge, remove it
+//! later than the frozen schedule would, or leave it out entirely as long
+//! as the final graph is a fixed point. For version 2 nothing proves a
+//! round is a greedy-maximal batch either. Only a full re-run establishes
+//! the canonical production trace; the test suite does that by comparing
+//! production certificates against unpruned reference collapsers.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -212,8 +209,8 @@ fn vertex_dominates(
         .all(|&(x, _)| edge_value(adj, w, x) <= t)
 }
 
-/// The section 2 predicate, evaluated directly: true when at every
-/// critical value some candidate dominates the edge.
+/// True when at every critical value some candidate dominates the edge.
+/// Evaluated from the graph, not from recorded witnesses.
 fn edge_removable(adj: &[BTreeMap<usize, f64>], u: usize, v: usize, a: f64, terminal: f64) -> bool {
     let cands = candidates(adj, u, v, a, terminal);
     critical_values(a, &cands).iter().all(|&t| {
@@ -494,9 +491,8 @@ fn in_closed_common(adj: &[BTreeMap<usize, f64>], u: usize, v: usize, x: usize) 
     near_u && near_v
 }
 
-/// Replay a version 2 certificate: snapshot rounds. Each round is checked
-/// in full against the pre-round graph; deletions apply only after the
-/// whole round passes.
+/// Replay a version 2 certificate. Each round is checked in full against
+/// the pre-round graph; deletions apply only after the whole round passes.
 fn replay_rounds(
     adj: &mut [BTreeMap<usize, f64>],
     n: usize,
@@ -570,11 +566,11 @@ fn replay_rounds(
             check_live_value(adj, k, u, v, a)?;
         }
 
-        // Independence: no other removal of the round may have both
-        // endpoints in the closed common neighborhood of this one. The
-        // check walks each neighborhood instead of every pair of steps, so
-        // a wide round of small neighborhoods costs the sum of the
-        // neighborhood sizes squared, not the round width squared.
+        // No other removal of the round may have both endpoints in the
+        // closed common neighborhood of this one. The check walks each
+        // neighborhood instead of every pair of steps, so a wide round of
+        // small neighborhoods costs the sum of the neighborhood sizes
+        // squared, not the round width squared.
         let in_round: BTreeMap<(usize, usize), usize> = round_steps
             .iter()
             .enumerate()
@@ -1313,7 +1309,7 @@ mod tests {
     /// Hand-derived version 2 result for the two disjoint K4s. Round 1
     /// removes (0, 1) and (4, 5); each blocks every other edge of its own
     /// component. Round 2 removes (0, 2), (1, 2), (4, 6), (5, 6): in each
-    /// round 2 snapshot the surviving hub (3 or 7) is the only candidate,
+    /// round 2 graph the surviving hub (3 or 7) is the only candidate,
     /// and the two selected edges do not conflict. The stars at vertices
     /// 3 and 7 remain and no further edge is removable.
     fn two_k4_v2_result() -> CollapsedRips {
@@ -1399,7 +1395,7 @@ mod tests {
     #[test]
     fn rejects_witnesses_valid_only_after_earlier_step() {
         // Step 1 records apex 3 for (1, 2). The frozen rule selects 3
-        // only after (0, 1) is gone; against the round snapshot the apex
+        // only after (0, 1) is gone; against the pre-round graph the apex
         // is vertex 0, so a verifier that mutates between steps would
         // accept this pair. Any such in-round dependence puts both
         // endpoints of (1, 2) inside S((0, 1)), so the nonconflict check
@@ -1414,7 +1410,7 @@ mod tests {
     fn rejects_witnesses_from_stale_snapshot() {
         // Round 2 records apex 1 for (0, 2). Vertex 1 was the frozen
         // choice in the round 1 graph, but round 1 deleted (0, 1), so in
-        // the round 2 snapshot vertex 1 is no longer a common neighbor.
+        // the round 2 graph vertex 1 is no longer a common neighbor.
         let mut result = two_k4_v2_result();
         result.certificate.steps[2].witnesses = vec![(1.0, 1)];
         let err = verify_dense(&two_k4_dense(), None, &result).unwrap_err();

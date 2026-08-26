@@ -4,6 +4,235 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-26
+
+### Performance
+
+On the registered confirmation corpus
+(`benchmarks/north_star_confirm_corpus.toml`, 31 entries with seeds disjoint
+from every tuning and landing set), on one physical core of an i9-13900KS,
+holos took a median 0.36 to 0.39 of the corresponding ripser build's wall
+time over 24 graded headline entries; the largest ratio over all 25 graded
+entries was 0.65 to 0.67. An entry whose ripser wall time is under 20 ms is
+reported but not graded. By stratum: sparse-selected 0.36 to 0.38 over 25
+entries, maxdim-1 0.35 to 0.41 over 20 entries, maxdim-2 0.31 over 3
+entries; the dense-selected stratum had one descriptive entry and no graded
+entry, because with the routing rule every dense input of the corpus above
+the floor routes to the sparse engine. Public 0.5.0 took a median 1.33 to
+1.35 of ripser over the same entries.
+
+At four physical cores without SMT, holos's fresh-process wall time was a
+median 0.34 to 0.37 of giotto-ph 0.2.4's in-process `ripser_parallel` time
+over 17 to 18 graded headline entries; the largest ratio over all 18 to 19
+graded entries was 0.58 to 0.67. The giotto-ph clock excludes process start
+and input parsing, which holos includes, so the comparison favors giotto-ph.
+On the CPU scaling entries holos ran 1.9 to 2.1 times faster at four cores
+than at one.
+
+The matched-precision f64 ripser build is a diagnostic reported in its own
+table (29 entries against ripser-f64 and 2 against ripser-coeff-f64), never
+pooled with the stock arm. The records report the A/A control for each timed
+pass.
+
+The records behind these numbers are attached to the release: the clean
+confirmation reproductions (range source), the revealed first run on the
+original corpus (superseded), and the engineering landing matrix and tuning
+records (evidence, not claims).
+
+### Added
+
+- Engine routing for dense input. `RipsParams::engine`,
+  `RipsParams::with_engine`, and `holos --engine auto|dense|sparse` pick the
+  engine a dense matrix reduces through. `Engine::Auto` is the default, and
+  the Python bindings use it. It converts the matrix to the graph of its
+  edges at the resolved threshold when the input has at least 32 points, the
+  edge density is at or below four fifths, and the conversion (24 bytes an
+  edge and 24 a point) fits a memory budget of 32 MiB or the bytes of the
+  compact matrix, whichever is larger.
+  `Engine::Dense` keeps the matrix. `Engine::Sparse` converts and ignores
+  the budget, because it is an explicit request. An infinite threshold
+  routes as well, including the default threshold of a disconnected input:
+  such a threshold admits every finite pair and no absent one, so a matrix
+  of mostly absent pairs still has a sparse graph. The rule and its
+  constants are frozen. The diagram is identical under every setting.
+- A storage form for a dense run. `RipsParams::dense_storage`,
+  `RipsParams::with_dense_storage`, and `holos --dense-storage
+  auto|compact|square` pick the form the dense engine reduces from. holos
+  builds every `DistanceMatrix` compact, as the condensed lower triangle.
+  `DenseStorage::Auto` is the default and converts to a full row-major
+  matrix, which holds both triangles, when a frozen rule reads the compact
+  matrix size, a budget on the bytes the second triangle adds, the edge
+  count at the resolved threshold, and the distances the cofacet diameter
+  fold will read. The full form makes the fold read one contiguous row per
+  simplex vertex where the compact form reads a strided column.
+  `DenseStorage::Compact` forbids the conversion and `DenseStorage::Square`
+  forces it. The choice comes after routing, so a run the routing sends to
+  the sparse engine builds no full matrix. The conversion runs once and the
+  caller keeps its own matrix, so a run in the full form holds one and a
+  half times that form. The diagram is identical under every setting.
+- `RipsParams::use_adjacency_rows` and the hidden `--no-adjacency-rows`
+  flag, which turn the adjacency rows off for differential tests. They join
+  `use_emergent_pairs`, `use_apparent_pairs`, and `use_clearing` as
+  optimization toggles that must not change a diagram.
+- `io::parse_point_cloud`, `io::parse_condensed`, and `io::parse_triplets`
+  parse text a caller already holds, in the grammar the matching reader
+  accepts. `io::Triplet` names the `(usize, usize, f64)` a sparse parse
+  returns.
+
+### Changed
+
+- `io::read_point_cloud`, `io::read_lower_distance_matrix`, and
+  `io::read_sparse_matrix` take a worker budget as a second argument. Pass 1
+  for the previous behavior. There is no alias for the old signature.
+- `holos --threads` covers the input parse as well as the reduction and the
+  collapse. `RipsParams::threads` is unchanged, and the CLI passes it to the
+  reader.
+- Treat `RipsParams::threads` as the worker budget for a run: the most
+  workers it may use, not the number every step must use. The edge sort, the
+  dim-0 apparent test, the cofacet assembly, and the column reduction each
+  turn their own work estimate into a worker count under that budget, and a
+  step with little work runs on one thread. The thresholds are frozen
+  constants, and a test pins the decisions they produce: the dim-0 apparent
+  test takes a second worker at 128 cycle edges, the assembly at 256 source
+  simplices, and the sort at 20,000 elements. The diagram does not change at
+  any worker count.
+- Store the sparse engine's neighbor lists in one compressed block: one
+  offset per vertex, one array of neighbor indices, and one array of
+  distances, in place of one vector of (vertex, distance) pairs per vertex.
+  The cofacet merge scans the index array and reads a distance only on a
+  match, so it touches a quarter of the bytes it did, and a routed dense
+  input builds the block directly without a triplet buffer. Every list keeps
+  its order, entry for entry.
+- Run the dim-0 apparent test on adjacency rows when the graph is dense
+  enough for them. The rows hold one bit per pair at or below the threshold,
+  with a rank index that reads any edge's distance in constant time. The
+  dim-0 walk then sets a second bit set, the activation rows, as it passes
+  each edge, so for a cycle edge the largest common bit of its two
+  activation rows names the youngest cofacet of equal diameter, and the
+  facet check reads at most two distances. The engine builds the rows only
+  when the graph has at least 1,024 cycle edges and the adjacency rows,
+  their rank index, the activation rows, and the distances together cost at
+  most 64 bytes an edge, which is about what the graph itself costs. A
+  sparser graph keeps the neighbor-list test. The columns, their order, and
+  the diagram do not change at any worker count.
+- Read an input file in windows of 16 MiB that end at a newline. A reader
+  parses one window at a time, so it holds one window and the parsed values,
+  not the whole text, and the first window is sized by the length the file
+  reports. With more than one thread, a second thread reads the next window
+  while the current one parses. Values, line numbers, and error messages do
+  not change.
+- Parse input text in line chunks under the worker budget. With more than
+  one thread and a text of at least one mebibyte, a window splits into one
+  line chunk per worker at newline boundaries, each chunk parses with the
+  serial per-line code, and the chunk outputs concatenate in file order.
+  Each chunk knows the line number it starts at, so the values are the same
+  bit for bit and an error names the same line with the same text as a
+  serial parse. A file that holds all its numbers on one line stays serial,
+  because a chunk ends at a newline.
+- Scan input text by bytes and parse each number in place. The readers
+  accept the grammar they accepted before, comma or whitespace separators
+  and `#` comment lines, and produce the same values bit for bit. A line
+  with a non-ASCII byte takes the previous path.
+- Enumerate the sparse engine's cofacets by a descending merge of the
+  neighbor lists and report each one as the merge finds it, so a search that
+  stops early stops the merge with it. When the caller asks for the upper
+  cofacets alone, the merge ends at the highest simplex vertex: no candidate
+  at or below that vertex is above every simplex vertex, and the candidates
+  descend, so one search of the driver's neighbor list finds where the merge
+  stops.
+- Stop a cofacet's diameter fold at the first distance above the caller's
+  bound. Two callers hold a bound: the apparent-pair test wants a cofacet
+  whose diameter equals its simplex's, and the assembly and the coboundary
+  keep only what the threshold admits. The dense and the sparse enumerator
+  each share one walk between the bounded and the unbounded form, and the
+  unbounded form carries no bound test. A sparse source knows its largest
+  stored distance, so a threshold at or above that distance raises the bound
+  to infinity and leaves a test the walk always passes.
+- Take the repeated work out of the apparent-pair tests. The cofacet
+  enumerator reports the vertex it adds, so a caller builds the partner's
+  vertex set from the set it holds instead of decoding the partner's index
+  again. One classifier answers both directions of the test and writes only
+  into buffers its caller owns, so a test allocates nothing. The
+  zero-apparent back-check keeps a simplex's pairwise distances in one
+  table, adds the distance from the added vertex to each simplex vertex, and
+  reads every facet diameter as a maximum over that table; each facet index
+  comes from the vertices by the combinadic identity `idx_below - C(v_k,
+  k+1) + idx_above`, so the walk runs no binary search. With the added
+  vertex above every simplex vertex the back-check answers without reading
+  anything. The facet order, the tie rules, and the diameter comparisons are
+  unchanged, so the apparent pairs are the same.
+- Decode an edge index without the general search. `BinomialTable::unrank`
+  takes a shortcut at dimension 1, through the new
+  `BinomialTable::unrank_edge`. The upper vertex is the largest `v` with
+  C(`v`, 2) at or below the index, which one integer square root gives
+  exactly, and the lower vertex is what the index has left. The reduction
+  decodes an edge for every dim-1 column and for every edge of the dim-0
+  pass, so the two binomial searches this replaces sat in its innermost
+  loops. The vertices are the same at every index.
+- Order the reduction's sorts and heaps by packed integer keys. A diameter
+  here is a maximum of validated distances, finite and not negative, so its
+  bits order as a `u64` exactly as `f64::total_cmp` orders the value. The
+  dim-0 edge sort now runs on `u128` keys that carry the diameter bits above
+  the complemented index, and the walk decodes each key back to its edge. A
+  working column's heap entry is the single 128-bit key its order sorts by,
+  the complement of the diameter bits over the packed index and coefficient,
+  so ordering the heap costs one integer comparison. Both keys are
+  bijections, and the threshold test carries `+inf` as `f64::MAX`, so one
+  comparison decides membership. The orders and the pops are the ones the
+  two-field comparators gave.
+- Order a working column with one heapify. The reduction collects the
+  column's cofacets first, then orders them all at once, where it sifted
+  each cofacet into the heap as it arrived. The cofacets go into the vector
+  the heap already owns, so a column allocates nothing the previous column
+  did not. The pivots, the pops, and their coefficients do not change.
+- Multiply a cofacet's boundary sign into its coefficient without dividing.
+  The sign is 1 or p - 1, so `Coeffs::mul_sign` returns the coefficient or p
+  minus the coefficient, and `Fp::neg` subtracts instead of taking a
+  remainder. `Fp::mul` still divides for the general product, and the
+  coefficients are unchanged.
+- Store the binomial table k-major, the layout ripser uses. The cofacet and
+  facet enumerators hold `k` fixed and step the vertex down by one, so
+  consecutive lookups are now neighbors in memory and the stride no longer
+  grows with the highest dimension.
+- Reserve the serial reducer's pivot map for the columns of the dimension,
+  and sort the serial assembly's columns with an unstable sort. The keys are
+  (diameter, index) pairs, unique inside a dimension, so a stable sort buys
+  nothing and its scratch buffer costs an allocation.
+- Pair an emergent pivot on the serial path without testing it again. The
+  coboundary scan takes the emergent shortcut only after it proves that no
+  column holds the pivot and that the pivot has no zero-apparent facet. The
+  serial reducer owns its pivot map, so it now records the pair at once. A
+  parallel worker shares its map with the other workers and still repeats
+  both tests.
+- Classify dim-0 apparent cofacets in parallel. The union-find walk stays
+  serial and keeps the cycle edges it finds. Workers then take blocks of
+  those edges and test each one against the frozen distances, into one
+  result slot per edge. On the activation rows the worker count also picks
+  the shape of the walk: one worker takes one diameter group at a time, and
+  more than one takes a block of 8,192 sorted edges, decodes the block on
+  the pool, and tests the block's cycle edges on the pool. The columns
+  follow in walk order, so the diagram and the column order do not depend on
+  the worker count.
+- Take the busiest shared writes off the parallel reducer's per-column path.
+  A worker counts the columns it finished and subtracts them from the shared
+  outstanding count only when the queue runs dry, and the queue's three
+  counters sit on separate cache lines. A worker that finds the queue dry
+  while a column is still in flight yields a few times, then sleeps for one
+  microsecond, doubling up to 128 microseconds, instead of reading the
+  shared counters in a tight loop. A displaced column still finds a worker
+  within that time. Column priority, the claim rule, and the pivot table are
+  unchanged, so the pivot registry is the same at every worker count.
+- Count the degrees before building a sparse matrix.
+  `SparseDistanceMatrix::from_triplets` walks the triplets once to size
+  every neighbor list, so no list grows by reallocation. The lists it builds
+  are the same, entry for entry.
+- Fold the enclosing radius one row at a time. The row's own maximum stays
+  in a local until the row ends, and only the column maxima go back to
+  memory. `DistanceMatrix::enclosing_radius` returns the same value.
+- Write the diagram through a 64 KiB buffer. Standard output flushes at
+  every line, so a diagram of fifty thousand bars took fifty thousand
+  writes. It now takes a few.
+
 ## [0.5.0] - 2026-08-17
 
 ### Added
