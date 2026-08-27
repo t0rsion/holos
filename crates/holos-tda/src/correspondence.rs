@@ -346,8 +346,23 @@ fn image_intersection(
         return Ok(Vec::new());
     }
     let variables = old.len() + new.len();
-    let mut equations = vec![vec![0u64; variables]; coordinates];
     let modulus64 = modulus as u64;
+    let equations = intersection_equations(old, new, coordinates, variables, modulus64);
+    let kernel = nullspace(equations, variables, modulus64)?;
+    Ok(kernel
+        .into_iter()
+        .filter_map(|relation| intersection_relation(old, new, &relation, modulus64))
+        .collect())
+}
+
+fn intersection_equations(
+    old: &[ImageVector],
+    new: &[ImageVector],
+    coordinates: usize,
+    variables: usize,
+    modulus: u64,
+) -> Vec<Vec<u64>> {
+    let mut equations = vec![vec![0u64; variables]; coordinates];
     for (variable, vector) in old.iter().enumerate() {
         for (&coordinate, &value) in &vector.row.0 {
             equations[coordinate][variable] = value;
@@ -355,37 +370,35 @@ fn image_intersection(
     }
     for (offset, vector) in new.iter().enumerate() {
         for (&coordinate, &value) in &vector.row.0 {
-            equations[coordinate][old.len() + offset] = (modulus64 - value) % modulus64;
+            equations[coordinate][old.len() + offset] = (modulus - value) % modulus;
         }
     }
-    let kernel = nullspace(equations, variables, modulus64)?;
-    let mut output = Vec::with_capacity(kernel.len());
-    for relation in kernel {
-        let mut old_coefficients = vec![0u64; old[0].coefficients.len()];
-        for (coefficient, vector) in relation[..old.len()].iter().zip(old) {
-            add_scaled_dense(
-                &mut old_coefficients,
-                &vector.coefficients,
-                *coefficient,
-                modulus64,
-            );
-        }
-        let mut new_coefficients = vec![0u64; new[0].coefficients.len()];
-        for (coefficient, vector) in relation[old.len()..].iter().zip(new) {
-            add_scaled_dense(
-                &mut new_coefficients,
-                &vector.coefficients,
-                *coefficient,
-                modulus64,
-            );
-        }
-        if old_coefficients.iter().any(|&value| value != 0)
-            && new_coefficients.iter().any(|&value| value != 0)
-        {
-            output.push((old_coefficients, new_coefficients));
-        }
+    equations
+}
+
+fn intersection_relation(
+    old: &[ImageVector],
+    new: &[ImageVector],
+    relation: &[u64],
+    modulus: u64,
+) -> Option<(Vec<u64>, Vec<u64>)> {
+    let old_coefficients = combine_image(old, &relation[..old.len()], modulus);
+    let new_coefficients = combine_image(new, &relation[old.len()..], modulus);
+    if old_coefficients.iter().all(|&value| value == 0)
+        || new_coefficients.iter().all(|&value| value == 0)
+    {
+        None
+    } else {
+        Some((old_coefficients, new_coefficients))
     }
-    Ok(output)
+}
+
+fn combine_image(vectors: &[ImageVector], factors: &[u64], modulus: u64) -> Vec<u64> {
+    let mut coefficients = vec![0u64; vectors[0].coefficients.len()];
+    for (factor, vector) in factors.iter().zip(vectors) {
+        add_scaled_dense(&mut coefficients, &vector.coefficients, *factor, modulus);
+    }
+    coefficients
 }
 
 fn nullspace(
