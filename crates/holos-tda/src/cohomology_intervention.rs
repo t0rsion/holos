@@ -197,6 +197,51 @@ pub struct CohomologyInterventionArtifact {
     digest: [u8; 32],
 }
 
+struct InterventionHeader {
+    vertex_count: usize,
+    dimension: usize,
+    scale: f64,
+    modulus: u32,
+}
+
+struct InterventionSearchData {
+    max_edits: usize,
+    oracle_limit: usize,
+    node_limit: usize,
+    status: CohomologyInterventionStatus,
+    edit_indices: Vec<usize>,
+    lower_bound_cost: Option<u64>,
+    upper_bound_cost: Option<u64>,
+    oracle_calls: usize,
+    search_nodes: usize,
+    cache_hits: usize,
+}
+
+struct InterventionWorkLimits {
+    oracle: usize,
+    nodes: usize,
+}
+
+struct InterventionSelection {
+    status: CohomologyInterventionStatus,
+    edit_indices: Vec<usize>,
+    lower_bound_cost: Option<u64>,
+    upper_bound_cost: Option<u64>,
+}
+
+struct InterventionProducerWork {
+    oracle_calls: usize,
+    search_nodes: usize,
+    cache_hits: usize,
+}
+
+struct InterventionProofData {
+    root_blockers: Vec<Vec<usize>>,
+    root_blocker_bound: u64,
+    before_ranks: Vec<usize>,
+    after_ranks: Vec<usize>,
+}
+
 impl CohomologyInterventionArtifact {
     /// Solve one weighted intervention shared by all declared scenarios.
     #[allow(clippy::too_many_arguments)]
@@ -355,131 +400,44 @@ impl CohomologyInterventionArtifact {
 
     /// Decode and verify canonical `HOLOSCI` version 2 bytes.
     pub fn decode(bytes: &[u8], limits: CohomologyInterventionLimits) -> Result<Self> {
-        if bytes.len() > limits.max_bytes || bytes.len() < 32 {
-            return Err(Error::InvalidInput(
-                "cohomology intervention exceeds its byte limit or is truncated".into(),
-            ));
-        }
+        validate_artifact_size(bytes, limits)?;
         let mut reader = Reader::new(bytes);
-        if reader.take(8)? != MAGIC || reader.u16()? != VERSION || reader.u8()? != F64_BITS_CODEC {
-            return Err(Error::InvalidInput(
-                "unsupported cohomology intervention artifact".into(),
-            ));
-        }
-        let vertex_count = reader.usize()?;
-        let dimension = reader.usize()?;
-        let scale = f64::from_bits(reader.u64()?);
-        let modulus = reader.u32()?;
-        let scenario_count = reader.bounded_usize(
-            "scenario count",
-            limits.max_scenarios.min(FORMAT_MAX_SCENARIOS),
-        )?;
-        let mut scenarios = Vec::with_capacity(scenario_count);
-        for _ in 0..scenario_count {
-            scenarios.push(CohomologyInterventionScenario {
-                active_edges: decode_edges(&mut reader, limits.max_edges_per_scenario)?,
-                target_basis: reader.usize()?,
-            });
-        }
-        let candidate_count = reader.bounded_usize(
-            "candidate count",
-            limits.max_candidates.min(FORMAT_MAX_CANDIDATES),
-        )?;
-        if candidate_count > reader.remaining() / 24 {
-            return Err(Error::InvalidInput(
-                "cohomology intervention candidate count exceeds the remaining bytes".into(),
-            ));
-        }
-        let mut candidates = Vec::with_capacity(candidate_count);
-        for _ in 0..candidate_count {
-            candidates.push(CohomologyInterventionCandidate {
-                edge: KineticEdgeKey {
-                    u: reader.usize()?,
-                    v: reader.usize()?,
-                },
-                cost: reader.u64()?,
-            });
-        }
-        let max_edits = reader.usize()?;
-        let oracle_limit = reader.usize()?;
-        let node_limit = reader.usize()?;
-        let status = CohomologyInterventionStatus::from_code(reader.u8()?)?;
-        let edit_indices = decode_indices(&mut reader, candidate_count, candidate_count)?;
-        let edits = edit_indices
+        decode_prefix(&mut reader)?;
+        let header = decode_header(&mut reader)?;
+        let scenarios = decode_scenarios(&mut reader, limits)?;
+        let candidates = decode_candidates(&mut reader, limits)?;
+        let search = decode_search_data(&mut reader, candidates.len())?;
+        let edits = search
+            .edit_indices
             .iter()
             .map(|position| candidates[*position])
             .collect();
-        let lower_bound_cost = reader.optional_u64()?;
-        let upper_bound_cost = reader.optional_u64()?;
-        let oracle_calls = reader.usize()?;
-        let search_nodes = reader.usize()?;
-        let cache_hits = reader.usize()?;
-        let blocker_count = reader.bounded_usize(
-            "root blocker count",
-            limits.max_proof_terms.min(FORMAT_MAX_PROOF_TERMS),
-        )?;
-        let mut root_blockers = Vec::with_capacity(blocker_count);
-        let mut proof_terms = 0usize;
-        for _ in 0..blocker_count {
-            let blocker = decode_indices(
-                &mut reader,
-                candidate_count,
-                limits.max_proof_terms.min(FORMAT_MAX_PROOF_TERMS),
-            )?;
-            proof_terms = proof_terms.checked_add(blocker.len()).ok_or_else(|| {
-                Error::InvalidInput("intervention proof term count overflows".into())
-            })?;
-            if proof_terms > limits.max_proof_terms.min(FORMAT_MAX_PROOF_TERMS) {
-                return Err(Error::InvalidInput(
-                    "cohomology intervention proof terms exceed their limit".into(),
-                ));
-            }
-            root_blockers.push(blocker);
-        }
-        let root_blocker_bound = reader.u64()?;
-        let before_ranks = decode_usizes(&mut reader, scenario_count)?;
-        let after_ranks = decode_usizes(&mut reader, scenario_count)?;
-        let digest = reader.array32()?;
-        if reader.remaining() != 0 {
-            return Err(Error::InvalidInput(
-                "trailing bytes follow the cohomology intervention artifact".into(),
-            ));
-        }
+        let proof = decode_proof_data(&mut reader, candidates.len(), scenarios.len(), limits)?;
+        let digest = decode_trailer(&mut reader)?;
         let artifact = Self {
-            vertex_count,
-            dimension,
-            scale,
-            modulus,
+            vertex_count: header.vertex_count,
+            dimension: header.dimension,
+            scale: header.scale,
+            modulus: header.modulus,
             scenarios,
             candidates,
-            max_edits,
-            oracle_limit,
-            node_limit,
-            status,
+            max_edits: search.max_edits,
+            oracle_limit: search.oracle_limit,
+            node_limit: search.node_limit,
+            status: search.status,
             edits,
-            lower_bound_cost,
-            upper_bound_cost,
-            oracle_calls,
-            search_nodes,
-            cache_hits,
-            root_blockers,
-            root_blocker_bound,
-            before_ranks,
-            after_ranks,
+            lower_bound_cost: search.lower_bound_cost,
+            upper_bound_cost: search.upper_bound_cost,
+            oracle_calls: search.oracle_calls,
+            search_nodes: search.search_nodes,
+            cache_hits: search.cache_hits,
+            root_blockers: proof.root_blockers,
+            root_blocker_bound: proof.root_blocker_bound,
+            before_ranks: proof.before_ranks,
+            after_ranks: proof.after_ranks,
             digest,
         };
-        artifact.validate_claim(limits)?;
-        if artifact.compute_digest()? != artifact.digest {
-            return Err(Error::InvalidInput(
-                "cohomology intervention digest differs from its content".into(),
-            ));
-        }
-        artifact.verify(limits)?;
-        if artifact.encode(limits)? != bytes {
-            return Err(Error::InvalidInput(
-                "cohomology intervention encoding is not canonical".into(),
-            ));
-        }
+        validate_decoded_artifact(&artifact, bytes, limits)?;
         Ok(artifact)
     }
 
@@ -571,102 +529,10 @@ impl CohomologyInterventionArtifact {
             self.node_limit,
             limits,
         )?;
-        if self.before_ranks.len() != self.scenarios.len()
-            || self.after_ranks.len() != self.scenarios.len()
-            || self.oracle_calls > self.oracle_limit
-            || self.search_nodes > self.node_limit
-        {
-            return Err(Error::InvalidInput(
-                "cohomology intervention claim shape is invalid".into(),
-            ));
-        }
-        let candidate_positions = self
-            .edits
-            .iter()
-            .map(|edit| {
-                self.candidates.binary_search(edit).map_err(|_| {
-                    Error::InvalidInput("cohomology intervention edit is not a candidate".into())
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if candidate_positions
-            .windows(2)
-            .any(|pair| pair[0] >= pair[1])
-            || self.edits.len() > self.max_edits
-        {
-            return Err(Error::InvalidInput(
-                "cohomology intervention edit list is not canonical".into(),
-            ));
-        }
-        let mut seen = BTreeSet::new();
-        let mut proof_terms = 0usize;
-        let mut bound = 0u64;
-        for blocker in &self.root_blockers {
-            if blocker.is_empty()
-                || blocker.windows(2).any(|pair| pair[0] >= pair[1])
-                || blocker
-                    .iter()
-                    .any(|position| *position >= self.candidates.len())
-                || blocker.iter().any(|position| !seen.insert(*position))
-            {
-                return Err(Error::InvalidInput(
-                    "cohomology intervention root blockers are not canonical and disjoint".into(),
-                ));
-            }
-            proof_terms = proof_terms.checked_add(blocker.len()).ok_or_else(|| {
-                Error::InvalidInput("cohomology intervention proof term count overflows".into())
-            })?;
-            let minimum = blocker
-                .iter()
-                .map(|position| self.candidates[*position].cost)
-                .min()
-                .expect("a checked blocker is nonempty");
-            bound = bound.checked_add(minimum).ok_or_else(|| {
-                Error::InvalidInput("cohomology intervention blocker bound overflows".into())
-            })?;
-        }
-        if proof_terms > limits.max_proof_terms.min(FORMAT_MAX_PROOF_TERMS)
-            || bound != self.root_blocker_bound
-        {
-            return Err(Error::InvalidInput(
-                "cohomology intervention blocker claim is invalid".into(),
-            ));
-        }
-        match self.status {
-            CohomologyInterventionStatus::Optimal => {
-                if self.lower_bound_cost.is_none()
-                    || self.lower_bound_cost != self.upper_bound_cost
-                    || self.edits.is_empty() && self.upper_bound_cost != Some(0)
-                {
-                    return Err(Error::InvalidInput(
-                        "optimal intervention bounds are invalid".into(),
-                    ));
-                }
-            }
-            CohomologyInterventionStatus::Infeasible => {
-                if !self.edits.is_empty()
-                    || self.lower_bound_cost.is_some()
-                    || self.upper_bound_cost.is_some()
-                {
-                    return Err(Error::InvalidInput(
-                        "infeasible intervention carries a finite bound".into(),
-                    ));
-                }
-            }
-            CohomologyInterventionStatus::SearchIncomplete => {
-                if self.lower_bound_cost.is_none()
-                    || self
-                        .lower_bound_cost
-                        .zip(self.upper_bound_cost)
-                        .is_some_and(|(lower, upper)| lower > upper)
-                {
-                    return Err(Error::InvalidInput(
-                        "incomplete intervention bounds are invalid".into(),
-                    ));
-                }
-            }
-        }
-        Ok(())
+        validate_claim_shape(self)?;
+        validate_edits(self)?;
+        validate_root_blocker_claim(self, limits)?;
+        validate_status_claim(self)
     }
 
     fn compute_digest(&self) -> Result<[u8; 32]> {
@@ -678,50 +544,436 @@ impl CohomologyInterventionArtifact {
 
     fn encode_payload(&self) -> Result<Vec<u8>> {
         let mut output = Vec::new();
-        output.extend_from_slice(MAGIC);
-        output.extend_from_slice(&VERSION.to_be_bytes());
-        output.push(F64_BITS_CODEC);
-        put_usize(&mut output, self.vertex_count)?;
-        put_usize(&mut output, self.dimension)?;
-        output.extend_from_slice(&self.scale.to_bits().to_be_bytes());
-        output.extend_from_slice(&self.modulus.to_be_bytes());
-        put_usize(&mut output, self.scenarios.len())?;
-        for scenario in &self.scenarios {
-            encode_edges(&mut output, &scenario.active_edges)?;
-            put_usize(&mut output, scenario.target_basis)?;
-        }
-        put_usize(&mut output, self.candidates.len())?;
-        for candidate in &self.candidates {
-            put_usize(&mut output, candidate.edge.u)?;
-            put_usize(&mut output, candidate.edge.v)?;
-            output.extend_from_slice(&candidate.cost.to_be_bytes());
-        }
-        put_usize(&mut output, self.max_edits)?;
-        put_usize(&mut output, self.oracle_limit)?;
-        put_usize(&mut output, self.node_limit)?;
-        output.push(self.status.code());
-        encode_indices(
-            &mut output,
-            &self
-                .edits
-                .iter()
-                .map(|edit| self.candidates.binary_search(edit).expect("validated edit"))
-                .collect::<Vec<_>>(),
-        )?;
-        encode_optional_u64(&mut output, self.lower_bound_cost);
-        encode_optional_u64(&mut output, self.upper_bound_cost);
-        put_usize(&mut output, self.oracle_calls)?;
-        put_usize(&mut output, self.search_nodes)?;
-        put_usize(&mut output, self.cache_hits)?;
-        put_usize(&mut output, self.root_blockers.len())?;
-        for blocker in &self.root_blockers {
-            encode_indices(&mut output, blocker)?;
-        }
-        output.extend_from_slice(&self.root_blocker_bound.to_be_bytes());
-        encode_usizes(&mut output, &self.before_ranks)?;
-        encode_usizes(&mut output, &self.after_ranks)?;
+        encode_prefix(&mut output);
+        encode_header(&mut output, self)?;
+        encode_scenarios(&mut output, &self.scenarios)?;
+        encode_candidates(&mut output, &self.candidates)?;
+        encode_search_data(&mut output, self)?;
+        encode_proof_data(&mut output, self)?;
         Ok(output)
     }
+}
+
+fn validate_claim_shape(artifact: &CohomologyInterventionArtifact) -> Result<()> {
+    if artifact.before_ranks.len() != artifact.scenarios.len()
+        || artifact.after_ranks.len() != artifact.scenarios.len()
+        || artifact.oracle_calls > artifact.oracle_limit
+        || artifact.search_nodes > artifact.node_limit
+    {
+        Err(Error::InvalidInput(
+            "cohomology intervention claim shape is invalid".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_edits(artifact: &CohomologyInterventionArtifact) -> Result<()> {
+    let positions = artifact
+        .edits
+        .iter()
+        .map(|edit| {
+            artifact.candidates.binary_search(edit).map_err(|_| {
+                Error::InvalidInput("cohomology intervention edit is not a candidate".into())
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if positions.windows(2).any(|pair| pair[0] >= pair[1])
+        || artifact.edits.len() > artifact.max_edits
+    {
+        Err(Error::InvalidInput(
+            "cohomology intervention edit list is not canonical".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_root_blocker_claim(
+    artifact: &CohomologyInterventionArtifact,
+    limits: CohomologyInterventionLimits,
+) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    let mut proof_terms = 0usize;
+    let mut bound = 0u64;
+    for blocker in &artifact.root_blockers {
+        validate_root_blocker(blocker, artifact.candidates.len(), &mut seen)?;
+        proof_terms = proof_terms.checked_add(blocker.len()).ok_or_else(|| {
+            Error::InvalidInput("cohomology intervention proof term count overflows".into())
+        })?;
+        let minimum = blocker
+            .iter()
+            .map(|position| artifact.candidates[*position].cost)
+            .min()
+            .expect("a checked blocker is nonempty");
+        bound = bound.checked_add(minimum).ok_or_else(|| {
+            Error::InvalidInput("cohomology intervention blocker bound overflows".into())
+        })?;
+    }
+    if proof_terms > limits.max_proof_terms.min(FORMAT_MAX_PROOF_TERMS)
+        || bound != artifact.root_blocker_bound
+    {
+        Err(Error::InvalidInput(
+            "cohomology intervention blocker claim is invalid".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_root_blocker(
+    blocker: &[usize],
+    candidate_count: usize,
+    seen: &mut BTreeSet<usize>,
+) -> Result<()> {
+    if blocker.is_empty()
+        || blocker.windows(2).any(|pair| pair[0] >= pair[1])
+        || blocker.iter().any(|position| *position >= candidate_count)
+        || blocker.iter().any(|position| !seen.insert(*position))
+    {
+        Err(Error::InvalidInput(
+            "cohomology intervention root blockers are not canonical and disjoint".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_status_claim(artifact: &CohomologyInterventionArtifact) -> Result<()> {
+    match artifact.status {
+        CohomologyInterventionStatus::Optimal => validate_optimal_claim(artifact),
+        CohomologyInterventionStatus::Infeasible => validate_infeasible_claim(artifact),
+        CohomologyInterventionStatus::SearchIncomplete => validate_incomplete_claim(artifact),
+    }
+}
+
+fn validate_optimal_claim(artifact: &CohomologyInterventionArtifact) -> Result<()> {
+    if artifact.lower_bound_cost.is_none()
+        || artifact.lower_bound_cost != artifact.upper_bound_cost
+        || artifact.edits.is_empty() && artifact.upper_bound_cost != Some(0)
+    {
+        Err(Error::InvalidInput(
+            "optimal intervention bounds are invalid".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_infeasible_claim(artifact: &CohomologyInterventionArtifact) -> Result<()> {
+    if !artifact.edits.is_empty()
+        || artifact.lower_bound_cost.is_some()
+        || artifact.upper_bound_cost.is_some()
+    {
+        Err(Error::InvalidInput(
+            "infeasible intervention carries a finite bound".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_incomplete_claim(artifact: &CohomologyInterventionArtifact) -> Result<()> {
+    if artifact.lower_bound_cost.is_none()
+        || artifact
+            .lower_bound_cost
+            .zip(artifact.upper_bound_cost)
+            .is_some_and(|(lower, upper)| lower > upper)
+    {
+        Err(Error::InvalidInput(
+            "incomplete intervention bounds are invalid".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_artifact_size(bytes: &[u8], limits: CohomologyInterventionLimits) -> Result<()> {
+    if bytes.len() > limits.max_bytes || bytes.len() < 32 {
+        Err(Error::InvalidInput(
+            "cohomology intervention exceeds its byte limit or is truncated".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_prefix(reader: &mut Reader<'_>) -> Result<()> {
+    let magic = reader.take(8)?;
+    let version = reader.u16()?;
+    let codec = reader.u8()?;
+    if magic != MAGIC || version != VERSION || codec != F64_BITS_CODEC {
+        Err(Error::InvalidInput(
+            "unsupported cohomology intervention artifact".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_header(reader: &mut Reader<'_>) -> Result<InterventionHeader> {
+    Ok(InterventionHeader {
+        vertex_count: reader.usize()?,
+        dimension: reader.usize()?,
+        scale: f64::from_bits(reader.u64()?),
+        modulus: reader.u32()?,
+    })
+}
+
+fn decode_scenarios(
+    reader: &mut Reader<'_>,
+    limits: CohomologyInterventionLimits,
+) -> Result<Vec<CohomologyInterventionScenario>> {
+    let count = reader.bounded_usize(
+        "scenario count",
+        limits.max_scenarios.min(FORMAT_MAX_SCENARIOS),
+    )?;
+    let mut scenarios = Vec::with_capacity(count);
+    for _ in 0..count {
+        scenarios.push(decode_scenario(reader, limits)?);
+    }
+    Ok(scenarios)
+}
+
+fn decode_scenario(
+    reader: &mut Reader<'_>,
+    limits: CohomologyInterventionLimits,
+) -> Result<CohomologyInterventionScenario> {
+    Ok(CohomologyInterventionScenario {
+        active_edges: decode_edges(reader, limits.max_edges_per_scenario)?,
+        target_basis: reader.usize()?,
+    })
+}
+
+fn decode_candidates(
+    reader: &mut Reader<'_>,
+    limits: CohomologyInterventionLimits,
+) -> Result<Vec<CohomologyInterventionCandidate>> {
+    let count = reader.bounded_usize(
+        "candidate count",
+        limits.max_candidates.min(FORMAT_MAX_CANDIDATES),
+    )?;
+    if count > reader.remaining() / 24 {
+        return Err(Error::InvalidInput(
+            "cohomology intervention candidate count exceeds the remaining bytes".into(),
+        ));
+    }
+    (0..count).map(|_| decode_candidate(reader)).collect()
+}
+
+fn decode_candidate(reader: &mut Reader<'_>) -> Result<CohomologyInterventionCandidate> {
+    Ok(CohomologyInterventionCandidate {
+        edge: KineticEdgeKey {
+            u: reader.usize()?,
+            v: reader.usize()?,
+        },
+        cost: reader.u64()?,
+    })
+}
+
+fn decode_search_data(
+    reader: &mut Reader<'_>,
+    candidate_count: usize,
+) -> Result<InterventionSearchData> {
+    let max_edits = reader.usize()?;
+    let limits = decode_work_limits(reader)?;
+    let selection = decode_selection(reader, candidate_count)?;
+    let work = decode_producer_work(reader)?;
+    Ok(InterventionSearchData {
+        max_edits,
+        oracle_limit: limits.oracle,
+        node_limit: limits.nodes,
+        status: selection.status,
+        edit_indices: selection.edit_indices,
+        lower_bound_cost: selection.lower_bound_cost,
+        upper_bound_cost: selection.upper_bound_cost,
+        oracle_calls: work.oracle_calls,
+        search_nodes: work.search_nodes,
+        cache_hits: work.cache_hits,
+    })
+}
+
+fn decode_work_limits(reader: &mut Reader<'_>) -> Result<InterventionWorkLimits> {
+    Ok(InterventionWorkLimits {
+        oracle: reader.usize()?,
+        nodes: reader.usize()?,
+    })
+}
+
+fn decode_selection(
+    reader: &mut Reader<'_>,
+    candidate_count: usize,
+) -> Result<InterventionSelection> {
+    Ok(InterventionSelection {
+        status: CohomologyInterventionStatus::from_code(reader.u8()?)?,
+        edit_indices: decode_indices(reader, candidate_count, candidate_count)?,
+        lower_bound_cost: reader.optional_u64()?,
+        upper_bound_cost: reader.optional_u64()?,
+    })
+}
+
+fn decode_producer_work(reader: &mut Reader<'_>) -> Result<InterventionProducerWork> {
+    Ok(InterventionProducerWork {
+        oracle_calls: reader.usize()?,
+        search_nodes: reader.usize()?,
+        cache_hits: reader.usize()?,
+    })
+}
+
+fn decode_proof_data(
+    reader: &mut Reader<'_>,
+    candidate_count: usize,
+    scenario_count: usize,
+    limits: CohomologyInterventionLimits,
+) -> Result<InterventionProofData> {
+    Ok(InterventionProofData {
+        root_blockers: decode_root_blockers(reader, candidate_count, limits)?,
+        root_blocker_bound: reader.u64()?,
+        before_ranks: decode_usizes(reader, scenario_count)?,
+        after_ranks: decode_usizes(reader, scenario_count)?,
+    })
+}
+
+fn decode_root_blockers(
+    reader: &mut Reader<'_>,
+    candidate_count: usize,
+    limits: CohomologyInterventionLimits,
+) -> Result<Vec<Vec<usize>>> {
+    let maximum = limits.max_proof_terms.min(FORMAT_MAX_PROOF_TERMS);
+    let count = reader.bounded_usize("root blocker count", maximum)?;
+    let mut blockers = Vec::with_capacity(count);
+    let mut terms = 0usize;
+    for _ in 0..count {
+        let blocker = decode_indices(reader, candidate_count, maximum)?;
+        terms = add_proof_terms(terms, blocker.len(), maximum)?;
+        blockers.push(blocker);
+    }
+    Ok(blockers)
+}
+
+fn add_proof_terms(total: usize, add: usize, maximum: usize) -> Result<usize> {
+    let total = total
+        .checked_add(add)
+        .ok_or_else(|| Error::InvalidInput("intervention proof term count overflows".into()))?;
+    if total > maximum {
+        Err(Error::InvalidInput(
+            "cohomology intervention proof terms exceed their limit".into(),
+        ))
+    } else {
+        Ok(total)
+    }
+}
+
+fn decode_trailer(reader: &mut Reader<'_>) -> Result<[u8; 32]> {
+    let digest = reader.array32()?;
+    if reader.remaining() != 0 {
+        Err(Error::InvalidInput(
+            "trailing bytes follow the cohomology intervention artifact".into(),
+        ))
+    } else {
+        Ok(digest)
+    }
+}
+
+fn validate_decoded_artifact(
+    artifact: &CohomologyInterventionArtifact,
+    bytes: &[u8],
+    limits: CohomologyInterventionLimits,
+) -> Result<()> {
+    artifact.validate_claim(limits)?;
+    if artifact.compute_digest()? != artifact.digest {
+        return Err(Error::InvalidInput(
+            "cohomology intervention digest differs from its content".into(),
+        ));
+    }
+    artifact.verify(limits)?;
+    if artifact.encode(limits)? != bytes {
+        return Err(Error::InvalidInput(
+            "cohomology intervention encoding is not canonical".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn encode_prefix(output: &mut Vec<u8>) {
+    output.extend_from_slice(MAGIC);
+    output.extend_from_slice(&VERSION.to_be_bytes());
+    output.push(F64_BITS_CODEC);
+}
+
+fn encode_header(output: &mut Vec<u8>, artifact: &CohomologyInterventionArtifact) -> Result<()> {
+    put_usize(output, artifact.vertex_count)?;
+    put_usize(output, artifact.dimension)?;
+    output.extend_from_slice(&artifact.scale.to_bits().to_be_bytes());
+    output.extend_from_slice(&artifact.modulus.to_be_bytes());
+    Ok(())
+}
+
+fn encode_scenarios(
+    output: &mut Vec<u8>,
+    scenarios: &[CohomologyInterventionScenario],
+) -> Result<()> {
+    put_usize(output, scenarios.len())?;
+    for scenario in scenarios {
+        encode_edges(output, &scenario.active_edges)?;
+        put_usize(output, scenario.target_basis)?;
+    }
+    Ok(())
+}
+
+fn encode_candidates(
+    output: &mut Vec<u8>,
+    candidates: &[CohomologyInterventionCandidate],
+) -> Result<()> {
+    put_usize(output, candidates.len())?;
+    for candidate in candidates {
+        put_usize(output, candidate.edge.u)?;
+        put_usize(output, candidate.edge.v)?;
+        output.extend_from_slice(&candidate.cost.to_be_bytes());
+    }
+    Ok(())
+}
+
+fn encode_search_data(
+    output: &mut Vec<u8>,
+    artifact: &CohomologyInterventionArtifact,
+) -> Result<()> {
+    put_usize(output, artifact.max_edits)?;
+    put_usize(output, artifact.oracle_limit)?;
+    put_usize(output, artifact.node_limit)?;
+    output.push(artifact.status.code());
+    encode_indices(output, &edit_indices(artifact))?;
+    encode_optional_u64(output, artifact.lower_bound_cost);
+    encode_optional_u64(output, artifact.upper_bound_cost);
+    put_usize(output, artifact.oracle_calls)?;
+    put_usize(output, artifact.search_nodes)?;
+    put_usize(output, artifact.cache_hits)
+}
+
+fn edit_indices(artifact: &CohomologyInterventionArtifact) -> Vec<usize> {
+    artifact
+        .edits
+        .iter()
+        .map(|edit| {
+            artifact
+                .candidates
+                .binary_search(edit)
+                .expect("validated edit")
+        })
+        .collect()
+}
+
+fn encode_proof_data(
+    output: &mut Vec<u8>,
+    artifact: &CohomologyInterventionArtifact,
+) -> Result<()> {
+    put_usize(output, artifact.root_blockers.len())?;
+    for blocker in &artifact.root_blockers {
+        encode_indices(output, blocker)?;
+    }
+    output.extend_from_slice(&artifact.root_blocker_bound.to_be_bytes());
+    encode_usizes(output, &artifact.before_ranks)?;
+    encode_usizes(output, &artifact.after_ranks)
 }
 
 struct TopologyOracle<'a> {
@@ -849,6 +1101,32 @@ fn validate_problem(
     node_limit: usize,
     limits: CohomologyInterventionLimits,
 ) -> Result<()> {
+    validate_problem_scope(vertex_count, scale, scenarios, limits)?;
+    for scenario in scenarios {
+        validate_edges(
+            vertex_count,
+            &scenario.active_edges,
+            limits.max_edges_per_scenario,
+            "active edge",
+        )?;
+    }
+    validate_candidates(vertex_count, candidates, limits)?;
+    validate_inactive_candidates(scenarios, candidates)?;
+    validate_search_limits(
+        max_edits,
+        candidates.len(),
+        oracle_limit,
+        node_limit,
+        limits,
+    )
+}
+
+fn validate_problem_scope(
+    vertex_count: usize,
+    scale: f64,
+    scenarios: &[CohomologyInterventionScenario],
+    limits: CohomologyInterventionLimits,
+) -> Result<()> {
     if vertex_count > limits.max_vertices {
         return Err(Error::InvalidInput(
             "cohomology intervention vertex count exceeds its limit".into(),
@@ -864,14 +1142,14 @@ fn validate_problem(
             "cohomology intervention scenario count is invalid".into(),
         ));
     }
-    for scenario in scenarios {
-        validate_edges(
-            vertex_count,
-            &scenario.active_edges,
-            limits.max_edges_per_scenario,
-            "active edge",
-        )?;
-    }
+    Ok(())
+}
+
+fn validate_candidates(
+    vertex_count: usize,
+    candidates: &[CohomologyInterventionCandidate],
+    limits: CohomologyInterventionLimits,
+) -> Result<()> {
     if candidates.len() > limits.max_candidates.min(FORMAT_MAX_CANDIDATES)
         || candidates.iter().any(|candidate| candidate.cost == 0)
         || candidates.iter().any(|candidate| {
@@ -885,6 +1163,13 @@ fn validate_problem(
             "cohomology intervention candidate list is not canonical".into(),
         ));
     }
+    Ok(())
+}
+
+fn validate_inactive_candidates(
+    scenarios: &[CohomologyInterventionScenario],
+    candidates: &[CohomologyInterventionCandidate],
+) -> Result<()> {
     for scenario in scenarios {
         let active = scenario
             .active_edges
@@ -900,7 +1185,17 @@ fn validate_problem(
             ));
         }
     }
-    if max_edits > candidates.len() {
+    Ok(())
+}
+
+fn validate_search_limits(
+    max_edits: usize,
+    candidate_count: usize,
+    oracle_limit: usize,
+    node_limit: usize,
+    limits: CohomologyInterventionLimits,
+) -> Result<()> {
+    if max_edits > candidate_count {
         return Err(Error::InvalidInput(
             "cohomology intervention edit limit exceeds the candidate count".into(),
         ));
