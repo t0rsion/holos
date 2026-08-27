@@ -96,6 +96,34 @@ struct Args {
     work_limit: Option<u64>,
 }
 
+struct ArgsBuilder {
+    input: Option<String>,
+    entry: Option<String>,
+    threshold_text: Option<String>,
+    max_dim: usize,
+    modulus: u32,
+    threads: usize,
+    reps: usize,
+    kinds: Vec<Kind>,
+    work_limit: Option<u64>,
+}
+
+impl Default for ArgsBuilder {
+    fn default() -> Self {
+        Self {
+            input: None,
+            entry: None,
+            threshold_text: None,
+            max_dim: 2,
+            modulus: 2,
+            threads: 1,
+            reps: 5,
+            kinds: vec![Kind::None, Kind::V1, Kind::V2, Kind::V3H1, Kind::V3H2],
+            work_limit: None,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct Counts {
     algorithm_version: u32,
@@ -134,6 +162,20 @@ struct Outcome {
     diagram: Diagram,
 }
 
+struct StudyInput {
+    points: Vec<Vec<f64>>,
+    graph: SparseDistanceMatrix,
+    triangles: u64,
+    tetrahedra: u64,
+}
+
+struct Certification {
+    artifact_s: f64,
+    verify_s: f64,
+    certified_s: f64,
+    counts: Option<Counts>,
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.iter().any(|arg| arg == "-h" || arg == "--help") {
@@ -155,6 +197,22 @@ fn main() -> ExitCode {
 
 fn run(argv: &[String]) -> Result<(), String> {
     let args = parse_args(argv)?;
+    let input = prepare_study_input(&args)?;
+    let references = agreement_gate(&input.points, &args)?;
+    print_study_header(&args, &input);
+    let samples = collect_samples(&input.points, &args, &references)?;
+    for (&kind, runs) in args.kinds.iter().zip(&samples) {
+        print_summary(&args, kind, runs);
+    }
+    println!(
+        "kind=memory entry={} vm_hwm_kb={} scope=whole_process",
+        args.entry,
+        vm_hwm_kb().map_or("unavailable".to_string(), |value| value.to_string())
+    );
+    Ok(())
+}
+
+fn prepare_study_input(args: &Args) -> Result<StudyInput, String> {
     let points = read_cloud(&args.input)?;
     if points.len() < 2 {
         return Err(format!("{}: need at least two points", args.input));
@@ -164,11 +222,20 @@ fn run(argv: &[String]) -> Result<(), String> {
         &DistanceMatrix::from_points(&points).map_err(|error| error.to_string())?,
         args.threshold,
     )?;
-    let (input_triangles, input_tetrahedra) = graph_cliques(&study_graph);
-    let reference = run_one(&points, &args, Kind::None)?.diagram;
+    let (triangles, tetrahedra) = graph_cliques(&study_graph);
+    Ok(StudyInput {
+        points,
+        graph: study_graph,
+        triangles,
+        tetrahedra,
+    })
+}
+
+fn agreement_gate(points: &[Vec<f64>], args: &Args) -> Result<Vec<Diagram>, String> {
+    let reference = run_one(points, args, Kind::None)?.diagram;
     let mut references: Vec<Diagram> = Vec::with_capacity(args.kinds.len());
     for &kind in &args.kinds {
-        let outcome = run_one(&points, &args, kind)?;
+        let outcome = run_one(points, args, kind)?;
         if !diagrams_equal(&reference, &outcome.diagram) {
             return Err(format!(
                 "{} disagrees with no collapse bar for bar; timings are void",
@@ -177,7 +244,10 @@ fn run(argv: &[String]) -> Result<(), String> {
         }
         references.push(outcome.diagram);
     }
+    Ok(references)
+}
 
+fn print_study_header(args: &Args, input: &StudyInput) {
     println!(
         "# collapse-adaptive-bench {} counterbalanced end-to-end study",
         env!("CARGO_PKG_VERSION")
@@ -186,7 +256,7 @@ fn run(argv: &[String]) -> Result<(), String> {
         "kind=entry entry={} input={} points={} threshold={} max_dim={} modulus={} threads={} reps={} configs={} balanced={} work_limit={} input_edges={} input_triangles={} input_tetrahedra={}",
         args.entry,
         file_stem(&args.input),
-        points.len(),
+        input.points.len(),
         args.threshold_text,
         args.max_dim,
         args.modulus,
@@ -204,9 +274,9 @@ fn run(argv: &[String]) -> Result<(), String> {
         },
         args.work_limit
             .map_or("unlimited".to_string(), |limit| limit.to_string()),
-        study_graph.num_edges(),
-        input_triangles,
-        input_tetrahedra
+        input.graph.num_edges(),
+        input.triangles,
+        input.tetrahedra
     );
     println!(
         "kind=agreement entry={} reference=none exact=bar_for_bar result=pass configs={}",
@@ -217,7 +287,13 @@ fn run(argv: &[String]) -> Result<(), String> {
             .collect::<Vec<_>>()
             .join(",")
     );
+}
 
+fn collect_samples(
+    points: &[Vec<f64>],
+    args: &Args,
+    references: &[Diagram],
+) -> Result<Vec<Vec<Sample>>, String> {
     let mut samples: Vec<Vec<Sample>> = args
         .kinds
         .iter()
@@ -239,26 +315,27 @@ fn run(argv: &[String]) -> Result<(), String> {
         );
         for index in order {
             let kind = args.kinds[index];
-            let outcome = run_one(&points, &args, kind)?;
-            if !diagrams_equal(&references[index], &outcome.diagram) {
-                return Err(format!(
-                    "{} repetition {rep} differs from its agreement diagram",
-                    kind.name()
-                ));
-            }
+            let outcome = run_one(points, args, kind)?;
+            check_repetition(kind, rep, &references[index], &outcome.diagram)?;
             samples[index].push(outcome.sample);
         }
     }
+    Ok(samples)
+}
 
-    for (&kind, runs) in args.kinds.iter().zip(&samples) {
-        print_summary(&args, kind, runs);
+fn check_repetition(
+    kind: Kind,
+    repetition: usize,
+    reference: &Diagram,
+    diagram: &Diagram,
+) -> Result<(), String> {
+    if diagrams_equal(reference, diagram) {
+        return Ok(());
     }
-    println!(
-        "kind=memory entry={} vm_hwm_kb={} scope=whole_process",
-        args.entry,
-        vm_hwm_kb().map_or("unavailable".to_string(), |value| value.to_string())
-    );
-    Ok(())
+    Err(format!(
+        "{} repetition {repetition} differs from its agreement diagram",
+        kind.name()
+    ))
 }
 
 fn run_one(points: &[Vec<f64>], args: &Args, kind: Kind) -> Result<Outcome, String> {
@@ -271,68 +348,11 @@ fn run_one(points: &[Vec<f64>], args: &Args, kind: Kind) -> Result<Outcome, Stri
     let sparse = threshold_to_sparse(&dense, args.threshold)?;
     let graph_s = phase.elapsed().as_secs_f64();
 
-    let mut collapse_s = 0.0;
-    let collapsed = if kind == Kind::None {
-        None
-    } else {
-        let phase = Instant::now();
-        let result = match kind {
-            Kind::V1 => collapse_sparse(&sparse, Some(args.threshold)),
-            Kind::V2 => {
-                collapse_sparse_rounds_parallel(&sparse, Some(args.threshold), args.threads)
-            }
-            Kind::V3H1 | Kind::V3H2 => {
-                let objective = if kind == Kind::V3H1 {
-                    CollapseObjective::H1
-                } else {
-                    CollapseObjective::H2
-                };
-                let mut params = AdaptiveCollapseParams::new(objective);
-                params.work_limit = args.work_limit;
-                collapse_sparse_adaptive(&sparse, Some(args.threshold), params)
-            }
-            Kind::None => unreachable!(),
-        }
-        .map_err(|error| error.to_string())?;
-        collapse_s = phase.elapsed().as_secs_f64();
-        Some(result)
-    };
+    let (collapsed, collapse_s) = run_collapse(&sparse, args, kind)?;
 
-    let phase = Instant::now();
-    let reduce_input = collapsed.as_ref().map_or(&sparse, |result| &result.matrix);
-    let threshold = collapsed
-        .as_ref()
-        .map_or(args.threshold, |result| result.certificate.terminal_level());
-    let params = RipsParams::new(args.max_dim)
-        .with_threshold(threshold)
-        .with_modulus(args.modulus)
-        .with_threads(args.threads);
-    let mut diagram =
-        rips_persistence_sparse(reduce_input, &params).map_err(|error| error.to_string())?;
-    let reduce_s = phase.elapsed().as_secs_f64();
+    let (mut diagram, reduce_s) = run_reduction(&sparse, collapsed.as_ref(), args)?;
     let compute_s = whole.elapsed().as_secs_f64();
-
-    let mut artifact_s = 0.0;
-    let mut verify_s = 0.0;
-    let counts = if let Some(result) = &collapsed {
-        let phase = Instant::now();
-        let bytes = CollapseArtifact::from_result(result)
-            .and_then(|artifact| artifact.encode())
-            .map_err(|error| error.to_string())?;
-        artifact_s = phase.elapsed().as_secs_f64();
-
-        let phase = Instant::now();
-        let artifact = CollapseArtifact::decode(&bytes, DecodeLimits::default())
-            .map_err(|error| error.to_string())?;
-        verify_sparse_artifact(&sparse, Some(args.threshold), &artifact)
-            .map_err(|error| error.to_string())?;
-        verify_s = phase.elapsed().as_secs_f64();
-        let certified_s = whole.elapsed().as_secs_f64();
-        (Some(counts(result, bytes.len())), certified_s)
-    } else {
-        (None, whole.elapsed().as_secs_f64())
-    };
-    let (counts, certified_s) = counts;
+    let certification = certify_run(&sparse, collapsed.as_ref(), args.threshold, &whole)?;
     diagram.canonicalize();
     Ok(Outcome {
         sample: Sample {
@@ -341,12 +361,97 @@ fn run_one(points: &[Vec<f64>], args: &Args, kind: Kind) -> Result<Outcome, Stri
             collapse_s,
             reduce_s,
             compute_s,
-            artifact_s,
-            verify_s,
-            certified_s,
-            counts,
+            artifact_s: certification.artifact_s,
+            verify_s: certification.verify_s,
+            certified_s: certification.certified_s,
+            counts: certification.counts,
         },
         diagram,
+    })
+}
+
+fn run_collapse(
+    graph: &SparseDistanceMatrix,
+    args: &Args,
+    kind: Kind,
+) -> Result<(Option<CollapsedRips>, f64), String> {
+    if kind == Kind::None {
+        return Ok((None, 0.0));
+    }
+    let started = Instant::now();
+    let result = collapse_for_kind(graph, args, kind).map_err(|error| error.to_string())?;
+    Ok((Some(result), started.elapsed().as_secs_f64()))
+}
+
+fn collapse_for_kind(
+    graph: &SparseDistanceMatrix,
+    args: &Args,
+    kind: Kind,
+) -> holos_tda::Result<CollapsedRips> {
+    match kind {
+        Kind::V1 => collapse_sparse(graph, Some(args.threshold)),
+        Kind::V2 => collapse_sparse_rounds_parallel(graph, Some(args.threshold), args.threads),
+        Kind::V3H1 => run_adaptive(graph, args, CollapseObjective::H1),
+        Kind::V3H2 => run_adaptive(graph, args, CollapseObjective::H2),
+        Kind::None => unreachable!(),
+    }
+}
+
+fn run_adaptive(
+    graph: &SparseDistanceMatrix,
+    args: &Args,
+    objective: CollapseObjective,
+) -> holos_tda::Result<CollapsedRips> {
+    let mut params = AdaptiveCollapseParams::new(objective);
+    params.work_limit = args.work_limit;
+    collapse_sparse_adaptive(graph, Some(args.threshold), params)
+}
+
+fn run_reduction(
+    graph: &SparseDistanceMatrix,
+    collapsed: Option<&CollapsedRips>,
+    args: &Args,
+) -> Result<(Diagram, f64), String> {
+    let started = Instant::now();
+    let reduce_input = collapsed.map_or(graph, |result| &result.matrix);
+    let threshold = collapsed.map_or(args.threshold, |result| result.certificate.terminal_level());
+    let params = RipsParams::new(args.max_dim)
+        .with_threshold(threshold)
+        .with_modulus(args.modulus)
+        .with_threads(args.threads);
+    let diagram =
+        rips_persistence_sparse(reduce_input, &params).map_err(|error| error.to_string())?;
+    Ok((diagram, started.elapsed().as_secs_f64()))
+}
+
+fn certify_run(
+    graph: &SparseDistanceMatrix,
+    collapsed: Option<&CollapsedRips>,
+    threshold: f64,
+    whole: &Instant,
+) -> Result<Certification, String> {
+    let Some(result) = collapsed else {
+        return Ok(Certification {
+            artifact_s: 0.0,
+            verify_s: 0.0,
+            certified_s: whole.elapsed().as_secs_f64(),
+            counts: None,
+        });
+    };
+    let artifact_started = Instant::now();
+    let bytes = CollapseArtifact::from_result(result)
+        .and_then(|artifact| artifact.encode())
+        .map_err(|error| error.to_string())?;
+    let artifact_s = artifact_started.elapsed().as_secs_f64();
+    let verify_started = Instant::now();
+    let artifact = CollapseArtifact::decode(&bytes, DecodeLimits::default())
+        .map_err(|error| error.to_string())?;
+    verify_sparse_artifact(graph, Some(threshold), &artifact).map_err(|error| error.to_string())?;
+    Ok(Certification {
+        artifact_s,
+        verify_s: verify_started.elapsed().as_secs_f64(),
+        certified_s: whole.elapsed().as_secs_f64(),
+        counts: Some(counts(result, bytes.len())),
     })
 }
 
@@ -630,88 +735,121 @@ fn vm_hwm_kb() -> Option<u64> {
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
-    let mut input = None;
-    let mut entry = None;
-    let mut threshold_text = None;
-    let mut max_dim = 2usize;
-    let mut modulus = 2u32;
-    let mut threads = 1usize;
-    let mut reps = 5usize;
-    let mut kinds = vec![Kind::None, Kind::V1, Kind::V2, Kind::V3H1, Kind::V3H2];
-    let mut work_limit = None;
-
+    let mut builder = ArgsBuilder::default();
     let mut arguments = argv.iter();
     while let Some(flag) = arguments.next() {
-        let value = |arguments: &mut std::slice::Iter<'_, String>| {
-            arguments
-                .next()
-                .cloned()
-                .ok_or_else(|| format!("{flag} needs a value"))
-        };
-        match flag.as_str() {
-            "--input" => input = Some(value(&mut arguments)?),
-            "--entry" => entry = Some(value(&mut arguments)?),
-            "--threshold" => threshold_text = Some(value(&mut arguments)?),
-            "--max-dim" => max_dim = parse_usize(&value(&mut arguments)?, flag)?,
-            "--modulus" => {
-                modulus = u32::try_from(parse_usize(&value(&mut arguments)?, flag)?)
-                    .map_err(|_| "--modulus is out of range".to_string())?;
-            }
-            "--threads" => threads = parse_usize(&value(&mut arguments)?, flag)?.max(1),
-            "--reps" => reps = parse_usize(&value(&mut arguments)?, flag)?,
-            "--work-limit" => {
-                work_limit = Some(
-                    value(&mut arguments)?
-                        .parse()
-                        .map_err(|_| "--work-limit is not a whole number".to_string())?,
-                )
-            }
-            "--configs" => {
-                let text = value(&mut arguments)?;
-                kinds = text.split(',').map(Kind::parse).collect::<Result<_, _>>()?;
-                if kinds.is_empty() {
-                    return Err("--configs must name at least one configuration".to_string());
-                }
-                let mut deduplicated = Vec::with_capacity(kinds.len());
-                for kind in kinds {
-                    if !deduplicated.contains(&kind) {
-                        deduplicated.push(kind);
-                    }
-                }
-                kinds = deduplicated;
-            }
-            _ => return Err(format!("unknown argument {flag}; run with --help")),
+        let value = arguments
+            .next()
+            .ok_or_else(|| format!("{flag} needs a value"))?;
+        parse_argument(&mut builder, flag, value)?;
+    }
+    finish_args(builder)
+}
+
+fn parse_argument(builder: &mut ArgsBuilder, flag: &str, value: &str) -> Result<(), String> {
+    if matches!(flag, "--input" | "--entry" | "--threshold" | "--configs") {
+        return parse_text_argument(builder, flag, value);
+    }
+    if matches!(
+        flag,
+        "--max-dim" | "--modulus" | "--threads" | "--reps" | "--work-limit"
+    ) {
+        return parse_numeric_argument(builder, flag, value);
+    }
+    Err(format!("unknown argument {flag}; run with --help"))
+}
+
+fn parse_text_argument(builder: &mut ArgsBuilder, flag: &str, value: &str) -> Result<(), String> {
+    match flag {
+        "--input" => builder.input = Some(value.to_string()),
+        "--entry" => builder.entry = Some(value.to_string()),
+        "--threshold" => builder.threshold_text = Some(value.to_string()),
+        "--configs" => builder.kinds = parse_kinds(value)?,
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+fn parse_numeric_argument(
+    builder: &mut ArgsBuilder,
+    flag: &str,
+    value: &str,
+) -> Result<(), String> {
+    let number = value
+        .parse::<u64>()
+        .map_err(|_| format!("{flag} {value} is not a whole number"))?;
+    match flag {
+        "--max-dim" => set_usize(&mut builder.max_dim, number, flag),
+        "--modulus" => set_u32(&mut builder.modulus, number, flag),
+        "--threads" => set_threads(&mut builder.threads, number, flag),
+        "--reps" => set_usize(&mut builder.reps, number, flag),
+        "--work-limit" => {
+            builder.work_limit = Some(number);
+            Ok(())
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn set_usize(target: &mut usize, number: u64, flag: &str) -> Result<(), String> {
+    *target = usize::try_from(number).map_err(|_| format!("{flag} is out of range"))?;
+    Ok(())
+}
+
+fn set_u32(target: &mut u32, number: u64, flag: &str) -> Result<(), String> {
+    *target = u32::try_from(number).map_err(|_| format!("{flag} is out of range"))?;
+    Ok(())
+}
+
+fn set_threads(target: &mut usize, number: u64, flag: &str) -> Result<(), String> {
+    set_usize(target, number, flag)?;
+    *target = (*target).max(1);
+    Ok(())
+}
+
+fn parse_kinds(text: &str) -> Result<Vec<Kind>, String> {
+    let kinds: Vec<_> = text.split(',').map(Kind::parse).collect::<Result<_, _>>()?;
+    if kinds.is_empty() {
+        return Err("--configs must name at least one configuration".to_string());
+    }
+    let mut deduplicated = Vec::with_capacity(kinds.len());
+    for kind in kinds {
+        if !deduplicated.contains(&kind) {
+            deduplicated.push(kind);
         }
     }
-    let input = input.ok_or_else(|| "--input is required".to_string())?;
-    let threshold_text = threshold_text.ok_or_else(|| "--threshold is required".to_string())?;
+    Ok(deduplicated)
+}
+
+fn finish_args(builder: ArgsBuilder) -> Result<Args, String> {
+    let input = builder
+        .input
+        .ok_or_else(|| "--input is required".to_string())?;
+    let threshold_text = builder
+        .threshold_text
+        .ok_or_else(|| "--threshold is required".to_string())?;
     let threshold: f64 = threshold_text
         .parse()
         .map_err(|_| format!("--threshold {threshold_text} is not a number"))?;
     if threshold.is_nan() || threshold < 0.0 {
         return Err(format!("--threshold {threshold_text} must be non-negative"));
     }
-    if reps == 0 {
+    if builder.reps == 0 {
         return Err("--reps must be at least 1".to_string());
     }
-    let entry = entry.unwrap_or_else(|| file_stem(&input));
+    let entry = builder.entry.unwrap_or_else(|| file_stem(&input));
     Ok(Args {
         input,
         entry,
         threshold,
         threshold_text,
-        max_dim,
-        modulus,
-        threads,
-        reps,
-        kinds,
-        work_limit,
+        max_dim: builder.max_dim,
+        modulus: builder.modulus,
+        threads: builder.threads,
+        reps: builder.reps,
+        kinds: builder.kinds,
+        work_limit: builder.work_limit,
     })
-}
-
-fn parse_usize(text: &str, flag: &str) -> Result<usize, String> {
-    text.parse()
-        .map_err(|_| format!("{flag} {text} is not a whole number"))
 }
 
 #[cfg(test)]
