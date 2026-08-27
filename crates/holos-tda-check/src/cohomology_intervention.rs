@@ -118,6 +118,60 @@ pub fn verify_cohomology_intervention(
     bytes: &[u8],
     limits: ProofLimits,
 ) -> Result<VerifiedCohomologyIntervention, ProofError> {
+    let claim = decode_claim(bytes, limits)?;
+    let checked = run_independent_search(&claim, limits)?;
+    verify_search_result(&claim, &checked)?;
+    Ok(intervention_summary(&claim, &checked))
+}
+
+struct Header {
+    vertex_count: usize,
+    dimension: usize,
+    modulus: u32,
+}
+
+struct WorkLimits {
+    max_edits: usize,
+    oracle: usize,
+    nodes: usize,
+}
+
+struct SearchClaimData {
+    status: VerifiedCohomologyInterventionStatus,
+    edits: Vec<usize>,
+    lower_bound: Option<u64>,
+    upper_bound: Option<u64>,
+    oracle_calls: usize,
+    search_nodes: usize,
+    cache_hits: usize,
+}
+
+struct ProofClaimData {
+    root_blockers: Vec<Vec<usize>>,
+    root_blocker_bound: u64,
+    before_ranks: Vec<usize>,
+    after_ranks: Vec<usize>,
+}
+
+struct CheckedIntervention {
+    search: SearchResult,
+    before_ranks: Vec<usize>,
+    after_ranks: Vec<usize>,
+}
+
+fn decode_claim(bytes: &[u8], limits: ProofLimits) -> Result<Claim, ProofError> {
+    let expected = expected_digest(bytes, limits)?;
+    let mut reader = Reader::new(bytes);
+    decode_prefix(&mut reader)?;
+    let header = decode_header(&mut reader, limits)?;
+    let scenarios = decode_scenarios(&mut reader, header.vertex_count, limits)?;
+    let candidates = decode_candidates(&mut reader, header.vertex_count, &scenarios, limits)?;
+    let claim = decode_search_claim(&mut reader, header, scenarios, candidates, limits)?;
+    decode_trailer(&mut reader, expected)?;
+    Ok(claim)
+}
+
+fn expected_digest(bytes: &[u8], limits: ProofLimits) -> Result<[u8; 32], ProofError> {
     if bytes.len() > limits.max_bytes || bytes.len() < 32 {
         return Err(ProofError::new(
             "cohomology intervention exceeds its byte limit or is truncated",
@@ -127,168 +181,293 @@ pub fn verify_cohomology_intervention(
     let mut hash = Sha256::new();
     hash.update(b"holos-cohomology-intervention-v2");
     hash.update(&bytes[..payload_len]);
-    let expected: [u8; 32] = hash.finalize().into();
+    let expected = hash.finalize().into();
     if bytes[payload_len..] != expected {
         return Err(ProofError::new(
             "cohomology intervention digest differs from its content",
         ));
     }
-    let mut reader = Reader::new(bytes);
-    if reader.take(8)? != MAGIC || reader.u16()? != VERSION || reader.u8()? != F64_BITS_CODEC {
-        return Err(ProofError::new(
+    Ok(expected)
+}
+
+fn decode_prefix(reader: &mut Reader<'_>) -> Result<(), ProofError> {
+    let magic = reader.take(8)?;
+    let version = reader.u16()?;
+    let codec = reader.u8()?;
+    if magic != MAGIC || version != VERSION || codec != F64_BITS_CODEC {
+        Err(ProofError::new(
             "unsupported cohomology intervention artifact",
-        ));
+        ))
+    } else {
+        Ok(())
     }
+}
+
+fn decode_header(reader: &mut Reader<'_>, limits: ProofLimits) -> Result<Header, ProofError> {
     let vertex_count = reader.bounded_usize("intervention vertex count", limits.max_vertices)?;
     let dimension = reader.bounded_usize("intervention dimension", limits.max_dimension)?;
     let scale = f64::from_bits(reader.u64()?);
     let modulus = reader.u32()?;
+    validate_field(scale, modulus)?;
+    Ok(Header {
+        vertex_count,
+        dimension,
+        modulus,
+    })
+}
+
+fn validate_field(scale: f64, modulus: u32) -> Result<(), ProofError> {
     if !scale.is_finite() || scale < 0.0 {
         return Err(ProofError::new("cohomology intervention scale is invalid"));
     }
-    if !is_prime(modulus as u64) || u64::from(modulus) >= MODULUS_LIMIT {
+    if !is_prime(u64::from(modulus)) || u64::from(modulus) >= MODULUS_LIMIT {
         return Err(ProofError::new(
             "cohomology intervention modulus is not a supported prime",
         ));
     }
-    let scenario_count = reader.bounded_usize(
+    Ok(())
+}
+
+fn decode_scenarios(
+    reader: &mut Reader<'_>,
+    vertex_count: usize,
+    limits: ProofLimits,
+) -> Result<Vec<Scenario>, ProofError> {
+    let count = reader.bounded_usize(
         "intervention scenario count",
         limits.max_snapshots.min(FORMAT_MAX_SCENARIOS),
     )?;
-    if scenario_count == 0 {
+    if count == 0 {
         return Err(ProofError::new("cohomology intervention has no scenario"));
     }
-    let mut scenarios = Vec::with_capacity(scenario_count);
+    let mut scenarios = Vec::with_capacity(count);
     let mut total_edges = 0usize;
-    for _ in 0..scenario_count {
-        let edges = decode_edges(&mut reader, vertex_count, limits.max_edges)?;
-        total_edges = total_edges
-            .checked_add(edges.len())
-            .ok_or_else(|| ProofError::new("intervention edge count overflows"))?;
-        if total_edges > limits.max_edges {
-            return Err(ProofError::new(
-                "intervention scenario edges exceed their total limit",
-            ));
-        }
-        scenarios.push(Scenario {
-            edges,
-            target_basis: reader.usize()?,
-        });
+    for _ in 0..count {
+        let scenario = decode_scenario(reader, vertex_count, limits)?;
+        total_edges = add_edge_count(total_edges, scenario.edges.len(), limits)?;
+        scenarios.push(scenario);
     }
-    let candidate_count = reader.bounded_usize(
+    Ok(scenarios)
+}
+
+fn decode_scenario(
+    reader: &mut Reader<'_>,
+    vertex_count: usize,
+    limits: ProofLimits,
+) -> Result<Scenario, ProofError> {
+    Ok(Scenario {
+        edges: decode_edges(reader, vertex_count, limits.max_edges)?,
+        target_basis: reader.usize()?,
+    })
+}
+
+fn add_edge_count(total: usize, add: usize, limits: ProofLimits) -> Result<usize, ProofError> {
+    let total = total
+        .checked_add(add)
+        .ok_or_else(|| ProofError::new("intervention edge count overflows"))?;
+    if total > limits.max_edges {
+        Err(ProofError::new(
+            "intervention scenario edges exceed their total limit",
+        ))
+    } else {
+        Ok(total)
+    }
+}
+
+fn decode_candidates(
+    reader: &mut Reader<'_>,
+    vertex_count: usize,
+    scenarios: &[Scenario],
+    limits: ProofLimits,
+) -> Result<Vec<Candidate>, ProofError> {
+    let count = reader.bounded_usize(
         "intervention candidate count",
         limits.max_references.min(FORMAT_MAX_CANDIDATES),
     )?;
-    if candidate_count > reader.remaining() / 24 {
+    if count > reader.remaining() / 24 {
         return Err(ProofError::new(
             "intervention candidates exceed the remaining bytes",
         ));
     }
-    let mut candidates = Vec::with_capacity(candidate_count);
-    for _ in 0..candidate_count {
-        candidates.push(Candidate {
-            edge: Edge {
-                u: reader.usize()?,
-                v: reader.usize()?,
-            },
-            cost: reader.u64()?,
-        });
-    }
-    if candidates.iter().any(|candidate| {
+    let candidates = (0..count)
+        .map(|_| decode_candidate(reader))
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_candidates(&candidates, vertex_count, scenarios)?;
+    Ok(candidates)
+}
+
+fn decode_candidate(reader: &mut Reader<'_>) -> Result<Candidate, ProofError> {
+    Ok(Candidate {
+        edge: Edge {
+            u: reader.usize()?,
+            v: reader.usize()?,
+        },
+        cost: reader.u64()?,
+    })
+}
+
+fn validate_candidates(
+    candidates: &[Candidate],
+    vertex_count: usize,
+    scenarios: &[Scenario],
+) -> Result<(), ProofError> {
+    let invalid = candidates.iter().any(|candidate| {
         candidate.edge.u >= candidate.edge.v
             || candidate.edge.v >= vertex_count
             || candidate.cost == 0
-    }) || candidates
+    });
+    let unordered = candidates
         .windows(2)
-        .any(|pair| pair[0].edge >= pair[1].edge)
-    {
+        .any(|pair| pair[0].edge >= pair[1].edge);
+    if invalid || unordered {
         return Err(ProofError::new(
             "cohomology intervention candidate list is not canonical",
         ));
     }
-    for scenario in &scenarios {
-        if candidates
+    if scenarios.iter().any(|scenario| {
+        candidates
             .iter()
             .any(|candidate| scenario.edges.binary_search(&candidate.edge).is_ok())
-        {
-            return Err(ProofError::new(
-                "cohomology intervention candidate is active in a scenario",
-            ));
-        }
-    }
-    let max_edits = reader.usize()?;
-    let oracle_limit = reader.usize()?;
-    let node_limit = reader.usize()?;
-    if max_edits > candidates.len()
-        || oracle_limit == 0
-        || oracle_limit > limits.max_snapshots.min(FORMAT_MAX_ORACLE_CALLS)
-        || node_limit == 0
-        || node_limit > limits.max_nodes.min(FORMAT_MAX_SEARCH_NODES)
-    {
+    }) {
         return Err(ProofError::new(
-            "cohomology intervention search limits are invalid",
+            "cohomology intervention candidate is active in a scenario",
         ));
     }
-    let status = VerifiedCohomologyInterventionStatus::from_code(reader.u8()?)?;
-    let edits = decode_indices(&mut reader, candidate_count, candidate_count)?;
-    let lower_bound = optional_u64(&mut reader)?;
-    let upper_bound = optional_u64(&mut reader)?;
-    let oracle_calls = reader.usize()?;
-    let search_nodes = reader.usize()?;
-    let cache_hits = reader.usize()?;
-    let blocker_count = reader.bounded_usize(
-        "intervention blocker count",
-        limits.max_terms.min(FORMAT_MAX_PROOF_TERMS),
-    )?;
-    let mut root_blockers = Vec::with_capacity(blocker_count);
-    let mut proof_terms = 0usize;
-    for _ in 0..blocker_count {
-        let blocker = decode_indices(
-            &mut reader,
-            candidate_count,
-            limits.max_terms.min(FORMAT_MAX_PROOF_TERMS),
-        )?;
-        proof_terms = proof_terms
-            .checked_add(blocker.len())
-            .ok_or_else(|| ProofError::new("intervention proof term count overflows"))?;
-        if proof_terms > limits.max_terms.min(FORMAT_MAX_PROOF_TERMS) {
-            return Err(ProofError::new(
-                "intervention proof terms exceed their limit",
-            ));
-        }
-        root_blockers.push(blocker);
-    }
-    let root_blocker_bound = reader.u64()?;
-    let before_ranks = decode_usizes(&mut reader, scenario_count)?;
-    let after_ranks = decode_usizes(&mut reader, scenario_count)?;
-    if reader.array32()? != expected || reader.remaining() != 0 {
-        return Err(ProofError::new(
-            "cohomology intervention has a wrong digest or trailing bytes",
-        ));
-    }
-    let claim = Claim {
-        vertex_count,
-        dimension,
-        modulus,
+    Ok(())
+}
+
+fn decode_search_claim(
+    reader: &mut Reader<'_>,
+    header: Header,
+    scenarios: Vec<Scenario>,
+    candidates: Vec<Candidate>,
+    limits: ProofLimits,
+) -> Result<Claim, ProofError> {
+    let work = decode_work_limits(reader, candidates.len(), limits)?;
+    let search = decode_search_data(reader, candidates.len())?;
+    let proof = decode_proof_claim_data(reader, candidates.len(), scenarios.len(), limits)?;
+    Ok(Claim {
+        vertex_count: header.vertex_count,
+        dimension: header.dimension,
+        modulus: header.modulus,
         scenarios,
         candidates,
-        max_edits,
-        oracle_limit,
-        node_limit,
-        status,
-        edits,
-        lower_bound,
-        upper_bound,
-        oracle_calls,
-        search_nodes,
-        cache_hits,
-        root_blockers,
-        root_blocker_bound,
-        before_ranks,
-        after_ranks,
+        max_edits: work.max_edits,
+        oracle_limit: work.oracle,
+        node_limit: work.nodes,
+        status: search.status,
+        edits: search.edits,
+        lower_bound: search.lower_bound,
+        upper_bound: search.upper_bound,
+        oracle_calls: search.oracle_calls,
+        search_nodes: search.search_nodes,
+        cache_hits: search.cache_hits,
+        root_blockers: proof.root_blockers,
+        root_blocker_bound: proof.root_blocker_bound,
+        before_ranks: proof.before_ranks,
+        after_ranks: proof.after_ranks,
+    })
+}
+
+fn decode_search_data(
+    reader: &mut Reader<'_>,
+    candidate_count: usize,
+) -> Result<SearchClaimData, ProofError> {
+    Ok(SearchClaimData {
+        status: VerifiedCohomologyInterventionStatus::from_code(reader.u8()?)?,
+        edits: decode_indices(reader, candidate_count, candidate_count)?,
+        lower_bound: optional_u64(reader)?,
+        upper_bound: optional_u64(reader)?,
+        oracle_calls: reader.usize()?,
+        search_nodes: reader.usize()?,
+        cache_hits: reader.usize()?,
+    })
+}
+
+fn decode_proof_claim_data(
+    reader: &mut Reader<'_>,
+    candidate_count: usize,
+    scenario_count: usize,
+    limits: ProofLimits,
+) -> Result<ProofClaimData, ProofError> {
+    Ok(ProofClaimData {
+        root_blockers: decode_root_blockers(reader, candidate_count, limits)?,
+        root_blocker_bound: reader.u64()?,
+        before_ranks: decode_usizes(reader, scenario_count)?,
+        after_ranks: decode_usizes(reader, scenario_count)?,
+    })
+}
+
+fn decode_work_limits(
+    reader: &mut Reader<'_>,
+    candidate_count: usize,
+    limits: ProofLimits,
+) -> Result<WorkLimits, ProofError> {
+    let work = WorkLimits {
+        max_edits: reader.usize()?,
+        oracle: reader.usize()?,
+        nodes: reader.usize()?,
     };
-    let oracle = IndependentOracle::build(&claim, limits)?;
-    let checked_before = oracle.spaces.iter().map(Space::rank).collect::<Vec<_>>();
+    if work.max_edits > candidate_count
+        || work.oracle == 0
+        || work.oracle > limits.max_snapshots.min(FORMAT_MAX_ORACLE_CALLS)
+        || work.nodes == 0
+        || work.nodes > limits.max_nodes.min(FORMAT_MAX_SEARCH_NODES)
+    {
+        Err(ProofError::new(
+            "cohomology intervention search limits are invalid",
+        ))
+    } else {
+        Ok(work)
+    }
+}
+
+fn decode_root_blockers(
+    reader: &mut Reader<'_>,
+    candidate_count: usize,
+    limits: ProofLimits,
+) -> Result<Vec<Vec<usize>>, ProofError> {
+    let maximum = limits.max_terms.min(FORMAT_MAX_PROOF_TERMS);
+    let count = reader.bounded_usize("intervention blocker count", maximum)?;
+    let mut blockers = Vec::with_capacity(count);
+    let mut terms = 0usize;
+    for _ in 0..count {
+        let blocker = decode_indices(reader, candidate_count, maximum)?;
+        terms = add_proof_terms(terms, blocker.len(), maximum)?;
+        blockers.push(blocker);
+    }
+    Ok(blockers)
+}
+
+fn add_proof_terms(total: usize, add: usize, maximum: usize) -> Result<usize, ProofError> {
+    let total = total
+        .checked_add(add)
+        .ok_or_else(|| ProofError::new("intervention proof term count overflows"))?;
+    if total > maximum {
+        Err(ProofError::new(
+            "intervention proof terms exceed their limit",
+        ))
+    } else {
+        Ok(total)
+    }
+}
+
+fn decode_trailer(reader: &mut Reader<'_>, expected: [u8; 32]) -> Result<(), ProofError> {
+    if reader.array32()? != expected || reader.remaining() != 0 {
+        Err(ProofError::new(
+            "cohomology intervention has a wrong digest or trailing bytes",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn run_independent_search(
+    claim: &Claim,
+    limits: ProofLimits,
+) -> Result<CheckedIntervention, ProofError> {
+    let oracle = IndependentOracle::build(claim, limits)?;
+    let before_ranks = oracle.spaces.iter().map(Space::rank).collect::<Vec<_>>();
     let costs = claim
         .candidates
         .iter()
@@ -302,47 +481,98 @@ pub fn verify_cohomology_intervention(
         |selected| oracle.survives(selected),
     )
     .run()?;
-    let checked_after = if search.selected.is_empty() {
-        checked_before.clone()
+    let after_ranks = if search.selected.is_empty() {
+        before_ranks.clone()
     } else {
         oracle.ranks(&search.selected)?
     };
+    Ok(CheckedIntervention {
+        search,
+        before_ranks,
+        after_ranks,
+    })
+}
+
+fn verify_search_result(claim: &Claim, checked: &CheckedIntervention) -> Result<(), ProofError> {
+    verify_solution(claim, &checked.search)?;
+    verify_work(claim, &checked.search)?;
+    verify_blocker_result(claim, &checked.search)?;
+    verify_rank_result(claim, checked)
+}
+
+fn verify_solution(claim: &Claim, search: &SearchResult) -> Result<(), ProofError> {
     if map_status(search.status) != claim.status
         || search.selected != claim.edits
         || search.lower_bound != claim.lower_bound
         || search.upper_bound != claim.upper_bound
-        || search.oracle_calls != claim.oracle_calls
+    {
+        Err(independent_search_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_work(claim: &Claim, search: &SearchResult) -> Result<(), ProofError> {
+    if search.oracle_calls != claim.oracle_calls
         || search.search_nodes != claim.search_nodes
         || search.cache_hits != claim.cache_hits
-        || search.root_blockers != claim.root_blockers
-        || search.root_blocker_bound != claim.root_blocker_bound
-        || checked_before != claim.before_ranks
-        || checked_after != claim.after_ranks
     {
-        return Err(ProofError::new(
-            "cohomology intervention differs from independent weighted search",
-        ));
+        Err(independent_search_error())
+    } else {
+        Ok(())
     }
-    let total_cost = search.selected.iter().try_fold(0u64, |sum, position| {
-        sum.checked_add(claim.candidates[*position].cost)
-    });
-    Ok(VerifiedCohomologyIntervention {
-        dimension,
-        modulus,
-        scenarios: scenario_count,
-        status,
+}
+
+fn verify_blocker_result(claim: &Claim, search: &SearchResult) -> Result<(), ProofError> {
+    if search.root_blockers != claim.root_blockers
+        || search.root_blocker_bound != claim.root_blocker_bound
+    {
+        Err(independent_search_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_rank_result(claim: &Claim, checked: &CheckedIntervention) -> Result<(), ProofError> {
+    if checked.before_ranks != claim.before_ranks || checked.after_ranks != claim.after_ranks {
+        Err(independent_search_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn independent_search_error() -> ProofError {
+    ProofError::new("cohomology intervention differs from independent weighted search")
+}
+
+fn intervention_summary(
+    claim: &Claim,
+    checked: &CheckedIntervention,
+) -> VerifiedCohomologyIntervention {
+    let total_cost = checked
+        .search
+        .selected
+        .iter()
+        .try_fold(0u64, |sum, position| {
+            sum.checked_add(claim.candidates[*position].cost)
+        });
+    VerifiedCohomologyIntervention {
+        dimension: claim.dimension,
+        modulus: claim.modulus,
+        scenarios: claim.scenarios.len(),
+        status: claim.status,
         edits: claim.edits.len(),
         total_cost,
-        lower_bound_cost: lower_bound,
-        upper_bound_cost: upper_bound,
-        oracle_calls,
-        search_nodes,
-        cache_hits,
+        lower_bound_cost: claim.lower_bound,
+        upper_bound_cost: claim.upper_bound,
+        oracle_calls: claim.oracle_calls,
+        search_nodes: claim.search_nodes,
+        cache_hits: claim.cache_hits,
         root_blockers: claim.root_blockers.len(),
-        root_blocker_bound,
+        root_blocker_bound: claim.root_blocker_bound,
         before_ranks: claim.before_ranks.clone(),
         after_ranks: claim.after_ranks.clone(),
-    })
+    }
 }
 
 struct IndependentOracle<'a> {
@@ -460,6 +690,21 @@ struct BlockerPacking {
     complete: bool,
 }
 
+enum ExploreEntry {
+    Done(bool),
+    Continue(u64),
+}
+
+enum BranchPlan {
+    Done(bool),
+    Branch(Vec<usize>),
+}
+
+enum GreedyPlan {
+    Done(bool),
+    Minimize(Vec<usize>),
+}
+
 impl<'a, F> Search<'a, F>
 where
     F: FnMut(&[usize]) -> Result<bool, ProofError>,
@@ -486,30 +731,51 @@ where
     }
 
     fn run(&mut self) -> Result<SearchResult, ProofError> {
-        let empty = Vec::new();
-        let Some(empty_survives) = self.evaluate(&empty)? else {
-            return self.result(SearchStatus::Incomplete, vec![], Some(0), None, vec![]);
-        };
-        if !empty_survives {
-            return self.result(SearchStatus::Optimal, vec![], Some(0), Some(0), vec![]);
+        if let Some(result) = self.initial_result()? {
+            return Ok(result);
         }
         let all = (0..self.costs.len()).collect::<Vec<_>>();
-        let Some(all_survives) = self.evaluate(&all)? else {
-            return self.result(SearchStatus::Incomplete, vec![], Some(0), None, vec![]);
-        };
-        if all_survives {
-            return self.result(SearchStatus::Infeasible, vec![], None, None, vec![]);
-        }
-        let root_packing = self.pack_blockers(&empty, &all)?;
+        let root_packing = self.pack_blockers(&[], &all)?;
         let root_bound = blocker_bound(self.costs, &root_packing.blockers)?;
         if root_packing.complete {
             let _ = self.greedy_upper(&all)?;
         }
-        let complete = if root_packing.complete {
-            self.explore(Vec::new(), all)?
-        } else {
-            false
+        let complete = root_packing.complete && self.explore(Vec::new(), all)?;
+        self.final_result(complete, root_bound, root_packing.blockers)
+    }
+
+    fn initial_result(&mut self) -> Result<Option<SearchResult>, ProofError> {
+        let empty = Vec::new();
+        let Some(empty_survives) = self.evaluate(&empty)? else {
+            return self
+                .result(SearchStatus::Incomplete, vec![], Some(0), None, vec![])
+                .map(Some);
         };
+        if !empty_survives {
+            return self
+                .result(SearchStatus::Optimal, vec![], Some(0), Some(0), vec![])
+                .map(Some);
+        }
+        let all = (0..self.costs.len()).collect::<Vec<_>>();
+        let Some(all_survives) = self.evaluate(&all)? else {
+            return self
+                .result(SearchStatus::Incomplete, vec![], Some(0), None, vec![])
+                .map(Some);
+        };
+        if all_survives {
+            return self
+                .result(SearchStatus::Infeasible, vec![], None, None, vec![])
+                .map(Some);
+        }
+        Ok(None)
+    }
+
+    fn final_result(
+        &self,
+        complete: bool,
+        root_bound: u64,
+        root_blockers: Vec<Vec<usize>>,
+    ) -> Result<SearchResult, ProofError> {
         let (status, selected, lower, upper) = match &self.best {
             Some((cost, selected)) if complete || root_bound == *cost => (
                 SearchStatus::Optimal,
@@ -526,7 +792,7 @@ where
             None if complete => (SearchStatus::Infeasible, vec![], None, None),
             None => (SearchStatus::Incomplete, vec![], Some(root_bound), None),
         };
-        self.result(status, selected, lower, upper, root_packing.blockers)
+        self.result(status, selected, lower, upper, root_blockers)
     }
 
     fn result(
@@ -565,96 +831,142 @@ where
     }
 
     fn greedy_upper(&mut self, available: &[usize]) -> Result<bool, ProofError> {
-        let mut selected = Vec::new();
-        while self.evaluate(&selected)?.is_some_and(|survives| survives) {
-            if selected.len() == self.max_selected {
-                return Ok(true);
-            }
-            let remaining = difference(available, &selected);
-            let packing = self.pack_blockers(&selected, &remaining)?;
-            let Some(blocker) = packing.blockers.first() else {
-                return Ok(packing.complete);
-            };
-            let candidate = blocker
-                .iter()
-                .copied()
-                .min_by_key(|candidate| (self.costs[*candidate], *candidate))
-                .expect("a blocker is nonempty");
-            insert_sorted(&mut selected, candidate);
-            if !packing.complete {
-                return Ok(false);
-            }
-        }
+        let mut selected = match self.build_greedy_selection(available)? {
+            GreedyPlan::Done(complete) => return Ok(complete),
+            GreedyPlan::Minimize(selected) => selected,
+        };
         if self.evaluate(&selected)?.is_none() {
             return Ok(false);
         }
-        for candidate in selected.clone().into_iter().rev() {
-            let reduced = without(&selected, candidate);
-            let Some(survives) = self.evaluate(&reduced)? else {
-                return Ok(false);
-            };
-            if !survives {
-                selected = reduced;
-            }
+        if !self.minimize_greedy_selection(&mut selected)? {
+            return Ok(false);
         }
         self.update_best(selected)?;
         Ok(true)
     }
 
+    fn build_greedy_selection(&mut self, available: &[usize]) -> Result<GreedyPlan, ProofError> {
+        let mut selected = Vec::new();
+        while self.evaluate(&selected)?.is_some_and(|survives| survives) {
+            if selected.len() == self.max_selected {
+                return Ok(GreedyPlan::Done(true));
+            }
+            let remaining = difference(available, &selected);
+            let packing = self.pack_blockers(&selected, &remaining)?;
+            let Some(blocker) = packing.blockers.first() else {
+                return Ok(GreedyPlan::Done(packing.complete));
+            };
+            let candidate = cheapest_candidate(self.costs, blocker);
+            insert_sorted(&mut selected, candidate);
+            if !packing.complete {
+                return Ok(GreedyPlan::Done(false));
+            }
+        }
+        Ok(GreedyPlan::Minimize(selected))
+    }
+
+    fn minimize_greedy_selection(&mut self, selected: &mut Vec<usize>) -> Result<bool, ProofError> {
+        for candidate in selected.clone().into_iter().rev() {
+            let reduced = without(selected, candidate);
+            let Some(survives) = self.evaluate(&reduced)? else {
+                return Ok(false);
+            };
+            if !survives {
+                *selected = reduced;
+            }
+        }
+        Ok(true)
+    }
+
     fn explore(&mut self, included: Vec<usize>, available: Vec<usize>) -> Result<bool, ProofError> {
+        let included_cost = match self.enter_node(&included)? {
+            ExploreEntry::Done(complete) => return Ok(complete),
+            ExploreEntry::Continue(cost) => cost,
+        };
+        match self.plan_branch(&included, &available, included_cost)? {
+            BranchPlan::Done(complete) => Ok(complete),
+            BranchPlan::Branch(branch) => self.explore_branch(&included, &available, branch),
+        }
+    }
+
+    fn plan_branch(
+        &mut self,
+        included: &[usize],
+        available: &[usize],
+        included_cost: u64,
+    ) -> Result<BranchPlan, ProofError> {
+        let union = merge(included, available);
+        let Some(union_survives) = self.evaluate(&union)? else {
+            return Ok(BranchPlan::Done(false));
+        };
+        if union_survives {
+            return Ok(BranchPlan::Done(true));
+        }
+        let packing = self.pack_blockers(included, available)?;
+        let bound = included_cost
+            .checked_add(blocker_bound(self.costs, &packing.blockers)?)
+            .ok_or_else(|| ProofError::new("intervention search bound overflows"))?;
+        if self.branch_is_closed(included.len(), packing.blockers.len(), bound) {
+            return Ok(BranchPlan::Done(true));
+        }
+        if !packing.complete {
+            return Ok(BranchPlan::Done(false));
+        }
+        let Some(branch) = self.branch_candidates(packing.blockers) else {
+            return Ok(BranchPlan::Done(true));
+        };
+        Ok(BranchPlan::Branch(branch))
+    }
+
+    fn enter_node(&mut self, included: &[usize]) -> Result<ExploreEntry, ProofError> {
         if self.search_nodes == self.node_limit {
-            return Ok(false);
+            return Ok(ExploreEntry::Done(false));
         }
         self.search_nodes += 1;
-        let Some(survives) = self.evaluate(&included)? else {
-            return Ok(false);
+        let Some(survives) = self.evaluate(included)? else {
+            return Ok(ExploreEntry::Done(false));
         };
         if !survives {
-            self.update_best(included)?;
-            return Ok(true);
+            self.update_best(included.to_vec())?;
+            return Ok(ExploreEntry::Done(true));
         }
         if included.len() == self.max_selected {
-            return Ok(true);
+            return Ok(ExploreEntry::Done(true));
         }
-        let included_cost = selected_cost(self.costs, &included)?;
+        let included_cost = selected_cost(self.costs, included)?;
         if self
             .best
             .as_ref()
             .is_some_and(|(best, _)| included_cost >= *best)
         {
-            return Ok(true);
+            Ok(ExploreEntry::Done(true))
+        } else {
+            Ok(ExploreEntry::Continue(included_cost))
         }
-        let union = merge(&included, &available);
-        let Some(union_survives) = self.evaluate(&union)? else {
-            return Ok(false);
-        };
-        if union_survives {
-            return Ok(true);
-        }
-        let packing = self.pack_blockers(&included, &available)?;
-        let bound = included_cost
-            .checked_add(blocker_bound(self.costs, &packing.blockers)?)
-            .ok_or_else(|| ProofError::new("intervention search bound overflows"))?;
-        if included.len().saturating_add(packing.blockers.len()) > self.max_selected
+    }
+
+    fn branch_is_closed(&self, included: usize, blockers: usize, bound: u64) -> bool {
+        included.saturating_add(blockers) > self.max_selected
             || self.best.as_ref().is_some_and(|(best, _)| bound >= *best)
-        {
-            return Ok(true);
-        }
-        if !packing.complete {
-            return Ok(false);
-        }
-        let Some(mut branch) = packing
-            .blockers
+    }
+
+    fn branch_candidates(&self, blockers: Vec<Vec<usize>>) -> Option<Vec<usize>> {
+        let mut branch = blockers
             .into_iter()
-            .min_by_key(|blocker| (blocker.len(), blocker_min_cost(self.costs, blocker)))
-        else {
-            return Ok(true);
-        };
+            .min_by_key(|blocker| (blocker.len(), blocker_min_cost(self.costs, blocker)))?;
         branch.sort_by_key(|candidate| (self.costs[*candidate], *candidate));
+        Some(branch)
+    }
+
+    fn explore_branch(
+        &mut self,
+        included: &[usize],
+        available: &[usize],
+        branch: Vec<usize>,
+    ) -> Result<bool, ProofError> {
         let mut excluded = BTreeSet::new();
-        let mut complete = true;
         for candidate in branch {
-            let mut child_included = included.clone();
+            let mut child_included = included.to_vec();
             insert_sorted(&mut child_included, candidate);
             let child_available = available
                 .iter()
@@ -662,12 +974,11 @@ where
                 .filter(|item| *item != candidate && !excluded.contains(item))
                 .collect();
             if !self.explore(child_included, child_available)? {
-                complete = false;
-                break;
+                return Ok(false);
             }
             excluded.insert(candidate);
         }
-        Ok(complete)
+        Ok(true)
     }
 
     fn pack_blockers(
@@ -748,6 +1059,14 @@ fn blocker_min_cost(costs: &[u64], blocker: &[usize]) -> u64 {
         .map(|candidate| costs[*candidate])
         .min()
         .unwrap_or(0)
+}
+
+fn cheapest_candidate(costs: &[u64], blocker: &[usize]) -> usize {
+    blocker
+        .iter()
+        .copied()
+        .min_by_key(|candidate| (costs[*candidate], *candidate))
+        .expect("a blocker is nonempty")
 }
 
 fn blocker_bound(costs: &[u64], blockers: &[Vec<usize>]) -> Result<u64, ProofError> {
