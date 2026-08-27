@@ -13,8 +13,8 @@ use sha2::{Digest, Sha256};
 
 use crate::classes::{basis_class_id, group_id};
 use crate::{
-    Bar, Cocycle, CriticalPair, CriticalSimplex, Diagram, Error, ExplainedDiagram, PersistentClass,
-    PersistentClassSpace, PointCloudGraph, PointCloudParams, Result, RipsParams,
+    Bar, Cocycle, CriticalPair, CriticalSimplex, Diagram, Error, ExplainedDiagram, IntervalGroupId,
+    PersistentClass, PersistentClassSpace, PointCloudGraph, PointCloudParams, Result, RipsParams,
     SparseDistanceMatrix, rips_persistence_sparse, rips_persistence_with_classes_sparse,
 };
 
@@ -466,68 +466,83 @@ impl PersistenceAtlas {
         let mut spaces = Vec::with_capacity(self.explained.spaces.len());
         let mut sensitivities = Vec::with_capacity(self.explained.spaces.len());
         for (space, formula) in self.explained.spaces.iter().zip(&self.formulas) {
-            let birth = formula.birth.value(&self.topology, &values)?;
-            let death = formula
+            let (evaluated, sensitivity) =
+                self.evaluate_space(space, formula, &values, terminal)?;
+            spaces.push(evaluated);
+            sensitivities.push(sensitivity);
+        }
+        let mut diagram = self.h0_diagram(&values);
+        add_space_bars(&mut diagram, &spaces);
+        diagram.canonicalize();
+        Ok(AtlasEvaluation {
+            diagram,
+            spaces,
+            sensitivities,
+        })
+    }
+
+    fn evaluate_space(
+        &self,
+        space: &PersistentClassSpace,
+        formula: &SpaceFormula,
+        values: &[f64],
+        terminal: f64,
+    ) -> Result<(EvaluatedClassSpace, ClassSensitivity)> {
+        let birth = formula.birth.value(&self.topology, values)?;
+        let death = formula
+            .death
+            .as_ref()
+            .map(|death| death.value(&self.topology, values))
+            .transpose()?
+            .unwrap_or(f64::INFINITY);
+        let interval = Bar {
+            dim: 1,
+            birth,
+            death,
+        };
+        let scale = if death.is_finite() {
+            previous_float(death)
+        } else {
+            terminal
+        };
+        let cocycles: Vec<_> = space
+            .basis
+            .iter()
+            .map(|class| Cocycle {
+                modulus: class.cocycle.modulus,
+                scale,
+                terms: class.cocycle.terms.clone(),
+            })
+            .collect();
+        let id = group_id(interval, cocycles[0].modulus, &cocycles);
+        let basis = evaluated_basis(id, interval, cocycles);
+        let critical_pairs = space
+            .critical_pairs
+            .iter()
+            .map(|pair| evaluate_critical_pair(pair, &self.topology, values))
+            .collect::<Result<Vec<_>>>()?;
+        let evaluated = EvaluatedClassSpace {
+            lineage: formula.lineage,
+            space: PersistentClassSpace {
+                id,
+                interval,
+                basis,
+                critical_pairs,
+            },
+        };
+        let sensitivity = ClassSensitivity {
+            lineage: formula.lineage,
+            birth: formula.birth.gradient(),
+            death: formula
                 .death
                 .as_ref()
-                .map(|death| death.value(&self.topology, &values))
-                .transpose()?
-                .unwrap_or(f64::INFINITY);
-            let interval = Bar {
-                dim: 1,
-                birth,
-                death,
-            };
-            let scale = if death.is_finite() {
-                previous_float(death)
-            } else {
-                terminal
-            };
-            let cocycles: Vec<_> = space
-                .basis
-                .iter()
-                .map(|class| Cocycle {
-                    modulus: class.cocycle.modulus,
-                    scale,
-                    terms: class.cocycle.terms.clone(),
-                })
-                .collect();
-            let id = group_id(interval, cocycles[0].modulus, &cocycles);
-            let basis: Vec<_> = cocycles
-                .into_iter()
-                .enumerate()
-                .map(|(basis_index, cocycle)| PersistentClass {
-                    id: basis_class_id(id, basis_index, &cocycle),
-                    group_id: id,
-                    basis_index,
-                    interval,
-                    cocycle,
-                })
-                .collect();
-            let critical_pairs = space
-                .critical_pairs
-                .iter()
-                .map(|pair| evaluate_critical_pair(pair, &self.topology, &values))
-                .collect::<Result<Vec<_>>>()?;
-            spaces.push(EvaluatedClassSpace {
-                lineage: formula.lineage,
-                space: PersistentClassSpace {
-                    id,
-                    interval,
-                    basis,
-                    critical_pairs,
-                },
-            });
-            sensitivities.push(ClassSensitivity {
-                lineage: formula.lineage,
-                birth: formula.birth.gradient(),
-                death: formula
-                    .death
-                    .as_ref()
-                    .map(EndpointFormula::gradient)
-                    .unwrap_or(EndpointGradient::Essential),
-            });
-        }
+                .map(EndpointFormula::gradient)
+                .unwrap_or(EndpointGradient::Essential),
+        };
+        Ok((evaluated, sensitivity))
+    }
+
+    fn h0_diagram(&self, values: &[f64]) -> Diagram {
         let mut diagram = Diagram::default();
         for edge in &self.h0_deaths {
             let position = self
@@ -550,18 +565,7 @@ impl PersistenceAtlas {
                 death: f64::INFINITY,
             });
         }
-        for space in &spaces {
-            diagram.bars.extend(std::iter::repeat_n(
-                space.space.interval,
-                space.space.basis.len(),
-            ));
-        }
-        diagram.canonicalize();
-        Ok(AtlasEvaluation {
-            diagram,
-            spaces,
-            sensitivities,
-        })
+        diagram
     }
 
     /// Evaluate only the exact H0 and H1 diagram without persistence
@@ -916,6 +920,33 @@ fn critical_sources(
         ));
     }
     Ok(sources)
+}
+
+fn evaluated_basis(
+    id: IntervalGroupId,
+    interval: Bar,
+    cocycles: Vec<Cocycle>,
+) -> Vec<PersistentClass> {
+    cocycles
+        .into_iter()
+        .enumerate()
+        .map(|(basis_index, cocycle)| PersistentClass {
+            id: basis_class_id(id, basis_index, &cocycle),
+            group_id: id,
+            basis_index,
+            interval,
+            cocycle,
+        })
+        .collect()
+}
+
+fn add_space_bars(diagram: &mut Diagram, spaces: &[EvaluatedClassSpace]) {
+    for space in spaces {
+        diagram.bars.extend(std::iter::repeat_n(
+            space.space.interval,
+            space.space.basis.len(),
+        ));
+    }
 }
 
 fn evaluate_critical_pair(
