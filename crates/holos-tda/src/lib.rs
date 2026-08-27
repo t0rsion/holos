@@ -850,28 +850,32 @@ pub fn rips_persistence_with_classes(
 ) -> Result<ExplainedDiagram> {
     let threshold = resolved_threshold(dist, params);
     if params.collapse_edges {
-        let collapsed = match params.collapse_schedule {
-            CollapseSchedule::Serial => collapse::collapse_dense(dist, params.threshold)?,
-            CollapseSchedule::Ordered => {
-                collapse::collapse_dense_ordered_parallel(dist, params.threshold, params.threads)?
-            }
-            CollapseSchedule::Rounds => {
-                collapse::collapse_dense_rounds_parallel(dist, params.threshold, params.threads)?
-            }
-            CollapseSchedule::Adaptive => {
-                collapse::collapse_dense_adaptive(dist, params.threshold, params.adaptive_collapse)?
-            }
-        };
-        let mut inner = params.clone();
-        inner.collapse_edges = false;
-        inner.threshold = Some(collapsed.certificate.terminal_level());
-        let explained = classes::rips_persistence_with_classes_sparse(&collapsed.matrix, &inner)?;
-        return classes::lift_h1_classes(&collapsed, explained);
+        return dense_collapsed_classes(dist, params);
     }
     let sparse = dist.to_sparse_at(threshold)?;
     let mut fixed = params.clone();
     fixed.threshold = Some(threshold);
     classes::rips_persistence_with_classes_sparse(&sparse, &fixed)
+}
+
+fn dense_collapsed_classes(dist: &DistanceMatrix, params: &RipsParams) -> Result<ExplainedDiagram> {
+    let collapsed = match params.collapse_schedule {
+        CollapseSchedule::Serial => collapse::collapse_dense(dist, params.threshold)?,
+        CollapseSchedule::Ordered => {
+            collapse::collapse_dense_ordered_parallel(dist, params.threshold, params.threads)?
+        }
+        CollapseSchedule::Rounds => {
+            collapse::collapse_dense_rounds_parallel(dist, params.threshold, params.threads)?
+        }
+        CollapseSchedule::Adaptive => {
+            collapse::collapse_dense_adaptive(dist, params.threshold, params.adaptive_collapse)?
+        }
+    };
+    let mut inner = params.clone();
+    inner.collapse_edges = false;
+    inner.threshold = Some(collapsed.certificate.terminal_level());
+    let explained = classes::rips_persistence_with_classes_sparse(&collapsed.matrix, &inner)?;
+    classes::lift_h1_classes(&collapsed, explained)
 }
 
 /// Compute the Rips persistence diagram of a sparse distance matrix.
@@ -901,40 +905,77 @@ pub(crate) fn collapse_and_solve<D: distances::Distances + Sync>(
     params: &RipsParams,
     report: impl FnOnce(&collapse::CollapsedRips) -> Result<()>,
 ) -> Result<Diagram> {
-    let build_pool = || -> Result<Option<rayon::ThreadPool>> {
-        if params.threads > 1 {
-            Ok(Some(
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(params.threads)
-                    .build()
-                    .map_err(|e| Error::Io(format!("thread pool: {e}")))?,
-            ))
-        } else {
-            Ok(None)
-        }
-    };
-    let (collapsed, pool) = match params.collapse_schedule {
-        CollapseSchedule::Serial => {
-            let collapsed = collapse::collapse_serial_in(dist, params.threshold)?;
-            (collapsed, build_pool()?)
-        }
-        CollapseSchedule::Ordered => {
-            let pool = build_pool()?;
-            let collapsed = collapse::collapse_ordered_in(dist, params.threshold, pool.as_ref())?;
-            (collapsed, pool)
-        }
-        CollapseSchedule::Rounds => {
-            let pool = build_pool()?;
-            let collapsed = collapse::collapse_rounds_in(dist, params.threshold, pool.as_ref())?;
-            (collapsed, pool)
-        }
-        CollapseSchedule::Adaptive => {
-            let collapsed =
-                collapse::collapse_adaptive_in(dist, params.threshold, params.adaptive_collapse)?;
-            (collapsed, build_pool()?)
-        }
-    };
+    let (collapsed, pool) = execute_collapse(dist, params)?;
     report(&collapsed)?;
+    solve_collapsed(collapsed, pool, params)
+}
+
+fn collapse_pool(threads: usize) -> Result<Option<rayon::ThreadPool>> {
+    if threads <= 1 {
+        return Ok(None);
+    }
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map(Some)
+        .map_err(|error| Error::Io(format!("thread pool: {error}")))
+}
+
+fn execute_collapse<D: distances::Distances + Sync>(
+    dist: &D,
+    params: &RipsParams,
+) -> Result<(collapse::CollapsedRips, Option<rayon::ThreadPool>)> {
+    match params.collapse_schedule {
+        CollapseSchedule::Serial => collapse_serial_run(dist, params),
+        CollapseSchedule::Ordered => collapse_ordered_run(dist, params),
+        CollapseSchedule::Rounds => collapse_rounds_run(dist, params),
+        CollapseSchedule::Adaptive => collapse_adaptive_run(dist, params),
+    }
+}
+
+fn collapse_serial_run<D: distances::Distances>(
+    dist: &D,
+    params: &RipsParams,
+) -> Result<(collapse::CollapsedRips, Option<rayon::ThreadPool>)> {
+    Ok((
+        collapse::collapse_serial_in(dist, params.threshold)?,
+        collapse_pool(params.threads)?,
+    ))
+}
+
+fn collapse_ordered_run<D: distances::Distances + Sync>(
+    dist: &D,
+    params: &RipsParams,
+) -> Result<(collapse::CollapsedRips, Option<rayon::ThreadPool>)> {
+    let pool = collapse_pool(params.threads)?;
+    let collapsed = collapse::collapse_ordered_in(dist, params.threshold, pool.as_ref())?;
+    Ok((collapsed, pool))
+}
+
+fn collapse_rounds_run<D: distances::Distances + Sync>(
+    dist: &D,
+    params: &RipsParams,
+) -> Result<(collapse::CollapsedRips, Option<rayon::ThreadPool>)> {
+    let pool = collapse_pool(params.threads)?;
+    let collapsed = collapse::collapse_rounds_in(dist, params.threshold, pool.as_ref())?;
+    Ok((collapsed, pool))
+}
+
+fn collapse_adaptive_run<D: distances::Distances>(
+    dist: &D,
+    params: &RipsParams,
+) -> Result<(collapse::CollapsedRips, Option<rayon::ThreadPool>)> {
+    Ok((
+        collapse::collapse_adaptive_in(dist, params.threshold, params.adaptive_collapse)?,
+        collapse_pool(params.threads)?,
+    ))
+}
+
+fn solve_collapsed(
+    collapsed: collapse::CollapsedRips,
+    pool: Option<rayon::ThreadPool>,
+    params: &RipsParams,
+) -> Result<Diagram> {
     let mut inner = params.clone();
     inner.collapse_edges = false;
     inner.threshold = Some(collapsed.certificate.terminal_level());
