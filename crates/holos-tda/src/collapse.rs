@@ -520,17 +520,15 @@ fn fill_row(adj: &[Vec<AdjEntry>], cands: &[(usize, f64)], pos: usize, row: &mut
 /// satisfied `f(apex, x) <= t'` at a smaller `t'`. A rescan streams one
 /// candidate row at a time in increasing vertex order and keeps the first
 /// dominating row as the new apex row.
-fn test_edge(
+fn collect_common_candidates(
     adj: &[Vec<AdjEntry>],
     u: usize,
     v: usize,
     a: f64,
     terminal: f64,
-    s: &mut Scratch,
-) -> Option<Vec<(f64, usize)>> {
-    // Tombstones read as +inf and drop out through the finiteness checks.
-    // Neither list holds its own vertex, so u and v never enter C.
-    s.cands.clear();
+    candidates: &mut Vec<(usize, f64)>,
+) {
+    candidates.clear();
     let (lu, lv) = (&adj[u], &adj[v]);
     let (mut i, mut j) = (0, 0);
     while i < lu.len() && j < lv.len() {
@@ -543,7 +541,7 @@ fn test_edge(
                 if du.is_finite() && dv.is_finite() {
                     let b = a.max(du).max(dv);
                     if b <= terminal {
-                        s.cands.push((x, b));
+                        candidates.push((x, b));
                     }
                 }
                 i += 1;
@@ -551,6 +549,43 @@ fn test_edge(
             }
         }
     }
+}
+
+fn candidate_run_end(by_value: &[(f64, u32)], start: usize) -> usize {
+    let value = by_value[start].0;
+    let mut end = start + 1;
+    while end < by_value.len() && by_value[end].0 == value {
+        end += 1;
+    }
+    end
+}
+
+fn kept_apex(scratch: &Scratch, start: usize, end: usize, value: f64) -> bool {
+    scratch.by_b[start..end]
+        .iter()
+        .all(|&(_, position)| scratch.apex_row[position as usize] <= value)
+}
+
+fn find_apex(
+    adj: &[Vec<AdjEntry>],
+    candidates: &[(usize, f64)],
+    members: &[(f64, u32)],
+    value: f64,
+) -> Option<usize> {
+    (0..candidates.len())
+        .filter(|&position| candidates[position].1 <= value)
+        .find(|&position| dominates(adj, candidates, members, position, value))
+}
+
+fn test_edge(
+    adj: &[Vec<AdjEntry>],
+    u: usize,
+    v: usize,
+    a: f64,
+    terminal: f64,
+    s: &mut Scratch,
+) -> Option<Vec<(f64, usize)>> {
+    collect_common_candidates(adj, u, v, a, terminal, &mut s.cands);
     let cands = &s.cands;
     let k = cands.len();
     if k == 0 {
@@ -574,28 +609,10 @@ fn test_edge(
     let mut run = 0usize;
     while run < k {
         let t = s.by_b[run].0;
-        let mut run_end = run;
-        while run_end < k && s.by_b[run_end].0 == t {
-            run_end += 1;
-        }
-        let kept = apex.is_some_and(|_| {
-            s.by_b[run..run_end]
-                .iter()
-                .all(|&(_, p)| s.apex_row[p as usize] <= t)
-        });
+        let run_end = candidate_run_end(&s.by_b, run);
+        let kept = apex.is_some() && kept_apex(s, run, run_end, t);
         if !kept {
-            let mut found = None;
-            for p in 0..k {
-                if cands[p].1 > t {
-                    continue;
-                }
-                if dominates(adj, cands, &s.by_b[..run_end], p, t) {
-                    found = Some(p);
-                    break;
-                }
-            }
-            // No candidate dominates at this level, so the edge stays.
-            let p = found?;
+            let p = find_apex(adj, cands, &s.by_b[..run_end], t)?;
             fill_row(adj, cands, p, &mut s.apex_row);
             segments.push((t, cands[p].0));
             apex = Some(p);
@@ -603,6 +620,66 @@ fn test_edge(
         run = run_end;
     }
     Some(segments)
+}
+
+fn collect_closed_common_neighbors(
+    adj: &[Vec<AdjEntry>],
+    u: usize,
+    v: usize,
+    marks: &mut Vec<usize>,
+) {
+    marks.clear();
+    let (left, right) = (&adj[u], &adj[v]);
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() && j < right.len() {
+        match left[i].0.cmp(&right[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                if left[i].1.is_finite() && right[j].1.is_finite() {
+                    marks.push(left[i].0);
+                }
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    marks.push(u);
+    marks.push(v);
+    marks.sort_unstable();
+}
+
+fn mark_induced_by_search(list: &[AdjEntry], later: &[usize], mark: &mut impl FnMut(usize)) {
+    for &vertex in later {
+        if let Ok(position) = list.binary_search_by(|probe| probe.0.cmp(&vertex)) {
+            let (_, distance, index) = list[position];
+            if distance.is_finite() {
+                mark(index);
+            }
+        }
+    }
+}
+
+fn mark_induced_by_merge(
+    list: &[AdjEntry],
+    members: &[usize],
+    pivot: usize,
+    mark: &mut impl FnMut(usize),
+) {
+    let (mut i, mut j) = (0, 0);
+    while i < list.len() && j < members.len() {
+        match list[i].0.cmp(&members[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                if list[i].0 > pivot && list[i].1.is_finite() {
+                    mark(list[i].2);
+                }
+                i += 1;
+                j += 1;
+            }
+        }
+    }
 }
 
 /// Run `mark` on the schedule index of every live edge of the subgraph
@@ -628,56 +705,16 @@ fn for_each_induced_edge(
             return false;
         }
     }
-    s.marks.clear();
-    let (mut i, mut j) = (0, 0);
-    while i < lu.len() && j < lv.len() {
-        let (x, du, _) = lu[i];
-        let (y, dv, _) = lv[j];
-        match x.cmp(&y) {
-            std::cmp::Ordering::Less => i += 1,
-            std::cmp::Ordering::Greater => j += 1,
-            std::cmp::Ordering::Equal => {
-                if du.is_finite() && dv.is_finite() {
-                    s.marks.push(x);
-                }
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-    s.marks.push(u);
-    s.marks.push(v);
+    collect_closed_common_neighbors(adj, u, v, &mut s.marks);
     if limit.is_some_and(|limit| s.marks.len() > limit) {
         return false;
     }
-    s.marks.sort_unstable();
     for (a, &p) in s.marks.iter().enumerate() {
         let list = &adj[p];
         if s.marks.len() * 16 < list.len() {
-            for &q in &s.marks[a + 1..] {
-                if let Ok(pos) = list.binary_search_by(|probe| probe.0.cmp(&q)) {
-                    let (_, d, idx) = list[pos];
-                    if d.is_finite() {
-                        mark(idx);
-                    }
-                }
-            }
+            mark_induced_by_search(list, &s.marks[a + 1..], &mut mark);
         } else {
-            let (mut i, mut q) = (0, 0);
-            while i < list.len() && q < s.marks.len() {
-                let (x, d, idx) = list[i];
-                match x.cmp(&s.marks[q]) {
-                    std::cmp::Ordering::Less => i += 1,
-                    std::cmp::Ordering::Greater => q += 1,
-                    std::cmp::Ordering::Equal => {
-                        if x > p && d.is_finite() {
-                            mark(idx);
-                        }
-                        i += 1;
-                        q += 1;
-                    }
-                }
-            }
+            mark_induced_by_merge(list, &s.marks, p, &mut mark);
         }
     }
     true
