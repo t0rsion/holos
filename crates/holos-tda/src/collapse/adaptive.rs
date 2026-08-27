@@ -118,109 +118,185 @@ pub(crate) fn collapse_adaptive_in<D: Distances>(
     threshold: Option<f64>,
     params: AdaptiveCollapseParams,
 ) -> Result<CollapsedRips> {
-    let Prepared {
-        mut edges,
-        mut adj,
-        run,
-    } = prepare(dist, threshold)?;
+    AdaptiveExecution::new(prepare(dist, threshold)?, params).run()
+}
 
-    let mut stats = CollapseStats::new(edges.len());
-    let mut steps = Vec::new();
-    let mut scratch = Scratch::default();
-    let mut work_used = 0u64;
-    let mut budget_limited = false;
-    let mut passes = 0usize;
+enum PassPlan {
+    Candidates(Vec<Candidate>),
+    FixedPoint,
+    BudgetLimited,
+}
 
-    'schedule: loop {
-        passes += 1;
-        let mut candidates = Vec::new();
-        for (index, edge) in edges.iter().enumerate() {
-            if !edge.alive {
-                continue;
-            }
-            if params.work_limit.is_some_and(|limit| work_used >= limit) {
-                budget_limited = true;
-                break 'schedule;
-            }
+struct AdaptiveExecution {
+    edges: Vec<EdgeRec>,
+    adj: Vec<Vec<AdjEntry>>,
+    run: Run,
+    params: AdaptiveCollapseParams,
+    stats: CollapseStats,
+    steps: Vec<RemovalStep>,
+    scratch: Scratch,
+    work_used: u64,
+    passes: usize,
+}
 
-            work_used += 1;
-            stats.edge_tests += 1;
-            let witnesses = test_edge(&adj, edge.u, edge.v, edge.value, run.terminal, &mut scratch);
-            stats.max_common_neighborhood = stats.max_common_neighborhood.max(scratch.cands.len());
-            if witnesses.is_some() {
-                stats.adaptive_score_evaluations += 1;
-                candidates.push(Candidate {
-                    score: score(&adj, &scratch.cands, params.objective),
-                    index,
-                });
-            }
-        }
-
-        if candidates.is_empty() {
-            break;
-        }
-        candidates.sort_unstable_by(|a, b| b.cmp(a));
-        for candidate in candidates {
-            stats.adaptive_queue_pops += 1;
-            if !edges[candidate.index].alive {
-                stats.adaptive_stale_pops += 1;
-                continue;
-            }
-            if params.work_limit.is_some_and(|limit| work_used >= limit) {
-                budget_limited = true;
-                break 'schedule;
-            }
-
-            work_used += 1;
-            stats.edge_tests += 1;
-            let index = candidate.index;
-            let (u, v, value) = (edges[index].u, edges[index].v, edges[index].value);
-            let Some(witnesses) = test_edge(&adj, u, v, value, run.terminal, &mut scratch) else {
-                stats.adaptive_stale_pops += 1;
-                continue;
-            };
-            stats.max_common_neighborhood = stats.max_common_neighborhood.max(scratch.cands.len());
-            stats.adaptive_score_evaluations += 1;
-            let selected_score = score(&adj, &scratch.cands, params.objective);
-            edges[index].alive = false;
-            tombstone(&mut adj, u, v);
-            stats.witness_segments += witnesses.len();
-            stats.adaptive_triangles_removed = stats
-                .adaptive_triangles_removed
-                .saturating_add(selected_score.triangles);
-            stats.adaptive_tetrahedra_removed = stats
-                .adaptive_tetrahedra_removed
-                .saturating_add(selected_score.tetrahedra);
-            steps.push(RemovalStep {
-                u,
-                v,
-                value,
-                position: SchedulePosition::Sequence(steps.len() + 1),
-                witnesses,
-            });
+impl AdaptiveExecution {
+    fn new(prepared: Prepared, params: AdaptiveCollapseParams) -> Self {
+        let count = prepared.edges.len();
+        Self {
+            edges: prepared.edges,
+            adj: prepared.adj,
+            run: prepared.run,
+            params,
+            stats: CollapseStats::new(count),
+            steps: Vec::new(),
+            scratch: Scratch::default(),
+            work_used: 0,
+            passes: 0,
         }
     }
 
-    let completeness = if budget_limited {
-        CollapseCompleteness::BudgetLimited
-    } else {
-        CollapseCompleteness::CompleteFixedPoint
-    };
-    stats.epochs = passes;
-    stats.logical_tests = stats.edge_tests;
-    finish(
-        run,
-        Execution::Adaptive {
-            objective: params.objective,
-            completeness,
-            work_limit: params.work_limit,
-            work_used,
-        },
-        &edges,
-        steps,
-        stats,
-        CollapseTimings::default(),
-    )
+    fn run(mut self) -> Result<CollapsedRips> {
+        let budget_limited = loop {
+            self.passes += 1;
+            match self.plan_pass() {
+                PassPlan::FixedPoint => break false,
+                PassPlan::BudgetLimited => break true,
+                PassPlan::Candidates(candidates) => {
+                    if self.retire_candidates(candidates) {
+                        break true;
+                    }
+                }
+            }
+        };
+        self.stats.epochs = self.passes;
+        self.stats.logical_tests = self.stats.edge_tests;
+        let completeness = if budget_limited {
+            CollapseCompleteness::BudgetLimited
+        } else {
+            CollapseCompleteness::CompleteFixedPoint
+        };
+        finish(
+            self.run,
+            Execution::Adaptive {
+                objective: self.params.objective,
+                completeness,
+                work_limit: self.params.work_limit,
+                work_used: self.work_used,
+            },
+            &self.edges,
+            self.steps,
+            self.stats,
+            CollapseTimings::default(),
+        )
+    }
+
+    fn plan_pass(&mut self) -> PassPlan {
+        let mut candidates = Vec::new();
+        for index in 0..self.edges.len() {
+            if !self.edges[index].alive {
+                continue;
+            }
+            if self.budget_exhausted() {
+                return PassPlan::BudgetLimited;
+            }
+            if let Some(candidate) = self.plan_candidate(index) {
+                candidates.push(candidate);
+            }
+        }
+        if candidates.is_empty() {
+            PassPlan::FixedPoint
+        } else {
+            candidates.sort_unstable_by(|a, b| b.cmp(a));
+            PassPlan::Candidates(candidates)
+        }
+    }
+
+    fn plan_candidate(&mut self, index: usize) -> Option<Candidate> {
+        self.charge_test();
+        let edge = &self.edges[index];
+        let witnesses = test_edge(
+            &self.adj,
+            edge.u,
+            edge.v,
+            edge.value,
+            self.run.terminal,
+            &mut self.scratch,
+        );
+        self.record_neighborhood();
+        witnesses.map(|_| {
+            self.stats.adaptive_score_evaluations += 1;
+            Candidate {
+                score: score(&self.adj, &self.scratch.cands, self.params.objective),
+                index,
+            }
+        })
+    }
+
+    fn retire_candidates(&mut self, candidates: Vec<Candidate>) -> bool {
+        for candidate in candidates {
+            self.stats.adaptive_queue_pops += 1;
+            if !self.edges[candidate.index].alive {
+                self.stats.adaptive_stale_pops += 1;
+                continue;
+            }
+            if self.budget_exhausted() {
+                return true;
+            }
+            self.retire_candidate(candidate.index);
+        }
+        false
+    }
+
+    fn retire_candidate(&mut self, index: usize) {
+        self.charge_test();
+        let edge = &self.edges[index];
+        let (u, v, value) = (edge.u, edge.v, edge.value);
+        let Some(witnesses) =
+            test_edge(&self.adj, u, v, value, self.run.terminal, &mut self.scratch)
+        else {
+            self.stats.adaptive_stale_pops += 1;
+            return;
+        };
+        self.record_neighborhood();
+        self.stats.adaptive_score_evaluations += 1;
+        let selected_score = score(&self.adj, &self.scratch.cands, self.params.objective);
+        self.edges[index].alive = false;
+        tombstone(&mut self.adj, u, v);
+        self.stats.witness_segments += witnesses.len();
+        self.stats.adaptive_triangles_removed = self
+            .stats
+            .adaptive_triangles_removed
+            .saturating_add(selected_score.triangles);
+        self.stats.adaptive_tetrahedra_removed = self
+            .stats
+            .adaptive_tetrahedra_removed
+            .saturating_add(selected_score.tetrahedra);
+        self.steps.push(RemovalStep {
+            u,
+            v,
+            value,
+            position: SchedulePosition::Sequence(self.steps.len() + 1),
+            witnesses,
+        });
+    }
+
+    fn budget_exhausted(&self) -> bool {
+        self.params
+            .work_limit
+            .is_some_and(|limit| self.work_used >= limit)
+    }
+
+    fn charge_test(&mut self) {
+        self.work_used += 1;
+        self.stats.edge_tests += 1;
+    }
+
+    fn record_neighborhood(&mut self) {
+        self.stats.max_common_neighborhood = self
+            .stats
+            .max_common_neighborhood
+            .max(self.scratch.cands.len());
+    }
 }
 
 #[cfg(test)]
