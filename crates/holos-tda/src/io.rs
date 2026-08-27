@@ -214,25 +214,31 @@ fn token_end(bytes: &[u8], start: usize) -> usize {
 /// Parse every number on `line` in order and hand each to `push`. Returns
 /// the offending token when one is not a number. The ASCII path scans bytes
 /// and parses in place; it gives the same bits as `str::parse::<f64>`.
-fn parse_numbers(line: &str, mut push: impl FnMut(f64)) -> std::result::Result<(), &str> {
-    if !line.is_ascii() {
-        for t in tokens(line) {
-            push(t.parse::<f64>().map_err(|_| t)?);
-        }
-        return Ok(());
+fn parse_unicode_numbers<'a>(
+    line: &'a str,
+    push: &mut impl FnMut(f64),
+) -> std::result::Result<(), &'a str> {
+    for token in tokens(line) {
+        push(token.parse::<f64>().map_err(|_| token)?);
     }
+    Ok(())
+}
+
+fn parse_ascii_numbers<'a>(
+    line: &'a str,
+    push: &mut impl FnMut(f64),
+) -> std::result::Result<(), &'a str> {
     let bytes = line.as_bytes();
-    let n = bytes.len();
     let mut i = 0;
-    while i < n {
-        while i < n && is_separator(bytes[i]) {
+    while i < bytes.len() {
+        while i < bytes.len() && is_separator(bytes[i]) {
             i += 1;
         }
-        if i == n {
+        if i == bytes.len() {
             break;
         }
         match fast_float2::parse_partial::<f64, _>(&bytes[i..]) {
-            Ok((value, used)) if i + used == n || is_separator(bytes[i + used]) => {
+            Ok((value, used)) if i + used == bytes.len() || is_separator(bytes[i + used]) => {
                 push(value);
                 i += used;
             }
@@ -240,6 +246,14 @@ fn parse_numbers(line: &str, mut push: impl FnMut(f64)) -> std::result::Result<(
         }
     }
     Ok(())
+}
+
+fn parse_numbers(line: &str, mut push: impl FnMut(f64)) -> std::result::Result<(), &str> {
+    if line.is_ascii() {
+        parse_ascii_numbers(line, &mut push)
+    } else {
+        parse_unicode_numbers(line, &mut push)
+    }
 }
 
 /// The smallest text a parse splits across workers. A split costs a pool
@@ -750,6 +764,30 @@ pub enum OutputFormat {
     Csv,
 }
 
+fn write_ripser<W: Write>(w: &mut W, diagram: &Diagram, max_dim: usize) -> Result<()> {
+    for dim in 0..=max_dim {
+        writeln!(w, "persistence intervals in dim {dim}:").map_err(|e| Error::Io(e.to_string()))?;
+        for bar in diagram.in_dim(dim) {
+            if bar.is_essential() {
+                writeln!(w, " [{}, )", bar.birth).map_err(|e| Error::Io(e.to_string()))?;
+            } else {
+                writeln!(w, " [{},{})", bar.birth, bar.death)
+                    .map_err(|e| Error::Io(e.to_string()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_csv<W: Write>(w: &mut W, diagram: &Diagram) -> Result<()> {
+    writeln!(w, "dim,birth,death").map_err(|e| Error::Io(e.to_string()))?;
+    for bar in &diagram.bars {
+        writeln!(w, "{},{},{}", bar.dim, bar.birth, bar.death)
+            .map_err(|e| Error::Io(e.to_string()))?;
+    }
+    Ok(())
+}
+
 /// Write a diagram to `w` in the given format.
 ///
 /// `max_dim` fixes how many dimension headers the ripser format prints, so
@@ -762,30 +800,10 @@ pub fn write_diagram<W: Write>(
     format: OutputFormat,
     max_dim: usize,
 ) -> Result<()> {
-    let io_err = |e: std::io::Error| Error::Io(e.to_string());
     match format {
-        OutputFormat::Ripser => {
-            for dim in 0..=max_dim {
-                writeln!(w, "persistence intervals in dim {dim}:").map_err(io_err)?;
-                for bar in diagram.in_dim(dim) {
-                    if bar.is_essential() {
-                        writeln!(w, " [{}, )", bar.birth).map_err(io_err)?;
-                    } else {
-                        writeln!(w, " [{},{})", bar.birth, bar.death).map_err(io_err)?;
-                    }
-                }
-            }
-        }
-        OutputFormat::Csv => {
-            writeln!(w, "dim,birth,death").map_err(io_err)?;
-            for bar in &diagram.bars {
-                // f64 Display renders infinity as "inf". That string is the
-                // documented essential-death marker.
-                writeln!(w, "{},{},{}", bar.dim, bar.birth, bar.death).map_err(io_err)?;
-            }
-        }
+        OutputFormat::Ripser => write_ripser(w, diagram, max_dim),
+        OutputFormat::Csv => write_csv(w, diagram),
     }
-    Ok(())
 }
 
 /// The text parsers with `workers` forced, whatever the text size. Tests use
