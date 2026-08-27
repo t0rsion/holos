@@ -104,6 +104,96 @@ pub struct GradedReductionCertificate {
     diagram: Diagram,
 }
 
+fn reduce_all_dimensions(
+    complex: &GradedComplex,
+    max_dim: usize,
+    modulus: u32,
+    limits: CertificateLimits,
+) -> Result<Vec<Vec<ChangeColumn>>, CertificateError> {
+    let mut columns = Vec::with_capacity(max_dim + 1);
+    for dimension in 1..=max_dim + 1 {
+        let boundaries = complex.boundaries(dimension, modulus)?;
+        columns.push(reduce_with_prefix(&boundaries, &[], modulus, limits)?.0);
+    }
+    Ok(columns)
+}
+
+fn check_compute_diagram(
+    input: &SparseDistanceMatrix,
+    params: &RipsParams,
+    checked: &Diagram,
+) -> Result<(), CertificateError> {
+    let computed = rips_persistence_sparse(input, params)
+        .map_err(|error| CertificateError::new(error.to_string()))?;
+    if !diagrams_equal(&computed, checked) {
+        return Err(CertificateError::new(format!(
+            "graded certificate diagram differs from the compute engine: expected {:?}, got {:?}",
+            computed.bars, checked.bars
+        )));
+    }
+    Ok(())
+}
+
+fn repair_all_dimensions(
+    old: &GradedComplex,
+    new: &GradedComplex,
+    old_columns: &[Vec<ChangeColumn>],
+    modulus: u32,
+    limits: CertificateLimits,
+) -> Result<(Vec<Vec<ChangeColumn>>, Vec<GradedDimensionWork>), CertificateError> {
+    let mut columns = Vec::with_capacity(old_columns.len());
+    let mut work = Vec::with_capacity(old_columns.len());
+    for dimension in 1..old.simplices.len() {
+        let (next, dimension_work) = repair_dimension(
+            dimension,
+            old,
+            new,
+            &old_columns[dimension - 1],
+            modulus,
+            limits,
+        )?;
+        columns.push(next);
+        work.push(dimension_work);
+    }
+    Ok((columns, work))
+}
+
+fn repair_dimension(
+    dimension: usize,
+    old: &GradedComplex,
+    new: &GradedComplex,
+    old_columns: &[ChangeColumn],
+    modulus: u32,
+    limits: CertificateLimits,
+) -> Result<(Vec<ChangeColumn>, GradedDimensionWork), CertificateError> {
+    let boundaries = new.boundaries(dimension, modulus)?;
+    let candidates = reindexed_prefix_candidates(
+        &old.simplices[dimension],
+        &new.simplices[dimension],
+        old_columns,
+    )?;
+    let prefix = valid_prefix_len(&boundaries, &candidates, modulus, limits)?;
+    let (columns, additions) =
+        reduce_with_prefix(&boundaries, &candidates[..prefix], modulus, limits)?;
+    let work = GradedDimensionWork {
+        simplex_dimension: dimension,
+        columns_reused: prefix,
+        columns_reduced: boundaries.len() - prefix,
+        column_additions: additions,
+    };
+    Ok((columns, work))
+}
+
+fn graded_repair_mode(work: &GradedReductionRepairWork) -> ReductionRepairMode {
+    if work.columns_reduced() == 0 {
+        ReductionRepairMode::Reused
+    } else if work.columns_reused() == 0 {
+        ReductionRepairMode::Rebuilt
+    } else {
+        ReductionRepairMode::SuffixRepaired
+    }
+}
+
 impl GradedReductionCertificate {
     /// Produce an exact certificate through the requested homology dimension.
     ///
@@ -118,27 +208,9 @@ impl GradedReductionCertificate {
         validate(input, params, limits)?;
         let threshold = checked_threshold(params.threshold)?;
         let complex = GradedComplex::build(input, params.max_dim, threshold, limits)?;
-        let mut columns = Vec::with_capacity(params.max_dim + 1);
-        for dimension in 1..=params.max_dim + 1 {
-            columns.push(
-                reduce_with_prefix(
-                    &complex.boundaries(dimension, params.modulus)?,
-                    &[],
-                    params.modulus,
-                    limits,
-                )?
-                .0,
-            );
-        }
+        let columns = reduce_all_dimensions(&complex, params.max_dim, params.modulus, limits)?;
         let checked = check_all(&complex, params.modulus, &columns, limits)?;
-        let computed = rips_persistence_sparse(input, params)
-            .map_err(|error| CertificateError::new(error.to_string()))?;
-        if !diagrams_equal(&computed, &checked.diagram) {
-            return Err(CertificateError::new(format!(
-                "graded certificate diagram differs from the compute engine: expected {:?}, got {:?}",
-                computed.bars, checked.diagram.bars
-            )));
-        }
+        check_compute_diagram(input, params, &checked.diagram)?;
         Ok(Self {
             vertex_count: input.len(),
             max_dim: params.max_dim,
@@ -164,35 +236,15 @@ impl GradedReductionCertificate {
         require_fixed_envelope(current, updated, self.threshold)?;
         let threshold = checked_threshold(self.threshold)?;
         let new_complex = GradedComplex::build(updated, self.max_dim, threshold, limits)?;
-        let mut columns = Vec::with_capacity(self.columns.len());
-        let mut work = Vec::with_capacity(self.columns.len());
-        for dimension in 1..=self.max_dim + 1 {
-            let boundaries = new_complex.boundaries(dimension, self.modulus)?;
-            let candidates = reindexed_prefix_candidates(
-                &old_complex.simplices[dimension],
-                &new_complex.simplices[dimension],
-                &self.columns[dimension - 1],
-            )?;
-            let prefix = valid_prefix_len(&boundaries, &candidates, self.modulus, limits)?;
-            let (next, additions) =
-                reduce_with_prefix(&boundaries, &candidates[..prefix], self.modulus, limits)?;
-            work.push(GradedDimensionWork {
-                simplex_dimension: dimension,
-                columns_reused: prefix,
-                columns_reduced: boundaries.len() - prefix,
-                column_additions: additions,
-            });
-            columns.push(next);
-        }
+        let (columns, work) = repair_all_dimensions(
+            &old_complex,
+            &new_complex,
+            &self.columns,
+            self.modulus,
+            limits,
+        )?;
         let checked = check_all(&new_complex, self.modulus, &columns, limits)?;
         let work = GradedReductionRepairWork { dimensions: work };
-        let mode = if work.columns_reduced() == 0 {
-            ReductionRepairMode::Reused
-        } else if work.columns_reused() == 0 {
-            ReductionRepairMode::Rebuilt
-        } else {
-            ReductionRepairMode::SuffixRepaired
-        };
         Ok(GradedReductionRepair {
             certificate: Self {
                 vertex_count: updated.len(),
@@ -203,7 +255,7 @@ impl GradedReductionCertificate {
                 columns,
                 diagram: checked.diagram,
             },
-            mode,
+            mode: graded_repair_mode(&work),
             work,
         })
     }
@@ -325,42 +377,13 @@ impl GradedComplex {
             .collect();
         let mut simplices = vec![vertices];
         for dimension in 1..=max_dim + 1 {
-            let mut next = Vec::new();
-            for simplex in &simplices[dimension - 1] {
-                let start = simplex.key.0.last().copied().unwrap_or(0) + 1;
-                for vertex in start..input.len() {
-                    let mut value = simplex.value;
-                    let mut clique = true;
-                    for &member in &simplex.key.0 {
-                        let edge = input.get(member, vertex);
-                        if !edge.is_finite() || edge > threshold {
-                            clique = false;
-                            break;
-                        }
-                        value = value.max(edge);
-                    }
-                    if clique {
-                        let mut key = simplex.key.0.clone();
-                        key.push(vertex);
-                        next.push(FilteredSimplex {
-                            key: SimplexKey(key),
-                            value,
-                        });
-                        let limit = if dimension == 1 {
-                            limits.max_edges
-                        } else if dimension == 2 {
-                            limits.max_triangles
-                        } else {
-                            limits.max_higher_simplices
-                        };
-                        if next.len() > limit {
-                            return Err(CertificateError::new(format!(
-                                "dimension {dimension} simplex count exceeds the limit {limit}"
-                            )));
-                        }
-                    }
-                }
-            }
+            let mut next = next_simplices(
+                input,
+                &simplices[dimension - 1],
+                dimension,
+                threshold,
+                simplex_limit(dimension, limits),
+            )?;
             next.sort_by(|left, right| {
                 left.value
                     .total_cmp(&right.value)
@@ -404,6 +427,72 @@ impl GradedComplex {
             })
             .collect()
     }
+}
+
+fn simplex_limit(dimension: usize, limits: CertificateLimits) -> usize {
+    match dimension {
+        1 => limits.max_edges,
+        2 => limits.max_triangles,
+        _ => limits.max_higher_simplices,
+    }
+}
+
+fn next_simplices(
+    input: &SparseDistanceMatrix,
+    previous: &[FilteredSimplex],
+    dimension: usize,
+    threshold: f64,
+    limit: usize,
+) -> Result<Vec<FilteredSimplex>, CertificateError> {
+    let mut next = Vec::new();
+    for simplex in previous {
+        extend_simplex(input, simplex, dimension, threshold, limit, &mut next)?;
+    }
+    Ok(next)
+}
+
+fn extend_simplex(
+    input: &SparseDistanceMatrix,
+    simplex: &FilteredSimplex,
+    dimension: usize,
+    threshold: f64,
+    limit: usize,
+    next: &mut Vec<FilteredSimplex>,
+) -> Result<(), CertificateError> {
+    let start = simplex.key.0.last().copied().unwrap_or(0) + 1;
+    for vertex in start..input.len() {
+        if let Some(extension) = simplex_extension(input, simplex, vertex, threshold) {
+            next.push(extension);
+            if next.len() > limit {
+                return Err(CertificateError::new(format!(
+                    "dimension {dimension} simplex count exceeds the limit {limit}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn simplex_extension(
+    input: &SparseDistanceMatrix,
+    simplex: &FilteredSimplex,
+    vertex: usize,
+    threshold: f64,
+) -> Option<FilteredSimplex> {
+    let mut value = simplex.value;
+    for &member in &simplex.key.0 {
+        let edge = input.get(member, vertex);
+        if !edge.is_finite() || edge > threshold {
+            return None;
+        }
+        value = value.max(edge);
+    }
+    let mut key = simplex.key.0.clone();
+    key.push(vertex);
+    Some(FilteredSimplex {
+        key: SimplexKey(key),
+        value,
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -588,79 +677,143 @@ fn reduce_with_prefix(
             "graded reduction prefix exceeds its boundary matrix",
         ));
     }
-    let modulus64 = modulus as u64;
-    let mut reduced = Vec::with_capacity(boundaries.len());
-    let mut bases = Vec::with_capacity(boundaries.len());
-    let mut owners = FxHashMap::default();
-    let mut term_count = 0usize;
+    let mut state = GradedReductionState::new(boundaries.len(), modulus);
     for (target, transform) in prefix.iter().enumerate() {
-        validate_change_column(0, target, transform, modulus)?;
-        let mut column = SparseColumn::default();
-        let mut basis = SparseColumn::default();
-        for term in &transform.terms {
-            column.add_scaled(&boundaries[term.index], term.coefficient as u64, modulus64);
-            basis.insert(term.index, term.coefficient as u64);
+        state.retain(target, transform, boundaries, limits.max_terms)?;
+    }
+    for (target, boundary) in boundaries.iter().enumerate().skip(prefix.len()) {
+        state.reduce(target, boundary, limits.max_terms)?;
+    }
+    Ok(state.finish())
+}
+
+struct GradedReductionState {
+    modulus: u32,
+    reduced: Vec<SparseColumn>,
+    bases: Vec<SparseColumn>,
+    owners: FxHashMap<usize, usize>,
+    term_count: usize,
+    additions: usize,
+}
+
+impl GradedReductionState {
+    fn new(capacity: usize, modulus: u32) -> Self {
+        Self {
+            modulus,
+            reduced: Vec::with_capacity(capacity),
+            bases: Vec::with_capacity(capacity),
+            owners: FxHashMap::default(),
+            term_count: 0,
+            additions: 0,
         }
-        if let Some((pivot, _)) = column.pivot()
-            && owners.insert(pivot, target).is_some()
+    }
+
+    fn retain(
+        &mut self,
+        target: usize,
+        transform: &ChangeColumn,
+        boundaries: &[SparseColumn],
+        maximum: usize,
+    ) -> Result<(), CertificateError> {
+        validate_change_column(0, target, transform, self.modulus)?;
+        let (column, basis) = apply_transform(transform, boundaries, self.modulus as u64);
+        if column
+            .pivot()
+            .is_some_and(|(pivot, _)| self.owners.insert(pivot, target).is_some())
         {
             return Err(CertificateError::new(
                 "graded reduction prefix repeats a pivot",
             ));
         }
-        term_count += basis.0.len();
-        if term_count > limits.max_terms {
-            return Err(CertificateError::new(
-                "graded reduction prefix exceeds the term limit",
-            ));
-        }
-        reduced.push(column);
-        bases.push(basis);
+        self.add_prefix_terms(basis.0.len(), maximum)?;
+        self.reduced.push(column);
+        self.bases.push(basis);
+        Ok(())
     }
-    let mut additions = 0usize;
-    for (target, boundary) in boundaries.iter().enumerate().skip(prefix.len()) {
+
+    fn reduce(
+        &mut self,
+        target: usize,
+        boundary: &SparseColumn,
+        maximum: usize,
+    ) -> Result<(), CertificateError> {
+        let modulus = self.modulus as u64;
         let mut column = boundary.clone();
         let mut basis = SparseColumn::default();
         basis.insert(target, 1);
         while let Some((pivot, coefficient)) = column.pivot() {
-            let Some(&owner) = owners.get(&pivot) else {
+            let Some(&owner) = self.owners.get(&pivot) else {
                 break;
             };
-            let owner_coefficient = reduced[owner].pivot().expect("owner has a pivot").1;
-            let factor = (modulus64
-                - coefficient * inverse_mod(owner_coefficient, modulus64) % modulus64)
-                % modulus64;
-            column.add_scaled(&reduced[owner], factor, modulus64);
-            basis.add_scaled(&bases[owner], factor, modulus64);
-            additions += 1;
+            let owner_coefficient = self.reduced[owner].pivot().expect("owner has a pivot").1;
+            let factor = (modulus
+                - coefficient * inverse_mod(owner_coefficient, modulus) % modulus)
+                % modulus;
+            column.add_scaled(&self.reduced[owner], factor, modulus);
+            basis.add_scaled(&self.bases[owner], factor, modulus);
+            self.additions += 1;
         }
         if let Some((pivot, _)) = column.pivot() {
-            owners.insert(pivot, target);
+            self.owners.insert(pivot, target);
         }
-        term_count += basis.0.len();
-        if term_count > limits.max_terms {
+        self.add_terms(basis.0.len(), maximum)?;
+        self.reduced.push(column);
+        self.bases.push(basis);
+        Ok(())
+    }
+
+    fn add_prefix_terms(&mut self, count: usize, maximum: usize) -> Result<(), CertificateError> {
+        self.term_count += count;
+        if self.term_count > maximum {
+            return Err(CertificateError::new(
+                "graded reduction prefix exceeds the term limit",
+            ));
+        }
+        Ok(())
+    }
+
+    fn add_terms(&mut self, count: usize, maximum: usize) -> Result<(), CertificateError> {
+        self.term_count += count;
+        if self.term_count > maximum {
             return Err(CertificateError::new(format!(
-                "{term_count} graded change terms exceed the limit {}",
-                limits.max_terms
+                "{} graded change terms exceed the limit {maximum}",
+                self.term_count
             )));
         }
-        reduced.push(column);
-        bases.push(basis);
+        Ok(())
     }
-    let columns = bases
-        .into_iter()
-        .map(|column| ChangeColumn {
-            terms: column
-                .0
-                .into_iter()
-                .map(|(index, coefficient)| CertificateTerm {
-                    index,
-                    coefficient: coefficient as u32,
-                })
-                .collect(),
-        })
-        .collect();
-    Ok((columns, additions))
+
+    fn finish(self) -> (Vec<ChangeColumn>, usize) {
+        let columns = self.bases.into_iter().map(sparse_change_column).collect();
+        (columns, self.additions)
+    }
+}
+
+fn apply_transform(
+    transform: &ChangeColumn,
+    boundaries: &[SparseColumn],
+    modulus: u64,
+) -> (SparseColumn, SparseColumn) {
+    let mut column = SparseColumn::default();
+    let mut basis = SparseColumn::default();
+    for term in &transform.terms {
+        column.add_scaled(&boundaries[term.index], term.coefficient as u64, modulus);
+        basis.insert(term.index, term.coefficient as u64);
+    }
+    (column, basis)
+}
+
+fn sparse_change_column(column: SparseColumn) -> ChangeColumn {
+    ChangeColumn {
+        terms: column
+            .0
+            .into_iter()
+            .map(|(index, coefficient)| CertificateTerm {
+                index,
+                coefficient: coefficient as u32,
+            })
+            .collect(),
+    }
 }
 
 fn valid_prefix_len(
