@@ -1,0 +1,10 @@
+[package]
+name = "research-bench"
+version = "0.7.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+holos-tda = { path = "../holos-tda" }
+holos-tda-check = { path = "../holos-tda-check" }

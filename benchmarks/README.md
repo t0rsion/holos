@@ -17,6 +17,12 @@ research harness will cover the integrated proof, synthesis, and coverage
 claims. Historical one-release drivers and records remain in the local
 archive. They do not define a public v0.7 claim.
 
+`research_bench.sh` is the v0.7 certified-workflow study. It measures exact
+portfolio production and linked checking, explicit-complex production and
+independent checking, and geometry-bound coverage production and independent
+checking. Set `REPS` and `OUTPUT` to control repetitions and the generated
+record. The three constructed cases are fixed in the `research-bench` crate.
+
 ## Usage
 
 ```sh

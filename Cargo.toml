@@ -6,6 +6,7 @@ members = [
     "crates/holos-tda",
     "crates/holos-tda-check",
     "crates/holos-tda-py",
+    "crates/research-bench",
 ]
 
 # Profiles apply from the workspace root only; member profiles are ignored.
