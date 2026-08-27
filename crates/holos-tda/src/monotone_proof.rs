@@ -152,6 +152,15 @@ where
         available: Vec<usize>,
         depth: usize,
     ) -> Result<ProofNode> {
+        self.start_node(depth)?;
+        let included_cost = selected_cost(self.costs, &included)?;
+        if let Some(leaf) = self.early_leaf(&included, &available, included_cost)? {
+            return Ok(leaf);
+        }
+        self.prove_with_blockers(included, available, included_cost, depth)
+    }
+
+    fn start_node(&mut self, depth: usize) -> Result<()> {
         self.work.nodes = self
             .work
             .nodes
@@ -162,22 +171,44 @@ where
                 "monotone proof exceeds its node or depth limit".into(),
             ));
         }
-        let included_cost = selected_cost(self.costs, &included)?;
+        Ok(())
+    }
+
+    fn early_leaf(
+        &mut self,
+        included: &[usize],
+        available: &[usize],
+        included_cost: u64,
+    ) -> Result<Option<ProofNode>> {
         if self.cutoff.is_some_and(|cutoff| included_cost >= cutoff) {
-            return Ok(ProofNode::Cost);
+            return Ok(Some(ProofNode::Cost));
         }
         if included.len() == self.max_selected {
-            if !self.check_survival(&included)? {
-                return Err(Error::InvalidInput(
-                    "monotone proof found a cheaper feasible selection".into(),
-                ));
-            }
-            return Ok(ProofNode::SurvivingSelectionLimit);
+            self.check_selection_limit(included)?;
+            return Ok(Some(ProofNode::SurvivingSelectionLimit));
         }
-        let maximum = merge(&included, &available);
-        if self.check_survival(&maximum)? {
-            return Ok(ProofNode::SurvivingMaximum);
+        if self.check_survival(&merge(included, available))? {
+            return Ok(Some(ProofNode::SurvivingMaximum));
         }
+        Ok(None)
+    }
+
+    fn check_selection_limit(&mut self, included: &[usize]) -> Result<()> {
+        if !self.check_survival(included)? {
+            return Err(Error::InvalidInput(
+                "monotone proof found a cheaper feasible selection".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn prove_with_blockers(
+        &mut self,
+        included: Vec<usize>,
+        available: Vec<usize>,
+        included_cost: u64,
+        depth: usize,
+    ) -> Result<ProofNode> {
         let blockers = self.pack_blockers(&included, &available)?;
         if blockers.is_empty() {
             return Err(Error::InvalidInput(
@@ -185,27 +216,38 @@ where
             ));
         }
         if included.len().saturating_add(blockers.len()) > self.max_selected {
-            self.add_terms(&blockers)?;
-            return Ok(ProofNode::BlockerBound {
-                kind: BoundKind::Selections,
-                blockers,
-            });
+            return self.blocker_leaf(BoundKind::Selections, blockers);
         }
-        let bound = included_cost
-            .checked_add(blocker_bound(self.costs, &blockers)?)
-            .ok_or_else(|| Error::InvalidInput("monotone proof cost bound overflows".into()))?;
+        let bound = self.blocked_cost(included_cost, &blockers)?;
         if self.cutoff.is_some_and(|cutoff| bound >= cutoff) {
-            self.add_terms(&blockers)?;
-            return Ok(ProofNode::BlockerBound {
-                kind: BoundKind::Cost,
-                blockers,
-            });
+            return self.blocker_leaf(BoundKind::Cost, blockers);
         }
         let blocker = blockers
             .into_iter()
             .min_by_key(|blocker| (blocker.len(), blocker_min_cost(self.costs, blocker)))
             .expect("a nonempty packing has a blocker");
         self.add_terms(std::slice::from_ref(&blocker))?;
+        self.prove_branch(included, available, blocker, depth)
+    }
+
+    fn blocker_leaf(&mut self, kind: BoundKind, blockers: Vec<Vec<usize>>) -> Result<ProofNode> {
+        self.add_terms(&blockers)?;
+        Ok(ProofNode::BlockerBound { kind, blockers })
+    }
+
+    fn blocked_cost(&self, included_cost: u64, blockers: &[Vec<usize>]) -> Result<u64> {
+        included_cost
+            .checked_add(blocker_bound(self.costs, blockers)?)
+            .ok_or_else(|| Error::InvalidInput("monotone proof cost bound overflows".into()))
+    }
+
+    fn prove_branch(
+        &mut self,
+        included: Vec<usize>,
+        available: Vec<usize>,
+        blocker: Vec<usize>,
+        depth: usize,
+    ) -> Result<ProofNode> {
         let mut children = Vec::with_capacity(blocker.len());
         let mut excluded = BTreeSet::new();
         for &candidate in &blocker {
@@ -301,6 +343,22 @@ where
         available: Vec<usize>,
         depth: usize,
     ) -> Result<()> {
+        self.start_node(depth)?;
+        let included_cost = selected_cost(self.costs, &included)?;
+        match proof {
+            ProofNode::Cost => self.verify_cost_leaf(included_cost),
+            ProofNode::SurvivingMaximum => self.verify_maximum_leaf(&included, &available),
+            ProofNode::SurvivingSelectionLimit => self.verify_selection_leaf(&included),
+            ProofNode::BlockerBound { kind, blockers } => {
+                self.verify_blocker_leaf(kind, blockers, &included, &available, included_cost)
+            }
+            ProofNode::Branch { blocker, children } => {
+                self.verify_branch(blocker, children, included, available, depth)
+            }
+        }
+    }
+
+    fn start_node(&mut self, depth: usize) -> Result<()> {
         self.work.nodes = self
             .work
             .nodes
@@ -311,69 +369,94 @@ where
                 "monotone proof exceeds its node or depth limit".into(),
             ));
         }
-        let included_cost = selected_cost(self.costs, &included)?;
-        match proof {
-            ProofNode::Cost => {
-                if self.cutoff.is_none_or(|cutoff| included_cost < cutoff) {
-                    return Err(Error::InvalidInput(
-                        "monotone cost leaf does not reach the incumbent".into(),
-                    ));
-                }
+        Ok(())
+    }
+
+    fn verify_cost_leaf(&self, included_cost: u64) -> Result<()> {
+        if self.cutoff.is_none_or(|cutoff| included_cost < cutoff) {
+            return Err(Error::InvalidInput(
+                "monotone cost leaf does not reach the incumbent".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_maximum_leaf(&mut self, included: &[usize], available: &[usize]) -> Result<()> {
+        if !self.check_survival(&merge(included, available))? {
+            return Err(Error::InvalidInput(
+                "monotone maximal-survival leaf is feasible".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_selection_leaf(&mut self, included: &[usize]) -> Result<()> {
+        if included.len() != self.max_selected || !self.check_survival(included)? {
+            return Err(Error::InvalidInput(
+                "monotone selection-limit leaf is invalid".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_blocker_leaf(
+        &mut self,
+        kind: &BoundKind,
+        blockers: &[Vec<usize>],
+        included: &[usize],
+        available: &[usize],
+        included_cost: u64,
+    ) -> Result<()> {
+        self.verify_blockers(included, available, blockers)?;
+        if self.blocker_leaf_closes(kind, blockers, included.len(), included_cost) {
+            return Ok(());
+        }
+        Err(Error::InvalidInput(
+            "monotone blocker leaf does not close its branch".into(),
+        ))
+    }
+
+    fn blocker_leaf_closes(
+        &self,
+        kind: &BoundKind,
+        blockers: &[Vec<usize>],
+        included_count: usize,
+        included_cost: u64,
+    ) -> bool {
+        match kind {
+            BoundKind::Selections => {
+                included_count.saturating_add(blockers.len()) > self.max_selected
             }
-            ProofNode::SurvivingMaximum => {
-                if !self.check_survival(&merge(&included, &available))? {
-                    return Err(Error::InvalidInput(
-                        "monotone maximal-survival leaf is feasible".into(),
-                    ));
-                }
-            }
-            ProofNode::SurvivingSelectionLimit => {
-                if included.len() != self.max_selected || !self.check_survival(&included)? {
-                    return Err(Error::InvalidInput(
-                        "monotone selection-limit leaf is invalid".into(),
-                    ));
-                }
-            }
-            ProofNode::BlockerBound { kind, blockers } => {
-                self.verify_blockers(&included, &available, blockers)?;
-                match kind {
-                    BoundKind::Selections
-                        if included.len().saturating_add(blockers.len()) > self.max_selected => {}
-                    BoundKind::Cost
-                        if self.cutoff.is_some_and(|cutoff| {
-                            included_cost
-                                .checked_add(
-                                    blocker_bound(self.costs, blockers).unwrap_or(u64::MAX),
-                                )
-                                .is_some_and(|bound| bound >= cutoff)
-                        }) => {}
-                    _ => {
-                        return Err(Error::InvalidInput(
-                            "monotone blocker leaf does not close its branch".into(),
-                        ));
-                    }
-                }
-            }
-            ProofNode::Branch { blocker, children } => {
-                self.verify_blockers(&included, &available, std::slice::from_ref(blocker))?;
-                if blocker.len() != children.len() {
-                    return Err(Error::InvalidInput(
-                        "monotone branch child count differs from its blocker".into(),
-                    ));
-                }
-                let mut excluded = BTreeSet::new();
-                for (&candidate, child) in blocker.iter().zip(children) {
-                    let mut child_included = included.clone();
-                    insert_sorted(&mut child_included, candidate);
-                    let child_available = available
-                        .iter()
-                        .copied()
-                        .filter(|item| *item != candidate && !excluded.contains(item))
-                        .collect();
-                    self.verify_node(child, child_included, child_available, depth + 1)?;
-                    excluded.insert(candidate);
-                }
-            }
+            BoundKind::Cost => self.cutoff.is_some_and(|cutoff| {
+                included_cost
+                    .checked_add(blocker_bound(self.costs, blockers).unwrap_or(u64::MAX))
+                    .is_some_and(|bound| bound >= cutoff)
+            }),
+        }
+    }
+
+    fn verify_branch(
+        &mut self,
+        blocker: &[usize],
+        children: &[ProofNode],
+        included: Vec<usize>,
+        available: Vec<usize>,
+        depth: usize,
+    ) -> Result<()> {
+        let blocker_family = [blocker.to_vec()];
+        self.verify_blockers(&included, &available, &blocker_family)?;
+        check_branch_count(blocker.len(), children.len())?;
+        let mut excluded = BTreeSet::new();
+        for (&candidate, child) in blocker.iter().zip(children) {
+            let mut child_included = included.clone();
+            insert_sorted(&mut child_included, candidate);
+            let child_available = available
+                .iter()
+                .copied()
+                .filter(|item| *item != candidate && !excluded.contains(item))
+                .collect();
+            self.verify_node(child, child_included, child_available, depth + 1)?;
+            excluded.insert(candidate);
         }
         Ok(())
     }
@@ -434,6 +517,15 @@ fn selected_cost(costs: &[u64], selected: &[usize]) -> Result<u64> {
         sum.checked_add(costs[*candidate])
             .ok_or_else(|| Error::InvalidInput("monotone selected cost overflows".into()))
     })
+}
+
+fn check_branch_count(blockers: usize, children: usize) -> Result<()> {
+    if blockers != children {
+        return Err(Error::InvalidInput(
+            "monotone branch child count differs from its blocker".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn blocker_min_cost(costs: &[u64], blocker: &[usize]) -> u64 {
