@@ -32,6 +32,7 @@
 mod adaptive;
 mod ordered;
 mod parallel;
+mod portfolio;
 pub mod verify;
 /// Portable collapse certificates and their reduced graphs.
 pub mod wire;
@@ -45,6 +46,12 @@ pub use ordered::{
 };
 pub(crate) use parallel::collapse_rounds_in;
 pub use parallel::{collapse_dense_rounds_parallel, collapse_sparse_rounds_parallel};
+pub use portfolio::{
+    CollapsePortfolio, CollapsePortfolioArtifact, CollapsePortfolioArtifactEntry,
+    CollapsePortfolioCandidate, CollapsePortfolioDecodeLimits, CollapsePortfolioEntry,
+    CollapsePortfolioLimits, CollapsePortfolioObjective, CollapsePortfolioScore,
+    collapse_sparse_portfolio,
+};
 
 use crate::distances::Distances;
 use crate::{DistanceMatrix, Error, Result, SparseDistanceMatrix};
