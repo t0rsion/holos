@@ -10,9 +10,11 @@ use std::fmt;
 
 use crate::{
     CertificateLimits, EdgeKey, Error, ExplainedDiagram, IntervalGroupId, PersistenceProgram,
-    ProgramTraceArtifact, ProgramTraceDecodeLimits, ProgramUpdateMode, Result,
-    SparseDistanceMatrix, VerifiedProgramTrace,
+    ProgramTraceArtifact, ProgramTraceDecodeLimits, ProgramUpdateMode, SparseDistanceMatrix,
+    VerifiedProgramTrace,
 };
+
+type Result<T, E = Error> = std::result::Result<T, E>;
 
 const MAGIC: &[u8; 8] = b"HOLOSINT";
 const WIRE_VERSION: u16 = 1;
@@ -97,99 +99,132 @@ impl PersistenceProgram {
         target_scale: f64,
         budget: InterventionBudget,
     ) -> Result<H1Intervention> {
-        if !target_scale.is_finite() || target_scale < 0.0 {
-            return Err(Error::InvalidInput(format!(
-                "intervention target scale must be non-negative and finite, got {target_scale}"
-            )));
-        }
-        let space = self
-            .result()
-            .spaces
-            .iter()
-            .find(|space| space.id == target)
-            .ok_or_else(|| Error::InvalidInput(format!("unknown class space {target}")))?;
-        if space.interval.is_essential() {
-            return Err(Error::InvalidInput(
-                "the finite-death intervention does not support an essential class space".into(),
-            ));
-        }
-        if target_scale <= space.interval.birth || target_scale >= space.interval.death {
-            return Err(Error::InvalidInput(format!(
-                "target scale must lie strictly inside ({}, {})",
-                space.interval.birth, space.interval.death
-            )));
-        }
+        let space = validate_intervention_request(self, target, target_scale)?;
         if budget.max_candidates == 0 {
-            return Ok(H1Intervention {
-                target,
-                target_scale,
-                status: InterventionStatus::BudgetLimited,
-                lower_bound: 0.0,
-                upper_bound: None,
-                edits: Vec::new(),
-                result: None,
-                artifact: None,
-            });
+            return Ok(budget_limited_intervention(target, target_scale));
         }
-        let edits = destroyer_edits(self.current_graph(), space, target_scale)?;
-        if edits.is_empty() {
-            return Err(Error::InvalidInput(
-                "declared destroyer triangles need no edge edit".into(),
-            ));
-        }
-        let updated = apply_edits(self.current_graph(), &edits)?;
-        let trace = ProgramTraceArtifact::build(
-            self.current_graph(),
-            std::slice::from_ref(&updated),
-            self.params(),
-            self.limits(),
-        )?;
-        let verified = trace.verify(self.limits())?;
-        if !continued_space_dies_by(&verified, target, target_scale) {
-            return Ok(H1Intervention {
-                target,
-                target_scale,
-                status: InterventionStatus::BudgetLimited,
-                lower_bound: 0.0,
-                upper_bound: None,
-                edits: Vec::new(),
-                result: None,
-                artifact: None,
-            });
-        }
-        let upper_bound = maximum_edit(&edits);
-        let reused = verified.steps[0].mode == ProgramUpdateMode::Reused;
-        let lower_bound = if reused {
-            space.interval.death - target_scale
-        } else {
-            0.0
-        };
-        let status = if reused && lower_bound.to_bits() == upper_bound.to_bits() {
-            InterventionStatus::Optimal
-        } else {
-            InterventionStatus::BoundedGap
-        };
-        let artifact = InterventionArtifact {
-            target,
-            target_scale,
-            status,
-            lower_bound,
-            upper_bound,
-            edits: edits.clone(),
-            trace,
-        };
-        artifact.verify(self.limits())?;
-        Ok(H1Intervention {
-            target,
-            target_scale,
-            status,
-            lower_bound,
-            upper_bound: Some(upper_bound),
-            edits,
-            result: Some(verified.final_program.result().clone()),
-            artifact: Some(artifact),
-        })
+        search_intervention(self, space, target, target_scale)
     }
+}
+
+fn validate_intervention_request(
+    program: &PersistenceProgram,
+    target: IntervalGroupId,
+    target_scale: f64,
+) -> Result<&crate::PersistentClassSpace> {
+    if !target_scale.is_finite() || target_scale < 0.0 {
+        return Err(Error::InvalidInput(format!(
+            "intervention target scale must be non-negative and finite, got {target_scale}"
+        )));
+    }
+    let space = program
+        .result()
+        .spaces
+        .iter()
+        .find(|space| space.id == target)
+        .ok_or_else(|| Error::InvalidInput(format!("unknown class space {target}")))?;
+    check_intervention_interval(space, target_scale)?;
+    Ok(space)
+}
+
+fn check_intervention_interval(
+    space: &crate::PersistentClassSpace,
+    target_scale: f64,
+) -> Result<()> {
+    if space.interval.is_essential() {
+        return Err(Error::InvalidInput(
+            "the finite-death intervention does not support an essential class space".into(),
+        ));
+    }
+    if target_scale <= space.interval.birth || target_scale >= space.interval.death {
+        return Err(Error::InvalidInput(format!(
+            "target scale must lie strictly inside ({}, {})",
+            space.interval.birth, space.interval.death
+        )));
+    }
+    Ok(())
+}
+
+fn budget_limited_intervention(target: IntervalGroupId, target_scale: f64) -> H1Intervention {
+    H1Intervention {
+        target,
+        target_scale,
+        status: InterventionStatus::BudgetLimited,
+        lower_bound: 0.0,
+        upper_bound: None,
+        edits: Vec::new(),
+        result: None,
+        artifact: None,
+    }
+}
+
+fn search_intervention(
+    program: &PersistenceProgram,
+    space: &crate::PersistentClassSpace,
+    target: IntervalGroupId,
+    target_scale: f64,
+) -> Result<H1Intervention> {
+    let edits = destroyer_edits(program.current_graph(), space, target_scale)?;
+    if edits.is_empty() {
+        return Err(Error::InvalidInput(
+            "declared destroyer triangles need no edge edit".into(),
+        ));
+    }
+    let updated = apply_edits(program.current_graph(), &edits)?;
+    let trace = ProgramTraceArtifact::build(
+        program.current_graph(),
+        std::slice::from_ref(&updated),
+        program.params(),
+        program.limits(),
+    )?;
+    let verified = trace.verify(program.limits())?;
+    if !continued_space_dies_by(&verified, target, target_scale) {
+        return Ok(budget_limited_intervention(target, target_scale));
+    }
+    finish_intervention(program, space, target, target_scale, edits, trace, verified)
+}
+
+fn finish_intervention(
+    program: &PersistenceProgram,
+    space: &crate::PersistentClassSpace,
+    target: IntervalGroupId,
+    target_scale: f64,
+    edits: Vec<EdgeWeightEdit>,
+    trace: ProgramTraceArtifact,
+    verified: VerifiedProgramTrace,
+) -> Result<H1Intervention> {
+    let upper_bound = maximum_edit(&edits);
+    let reused = verified.steps[0].mode == ProgramUpdateMode::Reused;
+    let lower_bound = if reused {
+        space.interval.death - target_scale
+    } else {
+        0.0
+    };
+    let status = if reused && lower_bound.to_bits() == upper_bound.to_bits() {
+        InterventionStatus::Optimal
+    } else {
+        InterventionStatus::BoundedGap
+    };
+    let artifact = InterventionArtifact {
+        target,
+        target_scale,
+        status,
+        lower_bound,
+        upper_bound,
+        edits: edits.clone(),
+        trace,
+    };
+    artifact.verify(program.limits())?;
+    Ok(H1Intervention {
+        target,
+        target_scale,
+        status,
+        lower_bound,
+        upper_bound: Some(upper_bound),
+        edits,
+        result: Some(verified.final_program.result().clone()),
+        artifact: Some(artifact),
+    })
 }
 
 /// Failure while decoding or checking an intervention artifact.
@@ -295,27 +330,10 @@ impl InterventionArtifact {
     /// Encode the canonical `HOLOSINT` version 1 envelope.
     pub fn encode(&self) -> std::result::Result<Vec<u8>, InterventionError> {
         self.check_shape()?;
-        let trace = self
-            .trace
-            .encode()
-            .map_err(|error| InterventionError::new(error.to_string()))?;
+        let trace = encode_trace(&self.trace)?;
         let mut out = Vec::new();
-        out.extend_from_slice(MAGIC);
-        put_u16(&mut out, WIRE_VERSION);
-        out.push(F64_BITS_CODEC);
-        out.extend_from_slice(self.target.as_bytes());
-        put_u64(&mut out, self.target_scale.to_bits());
-        out.push(status_tag(self.status));
-        put_u64(&mut out, self.lower_bound.to_bits());
-        put_u64(&mut out, self.upper_bound.to_bits());
-        put_usize(&mut out, self.edits.len(), "edge-edit count")?;
-        put_usize(&mut out, trace.len(), "trace byte count")?;
-        for edit in &self.edits {
-            put_usize(&mut out, edit.edge.u, "edge endpoint")?;
-            put_usize(&mut out, edit.edge.v, "edge endpoint")?;
-            put_u64(&mut out, edit.before.to_bits());
-            put_u64(&mut out, edit.after.to_bits());
-        }
+        encode_intervention_header(&mut out, self, trace.len())?;
+        encode_edits(&mut out, &self.edits)?;
         out.extend_from_slice(&trace);
         Ok(out)
     }
@@ -326,66 +344,19 @@ impl InterventionArtifact {
         limits: InterventionDecodeLimits,
         certificate_limits: CertificateLimits,
     ) -> std::result::Result<Self, InterventionError> {
-        if bytes.len() > limits.max_bytes {
-            return Err(InterventionError::new(format!(
-                "{} bytes exceed the decoder limit {}",
-                bytes.len(),
-                limits.max_bytes
-            )));
-        }
+        check_envelope_size(bytes, limits.max_bytes)?;
         let mut reader = Reader::new(bytes);
-        if reader.take(8)? != MAGIC {
-            return Err(InterventionError::new("wrong magic bytes"));
-        }
-        if reader.u16()? != WIRE_VERSION {
-            return Err(InterventionError::new("unsupported wire version"));
-        }
-        if reader.u8()? != F64_BITS_CODEC {
-            return Err(InterventionError::new("unsupported scalar codec"));
-        }
-        let target = IntervalGroupId::from_bytes(reader.array32()?);
-        let target_scale = f64::from_bits(reader.u64()?);
-        let status = decode_status(reader.u8()?)?;
-        let lower_bound = f64::from_bits(reader.u64()?);
-        let upper_bound = f64::from_bits(reader.u64()?);
-        let edit_count = reader.bounded_usize("edge-edit count", limits.max_edits)?;
-        let trace_bytes = reader.bounded_usize("trace byte count", limits.max_trace_bytes)?;
-        let fixed = edit_count
-            .checked_mul(32)
-            .and_then(|edits| edits.checked_add(trace_bytes))
-            .ok_or_else(|| InterventionError::new("record bytes overflow usize"))?;
-        if fixed > reader.remaining() {
-            return Err(InterventionError::new("record exceeds the remaining bytes"));
-        }
-        let mut edits = Vec::with_capacity(edit_count);
-        for _ in 0..edit_count {
-            edits.push(EdgeWeightEdit {
-                edge: EdgeKey {
-                    u: reader.usize()?,
-                    v: reader.usize()?,
-                },
-                before: f64::from_bits(reader.u64()?),
-                after: f64::from_bits(reader.u64()?),
-            });
-        }
-        let trace = ProgramTraceArtifact::decode(
-            reader.take(trace_bytes)?,
-            limits.trace,
-            certificate_limits,
-        )
-        .map_err(|error| InterventionError::new(error.to_string()))?;
-        if reader.remaining() != 0 {
-            return Err(InterventionError::new(format!(
-                "{} trailing bytes after the envelope",
-                reader.remaining()
-            )));
-        }
+        let header = decode_intervention_header(&mut reader, limits)?;
+        check_record_bytes(&reader, header.edit_count, header.trace_bytes)?;
+        let edits = decode_edits(&mut reader, header.edit_count)?;
+        let trace = decode_trace(&mut reader, header.trace_bytes, limits, certificate_limits)?;
+        check_no_trailing_bytes(&reader)?;
         let artifact = Self {
-            target,
-            target_scale,
-            status,
-            lower_bound,
-            upper_bound,
+            target: header.target,
+            target_scale: header.target_scale,
+            status: header.status,
+            lower_bound: header.lower_bound,
+            upper_bound: header.upper_bound,
             edits,
             trace,
         };
@@ -399,81 +370,16 @@ impl InterventionArtifact {
         certificate_limits: CertificateLimits,
     ) -> std::result::Result<VerifiedIntervention, InterventionError> {
         self.check_shape()?;
-        let verified = self
-            .trace
-            .verify(certificate_limits)
-            .map_err(|error| InterventionError::new(error.to_string()))?;
-        if self.trace.steps().len() != 1 || verified.steps.len() != 1 {
-            return Err(InterventionError::new(
-                "intervention trace must contain exactly one update",
-            ));
-        }
+        let verified = verify_trace(&self.trace, certificate_limits)?;
+        check_trace_cardinality(&self.trace, &verified)?;
         let initial = self.trace.initial_graph();
         let updated = self.trace.steps()[0].graph();
-        let applied = apply_edits(initial, &self.edits)
-            .map_err(|error| InterventionError::new(error.to_string()))?;
-        if !graph_bits_equal(&applied, updated) {
-            return Err(InterventionError::new(
-                "edge edits do not reproduce the traced graph",
-            ));
-        }
-        let space = verified
-            .initial_result
-            .spaces
-            .iter()
-            .find(|space| space.id == self.target)
-            .ok_or_else(|| InterventionError::new("target space is absent initially"))?;
-        if space.interval.is_essential()
-            || self.target_scale <= space.interval.birth
-            || self.target_scale >= space.interval.death
-        {
-            return Err(InterventionError::new(
-                "target scale is outside the finite target interval",
-            ));
-        }
-        if !continued_space_dies_by(&verified, self.target, self.target_scale) {
-            return Err(InterventionError::new(
-                "the continued target space does not die by the requested scale",
-            ));
-        }
-        let maximum = maximum_edit(&self.edits);
-        if maximum.to_bits() != self.upper_bound.to_bits() {
-            return Err(InterventionError::new(
-                "upper bound differs from the applied edit",
-            ));
-        }
-        match self.status {
-            InterventionStatus::Optimal => {
-                if verified.steps[0].mode != ProgramUpdateMode::Reused {
-                    return Err(InterventionError::new(
-                        "an optimal claim left the checked reduction region",
-                    ));
-                }
-                let expected = destroyer_edits(initial, space, self.target_scale)
-                    .map_err(|error| InterventionError::new(error.to_string()))?;
-                let lower = space.interval.death - self.target_scale;
-                if !edits_bits_equal(&expected, &self.edits)
-                    || lower.to_bits() != self.lower_bound.to_bits()
-                    || lower.to_bits() != self.upper_bound.to_bits()
-                {
-                    return Err(InterventionError::new(
-                        "optimal edit or matching bound is not canonical",
-                    ));
-                }
-            }
-            InterventionStatus::BoundedGap => {
-                if self.lower_bound.to_bits() != 0 {
-                    return Err(InterventionError::new(
-                        "bounded-gap lower bound must be zero",
-                    ));
-                }
-            }
-            InterventionStatus::BudgetLimited => {
-                return Err(InterventionError::new(
-                    "a budget-limited search has no feasible artifact",
-                ));
-            }
-        }
+        check_applied_edits(initial, updated, &self.edits)?;
+        let space = find_target_space(&verified, self.target)?;
+        check_target_interval(space, self.target_scale)?;
+        check_target_death(&verified, self.target, self.target_scale)?;
+        check_upper_bound(&self.edits, self.upper_bound)?;
+        check_intervention_status(self, &verified, initial, space)?;
         Ok(VerifiedIntervention {
             status: self.status,
             target: self.target,
@@ -486,35 +392,8 @@ impl InterventionArtifact {
     }
 
     fn check_shape(&self) -> std::result::Result<(), InterventionError> {
-        if !self.target_scale.is_finite()
-            || self.target_scale < 0.0
-            || !self.lower_bound.is_finite()
-            || self.lower_bound < 0.0
-            || !self.upper_bound.is_finite()
-            || self.upper_bound < self.lower_bound
-        {
-            return Err(InterventionError::new(
-                "target scale or bounds are not canonical",
-            ));
-        }
-        if self.edits.is_empty()
-            || self
-                .edits
-                .windows(2)
-                .any(|pair| pair[0].edge >= pair[1].edge)
-            || self.edits.iter().any(|edit| {
-                edit.edge.u >= edit.edge.v
-                    || !edit.before.is_finite()
-                    || !edit.after.is_finite()
-                    || edit.after < 0.0
-                    || edit.after >= edit.before
-            })
-        {
-            return Err(InterventionError::new(
-                "edge edits are not canonical strict decreases",
-            ));
-        }
-        Ok(())
+        check_scalar_shape(self)?;
+        check_edit_shape(&self.edits)
     }
 }
 
@@ -535,6 +414,343 @@ pub struct VerifiedIntervention {
     pub edits: Vec<EdgeWeightEdit>,
     /// Exact final diagram and class spaces.
     pub result: ExplainedDiagram,
+}
+
+struct InterventionHeader {
+    target: IntervalGroupId,
+    target_scale: f64,
+    status: InterventionStatus,
+    lower_bound: f64,
+    upper_bound: f64,
+    edit_count: usize,
+    trace_bytes: usize,
+}
+
+fn encode_trace(trace: &ProgramTraceArtifact) -> Result<Vec<u8>, InterventionError> {
+    trace
+        .encode()
+        .map_err(|error| InterventionError::new(error.to_string()))
+}
+
+fn encode_intervention_header(
+    out: &mut Vec<u8>,
+    artifact: &InterventionArtifact,
+    trace_bytes: usize,
+) -> Result<(), InterventionError> {
+    out.extend_from_slice(MAGIC);
+    put_u16(out, WIRE_VERSION);
+    out.push(F64_BITS_CODEC);
+    out.extend_from_slice(artifact.target.as_bytes());
+    put_u64(out, artifact.target_scale.to_bits());
+    out.push(status_tag(artifact.status));
+    put_u64(out, artifact.lower_bound.to_bits());
+    put_u64(out, artifact.upper_bound.to_bits());
+    put_usize(out, artifact.edits.len(), "edge-edit count")?;
+    put_usize(out, trace_bytes, "trace byte count")?;
+    Ok(())
+}
+
+fn encode_edits(out: &mut Vec<u8>, edits: &[EdgeWeightEdit]) -> Result<(), InterventionError> {
+    for edit in edits {
+        put_usize(out, edit.edge.u, "edge endpoint")?;
+        put_usize(out, edit.edge.v, "edge endpoint")?;
+        put_u64(out, edit.before.to_bits());
+        put_u64(out, edit.after.to_bits());
+    }
+    Ok(())
+}
+
+fn check_envelope_size(bytes: &[u8], max_bytes: usize) -> Result<(), InterventionError> {
+    if bytes.len() > max_bytes {
+        return Err(InterventionError::new(format!(
+            "{} bytes exceed the decoder limit {max_bytes}",
+            bytes.len()
+        )));
+    }
+    Ok(())
+}
+
+fn decode_intervention_header(
+    reader: &mut Reader<'_>,
+    limits: InterventionDecodeLimits,
+) -> Result<InterventionHeader, InterventionError> {
+    check_intervention_identity(reader)?;
+    let target = IntervalGroupId::from_bytes(reader.array32()?);
+    let (target_scale, status, lower_bound, upper_bound) = decode_claim(reader)?;
+    let (edit_count, trace_bytes) = decode_intervention_counts(reader, limits)?;
+    Ok(InterventionHeader {
+        target,
+        target_scale,
+        status,
+        lower_bound,
+        upper_bound,
+        edit_count,
+        trace_bytes,
+    })
+}
+
+fn check_intervention_identity(reader: &mut Reader<'_>) -> Result<(), InterventionError> {
+    if reader.take(8)? != MAGIC {
+        return Err(InterventionError::new("wrong magic bytes"));
+    }
+    if reader.u16()? != WIRE_VERSION {
+        return Err(InterventionError::new("unsupported wire version"));
+    }
+    if reader.u8()? != F64_BITS_CODEC {
+        return Err(InterventionError::new("unsupported scalar codec"));
+    }
+    Ok(())
+}
+
+fn decode_claim(
+    reader: &mut Reader<'_>,
+) -> Result<(f64, InterventionStatus, f64, f64), InterventionError> {
+    Ok((
+        f64::from_bits(reader.u64()?),
+        decode_status(reader.u8()?)?,
+        f64::from_bits(reader.u64()?),
+        f64::from_bits(reader.u64()?),
+    ))
+}
+
+fn decode_intervention_counts(
+    reader: &mut Reader<'_>,
+    limits: InterventionDecodeLimits,
+) -> Result<(usize, usize), InterventionError> {
+    Ok((
+        reader.bounded_usize("edge-edit count", limits.max_edits)?,
+        reader.bounded_usize("trace byte count", limits.max_trace_bytes)?,
+    ))
+}
+
+fn check_record_bytes(
+    reader: &Reader<'_>,
+    edit_count: usize,
+    trace_bytes: usize,
+) -> Result<(), InterventionError> {
+    let fixed = edit_count
+        .checked_mul(32)
+        .and_then(|edits| edits.checked_add(trace_bytes))
+        .ok_or_else(|| InterventionError::new("record bytes overflow usize"))?;
+    if fixed > reader.remaining() {
+        return Err(InterventionError::new("record exceeds the remaining bytes"));
+    }
+    Ok(())
+}
+
+fn decode_edits(
+    reader: &mut Reader<'_>,
+    count: usize,
+) -> Result<Vec<EdgeWeightEdit>, InterventionError> {
+    let mut edits = Vec::with_capacity(count);
+    for _ in 0..count {
+        edits.push(EdgeWeightEdit {
+            edge: EdgeKey {
+                u: reader.usize()?,
+                v: reader.usize()?,
+            },
+            before: f64::from_bits(reader.u64()?),
+            after: f64::from_bits(reader.u64()?),
+        });
+    }
+    Ok(edits)
+}
+
+fn decode_trace(
+    reader: &mut Reader<'_>,
+    byte_count: usize,
+    limits: InterventionDecodeLimits,
+    certificate_limits: CertificateLimits,
+) -> Result<ProgramTraceArtifact, InterventionError> {
+    ProgramTraceArtifact::decode(reader.take(byte_count)?, limits.trace, certificate_limits)
+        .map_err(|error| InterventionError::new(error.to_string()))
+}
+
+fn check_no_trailing_bytes(reader: &Reader<'_>) -> Result<(), InterventionError> {
+    if reader.remaining() != 0 {
+        return Err(InterventionError::new(format!(
+            "{} trailing bytes after the envelope",
+            reader.remaining()
+        )));
+    }
+    Ok(())
+}
+
+fn verify_trace(
+    trace: &ProgramTraceArtifact,
+    certificate_limits: CertificateLimits,
+) -> Result<VerifiedProgramTrace, InterventionError> {
+    trace
+        .verify(certificate_limits)
+        .map_err(|error| InterventionError::new(error.to_string()))
+}
+
+fn check_trace_cardinality(
+    trace: &ProgramTraceArtifact,
+    verified: &VerifiedProgramTrace,
+) -> Result<(), InterventionError> {
+    if trace.steps().len() != 1 || verified.steps.len() != 1 {
+        return Err(InterventionError::new(
+            "intervention trace must contain exactly one update",
+        ));
+    }
+    Ok(())
+}
+
+fn check_applied_edits(
+    initial: &SparseDistanceMatrix,
+    updated: &SparseDistanceMatrix,
+    edits: &[EdgeWeightEdit],
+) -> Result<(), InterventionError> {
+    let applied =
+        apply_edits(initial, edits).map_err(|error| InterventionError::new(error.to_string()))?;
+    if !graph_bits_equal(&applied, updated) {
+        return Err(InterventionError::new(
+            "edge edits do not reproduce the traced graph",
+        ));
+    }
+    Ok(())
+}
+
+fn find_target_space(
+    verified: &VerifiedProgramTrace,
+    target: IntervalGroupId,
+) -> Result<&crate::PersistentClassSpace, InterventionError> {
+    verified
+        .initial_result
+        .spaces
+        .iter()
+        .find(|space| space.id == target)
+        .ok_or_else(|| InterventionError::new("target space is absent initially"))
+}
+
+fn check_target_interval(
+    space: &crate::PersistentClassSpace,
+    target_scale: f64,
+) -> Result<(), InterventionError> {
+    let outside = space.interval.is_essential()
+        || target_scale <= space.interval.birth
+        || target_scale >= space.interval.death;
+    if outside {
+        return Err(InterventionError::new(
+            "target scale is outside the finite target interval",
+        ));
+    }
+    Ok(())
+}
+
+fn check_target_death(
+    verified: &VerifiedProgramTrace,
+    target: IntervalGroupId,
+    target_scale: f64,
+) -> Result<(), InterventionError> {
+    if !continued_space_dies_by(verified, target, target_scale) {
+        return Err(InterventionError::new(
+            "the continued target space does not die by the requested scale",
+        ));
+    }
+    Ok(())
+}
+
+fn check_upper_bound(edits: &[EdgeWeightEdit], upper_bound: f64) -> Result<(), InterventionError> {
+    if maximum_edit(edits).to_bits() != upper_bound.to_bits() {
+        return Err(InterventionError::new(
+            "upper bound differs from the applied edit",
+        ));
+    }
+    Ok(())
+}
+
+fn check_intervention_status(
+    artifact: &InterventionArtifact,
+    verified: &VerifiedProgramTrace,
+    initial: &SparseDistanceMatrix,
+    space: &crate::PersistentClassSpace,
+) -> Result<(), InterventionError> {
+    match artifact.status {
+        InterventionStatus::Optimal => check_optimal_claim(artifact, verified, initial, space),
+        InterventionStatus::BoundedGap => check_bounded_gap_claim(artifact.lower_bound),
+        InterventionStatus::BudgetLimited => Err(InterventionError::new(
+            "a budget-limited search has no feasible artifact",
+        )),
+    }
+}
+
+fn check_optimal_claim(
+    artifact: &InterventionArtifact,
+    verified: &VerifiedProgramTrace,
+    initial: &SparseDistanceMatrix,
+    space: &crate::PersistentClassSpace,
+) -> Result<(), InterventionError> {
+    if verified.steps[0].mode != ProgramUpdateMode::Reused {
+        return Err(InterventionError::new(
+            "an optimal claim left the checked reduction region",
+        ));
+    }
+    let expected = destroyer_edits(initial, space, artifact.target_scale)
+        .map_err(|error| InterventionError::new(error.to_string()))?;
+    let lower = space.interval.death - artifact.target_scale;
+    check_optimal_edit_and_bounds(artifact, &expected, lower)
+}
+
+fn check_optimal_edit_and_bounds(
+    artifact: &InterventionArtifact,
+    expected: &[EdgeWeightEdit],
+    lower: f64,
+) -> Result<(), InterventionError> {
+    let differs = !edits_bits_equal(expected, &artifact.edits)
+        || lower.to_bits() != artifact.lower_bound.to_bits()
+        || lower.to_bits() != artifact.upper_bound.to_bits();
+    if differs {
+        return Err(InterventionError::new(
+            "optimal edit or matching bound is not canonical",
+        ));
+    }
+    Ok(())
+}
+
+fn check_bounded_gap_claim(lower_bound: f64) -> Result<(), InterventionError> {
+    if lower_bound.to_bits() != 0 {
+        return Err(InterventionError::new(
+            "bounded-gap lower bound must be zero",
+        ));
+    }
+    Ok(())
+}
+
+fn check_scalar_shape(artifact: &InterventionArtifact) -> Result<(), InterventionError> {
+    let invalid = !artifact.target_scale.is_finite()
+        || artifact.target_scale < 0.0
+        || !artifact.lower_bound.is_finite()
+        || artifact.lower_bound < 0.0
+        || !artifact.upper_bound.is_finite()
+        || artifact.upper_bound < artifact.lower_bound;
+    if invalid {
+        return Err(InterventionError::new(
+            "target scale or bounds are not canonical",
+        ));
+    }
+    Ok(())
+}
+
+fn check_edit_shape(edits: &[EdgeWeightEdit]) -> Result<(), InterventionError> {
+    let invalid = edits.is_empty()
+        || edits.windows(2).any(|pair| pair[0].edge >= pair[1].edge)
+        || edits.iter().any(|edit| !edit_is_canonical(edit));
+    if invalid {
+        return Err(InterventionError::new(
+            "edge edits are not canonical strict decreases",
+        ));
+    }
+    Ok(())
+}
+
+fn edit_is_canonical(edit: &EdgeWeightEdit) -> bool {
+    edit.edge.u < edit.edge.v
+        && edit.before.is_finite()
+        && edit.after.is_finite()
+        && edit.after >= 0.0
+        && edit.after < edit.before
 }
 
 fn destroyer_edits(
