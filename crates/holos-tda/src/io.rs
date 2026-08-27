@@ -214,13 +214,21 @@ fn token_end(bytes: &[u8], start: usize) -> usize {
 /// Parse every number on `line` in order and hand each to `push`. Returns
 /// the offending token when one is not a number. The ASCII path scans bytes
 /// and parses in place; it gives the same bits as `str::parse::<f64>`.
-fn parse_numbers(line: &str, mut push: impl FnMut(f64)) -> std::result::Result<(), &str> {
+fn parse_numbers(line: &str, push: impl FnMut(f64)) -> std::result::Result<(), &str> {
     if !line.is_ascii() {
-        for t in tokens(line) {
-            push(t.parse::<f64>().map_err(|_| t)?);
-        }
-        return Ok(());
+        return parse_unicode_numbers(line, push);
     }
+    parse_ascii_numbers(line, push)
+}
+
+fn parse_unicode_numbers(line: &str, mut push: impl FnMut(f64)) -> std::result::Result<(), &str> {
+    for token in tokens(line) {
+        push(token.parse::<f64>().map_err(|_| token)?);
+    }
+    Ok(())
+}
+
+fn parse_ascii_numbers(line: &str, mut push: impl FnMut(f64)) -> std::result::Result<(), &str> {
     let bytes = line.as_bytes();
     let n = bytes.len();
     let mut i = 0;
@@ -764,30 +772,41 @@ pub fn write_diagram<W: Write>(
     format: OutputFormat,
     max_dim: usize,
 ) -> Result<()> {
-    let io_err = |e: std::io::Error| Error::Io(e.to_string());
     match format {
-        OutputFormat::Ripser => {
-            for dim in 0..=max_dim {
-                writeln!(w, "persistence intervals in dim {dim}:").map_err(io_err)?;
-                for bar in diagram.in_dim(dim) {
-                    if bar.is_essential() {
-                        writeln!(w, " [{}, )", bar.birth).map_err(io_err)?;
-                    } else {
-                        writeln!(w, " [{},{})", bar.birth, bar.death).map_err(io_err)?;
-                    }
-                }
-            }
-        }
-        OutputFormat::Csv => {
-            writeln!(w, "dim,birth,death").map_err(io_err)?;
-            for bar in &diagram.bars {
-                // f64 Display renders infinity as "inf". That string is the
-                // documented essential-death marker.
-                writeln!(w, "{},{},{}", bar.dim, bar.birth, bar.death).map_err(io_err)?;
-            }
+        OutputFormat::Ripser => write_ripser_diagram(w, diagram, max_dim),
+        OutputFormat::Csv => write_csv_diagram(w, diagram),
+    }
+}
+
+fn write_ripser_diagram<W: Write>(w: &mut W, diagram: &Diagram, max_dim: usize) -> Result<()> {
+    for dim in 0..=max_dim {
+        writeln!(w, "persistence intervals in dim {dim}:").map_err(io_error)?;
+        for bar in diagram.in_dim(dim) {
+            write_ripser_bar(w, bar)?;
         }
     }
     Ok(())
+}
+
+fn write_ripser_bar<W: Write>(w: &mut W, bar: &crate::Bar) -> Result<()> {
+    if bar.is_essential() {
+        writeln!(w, " [{}, )", bar.birth).map_err(io_error)
+    } else {
+        writeln!(w, " [{},{})", bar.birth, bar.death).map_err(io_error)
+    }
+}
+
+fn write_csv_diagram<W: Write>(w: &mut W, diagram: &Diagram) -> Result<()> {
+    writeln!(w, "dim,birth,death").map_err(io_error)?;
+    for bar in &diagram.bars {
+        // `f64` display writes infinity as the documented `inf` marker.
+        writeln!(w, "{},{},{}", bar.dim, bar.birth, bar.death).map_err(io_error)?;
+    }
+    Ok(())
+}
+
+fn io_error(error: std::io::Error) -> Error {
+    Error::Io(error.to_string())
 }
 
 /// The text parsers with `workers` forced, whatever the text size. Tests use
