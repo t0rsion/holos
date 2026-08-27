@@ -138,13 +138,22 @@ fn run_cli(py: Python<'_>, argv: Vec<String>) -> i32 {
     py.detach(|| holos_tda::cli::run_cli(argv))
 }
 
-#[pymodule]
-fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn add_persistence_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rips_points, m)?)?;
     m.add_function(wrap_pyfunction!(rips_condensed, m)?)?;
     m.add_function(wrap_pyfunction!(rips_sparse, m)?)?;
+    Ok(())
+}
+
+fn add_cli_and_metadata(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_cli, m)?)?;
     m.add("__version__", holos_tda::VERSION)?;
     m.add("GIT_HASH", holos_tda::GIT_HASH)?;
     Ok(())
+}
+
+#[pymodule]
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    add_persistence_functions(m)?;
+    add_cli_and_metadata(m)
 }
