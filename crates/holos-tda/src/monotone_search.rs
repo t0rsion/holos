@@ -85,36 +85,73 @@ struct BlockerPacking {
     complete: bool,
 }
 
+enum ExploreStart {
+    Return(bool),
+    Continue(u64),
+}
+
 impl<F> Search<'_, F>
 where
     F: FnMut(&[usize]) -> Result<bool>,
 {
     fn run(&mut self) -> Result<SearchResult> {
         let empty = Vec::new();
-        let Some(empty_survives) = self.evaluate(&empty)? else {
-            return Ok(self.result(SearchStatus::Incomplete, Vec::new(), Some(0), None, vec![]));
-        };
-        if !empty_survives {
-            return Ok(self.result(SearchStatus::Optimal, Vec::new(), Some(0), Some(0), vec![]));
-        }
         let all = (0..self.costs.len()).collect::<Vec<_>>();
-        let Some(all_survives) = self.evaluate(&all)? else {
-            return Ok(self.result(SearchStatus::Incomplete, Vec::new(), Some(0), None, vec![]));
-        };
-        if all_survives {
-            return Ok(self.result(SearchStatus::Infeasible, Vec::new(), None, None, vec![]));
+        if let Some(result) = self.extreme_result(&empty, &all)? {
+            return Ok(result);
         }
-
         let root_packing = self.pack_blockers(&empty, &all)?;
         let root_bound = blocker_bound(self.costs, &root_packing.blockers)?;
-        if root_packing.complete {
-            let _ = self.greedy_upper(&all)?;
-        }
-        let complete = if root_packing.complete {
-            self.explore(Vec::new(), all)?
-        } else {
-            false
+        let complete = self.search_root(&all, root_packing.complete)?;
+        Ok(self.finish_result(root_packing, root_bound, complete))
+    }
+
+    fn extreme_result(&mut self, empty: &[usize], all: &[usize]) -> Result<Option<SearchResult>> {
+        let Some(empty_survives) = self.evaluate(empty)? else {
+            return Ok(Some(self.incomplete_empty()));
         };
+        if !empty_survives {
+            return Ok(Some(self.result(
+                SearchStatus::Optimal,
+                Vec::new(),
+                Some(0),
+                Some(0),
+                vec![],
+            )));
+        }
+        let Some(all_survives) = self.evaluate(all)? else {
+            return Ok(Some(self.incomplete_empty()));
+        };
+        if all_survives {
+            return Ok(Some(self.result(
+                SearchStatus::Infeasible,
+                Vec::new(),
+                None,
+                None,
+                vec![],
+            )));
+        }
+        Ok(None)
+    }
+
+    fn incomplete_empty(&self) -> SearchResult {
+        self.result(SearchStatus::Incomplete, Vec::new(), Some(0), None, vec![])
+    }
+
+    fn search_root(&mut self, all: &[usize], packing_complete: bool) -> Result<bool> {
+        if !packing_complete {
+            return Ok(false);
+        }
+        let _ = self.greedy_upper(all)?;
+        self.explore(Vec::new(), all.to_vec())
+    }
+
+    fn finish_result(
+        &self,
+        root_packing: BlockerPacking,
+        root_bound: u64,
+        complete: bool,
+    ) -> SearchResult {
         let (status, selected, lower_bound, upper_bound) = match &self.best {
             Some((cost, selected)) if complete || root_bound == *cost => (
                 SearchStatus::Optimal,
@@ -131,13 +168,13 @@ where
             None if complete => (SearchStatus::Infeasible, Vec::new(), None, None),
             None => (SearchStatus::Incomplete, Vec::new(), Some(root_bound), None),
         };
-        Ok(self.result(
+        self.result(
             status,
             selected,
             lower_bound,
             upper_bound,
             root_packing.blockers,
-        ))
+        )
     }
 
     fn result(
@@ -177,15 +214,38 @@ where
     }
 
     fn greedy_upper(&mut self, available: &[usize]) -> Result<bool> {
+        let Some(mut selected) = self.grow_greedy(available)? else {
+            return Ok(false);
+        };
+        let Some(survives) = self.evaluate(&selected)? else {
+            return Ok(false);
+        };
+        if survives {
+            return Ok(true);
+        }
+        if !self.minimize_greedy(&mut selected)? {
+            return Ok(false);
+        }
+        self.update_best(selected)?;
+        Ok(true)
+    }
+
+    fn grow_greedy(&mut self, available: &[usize]) -> Result<Option<Vec<usize>>> {
         let mut selected = Vec::new();
-        while self.evaluate(&selected)?.is_some_and(|survives| survives) {
+        loop {
+            let Some(survives) = self.evaluate(&selected)? else {
+                return Ok(None);
+            };
+            if !survives {
+                return Ok(Some(selected));
+            }
             if selected.len() == self.max_selected {
-                return Ok(true);
+                return Ok(Some(selected));
             }
             let remaining = difference(available, &selected);
             let packing = self.pack_blockers(&selected, &remaining)?;
             let Some(blocker) = packing.blockers.first() else {
-                return Ok(packing.complete);
+                return Ok(packing.complete.then_some(selected));
             };
             let candidate = blocker
                 .iter()
@@ -194,57 +254,78 @@ where
                 .expect("a blocker is nonempty");
             insert_sorted(&mut selected, candidate);
             if !packing.complete {
-                return Ok(false);
+                return Ok(None);
             }
         }
-        if self.evaluate(&selected)?.is_none() {
-            return Ok(false);
-        }
+    }
+
+    fn minimize_greedy(&mut self, selected: &mut Vec<usize>) -> Result<bool> {
         for candidate in selected.clone().into_iter().rev() {
-            let reduced = without(&selected, candidate);
+            let reduced = without(selected, candidate);
             let Some(survives) = self.evaluate(&reduced)? else {
                 return Ok(false);
             };
             if !survives {
-                selected = reduced;
+                *selected = reduced;
             }
         }
-        self.update_best(selected)?;
         Ok(true)
     }
 
     fn explore(&mut self, included: Vec<usize>, available: Vec<usize>) -> Result<bool> {
+        let included_cost = match self.start_explore(&included, &available)? {
+            ExploreStart::Return(complete) => return Ok(complete),
+            ExploreStart::Continue(cost) => cost,
+        };
+        let packing = self.pack_blockers(&included, &available)?;
+        if let Some(complete) = self.packing_result(&included, included_cost, &packing)? {
+            return Ok(complete);
+        }
+        let Some(branch) = select_branch(packing.blockers, self.costs) else {
+            return Ok(true);
+        };
+        self.explore_branch(included, available, branch)
+    }
+
+    fn start_explore(&mut self, included: &[usize], available: &[usize]) -> Result<ExploreStart> {
         if self.search_nodes == self.limits.search_nodes {
-            return Ok(false);
+            return Ok(ExploreStart::Return(false));
         }
         self.search_nodes += 1;
-        let Some(survives) = self.evaluate(&included)? else {
-            return Ok(false);
+        let Some(survives) = self.evaluate(included)? else {
+            return Ok(ExploreStart::Return(false));
         };
         if !survives {
-            self.update_best(included)?;
-            return Ok(true);
+            self.update_best(included.to_vec())?;
+            return Ok(ExploreStart::Return(true));
         }
         if included.len() == self.max_selected {
-            return Ok(true);
+            return Ok(ExploreStart::Return(true));
         }
-        let included_cost = selected_cost(self.costs, &included)?;
+        let included_cost = selected_cost(self.costs, included)?;
         if self
             .best
             .as_ref()
             .is_some_and(|(best, _)| included_cost >= *best)
         {
-            return Ok(true);
+            return Ok(ExploreStart::Return(true));
         }
-        let union = merge(&included, &available);
+        let union = merge(included, available);
         let Some(union_survives) = self.evaluate(&union)? else {
-            return Ok(false);
+            return Ok(ExploreStart::Return(false));
         };
         if union_survives {
-            return Ok(true);
+            return Ok(ExploreStart::Return(true));
         }
+        Ok(ExploreStart::Continue(included_cost))
+    }
 
-        let packing = self.pack_blockers(&included, &available)?;
+    fn packing_result(
+        &self,
+        included: &[usize],
+        included_cost: u64,
+        packing: &BlockerPacking,
+    ) -> Result<Option<bool>> {
         let bound = included_cost
             .checked_add(blocker_bound(self.costs, &packing.blockers)?)
             .ok_or_else(|| Error::InvalidInput("monotone search bound overflows".into()))?;
@@ -252,19 +333,20 @@ where
         if cardinality_bound > self.max_selected
             || self.best.as_ref().is_some_and(|(best, _)| bound >= *best)
         {
-            return Ok(true);
+            return Ok(Some(true));
         }
         if !packing.complete {
-            return Ok(false);
+            return Ok(Some(false));
         }
-        let Some(mut branch) = packing
-            .blockers
-            .into_iter()
-            .min_by_key(|blocker| (blocker.len(), blocker_min_cost(self.costs, blocker)))
-        else {
-            return Ok(true);
-        };
-        branch.sort_by_key(|candidate| (self.costs[*candidate], *candidate));
+        Ok(None)
+    }
+
+    fn explore_branch(
+        &mut self,
+        included: Vec<usize>,
+        available: Vec<usize>,
+        branch: Vec<usize>,
+    ) -> Result<bool> {
         let mut excluded = BTreeSet::new();
         let mut complete = true;
         for candidate in branch {
@@ -350,6 +432,14 @@ fn blocker_min_cost(costs: &[u64], blocker: &[usize]) -> u64 {
         .map(|candidate| costs[*candidate])
         .min()
         .unwrap_or(0)
+}
+
+fn select_branch(mut blockers: Vec<Vec<usize>>, costs: &[u64]) -> Option<Vec<usize>> {
+    let mut branch = blockers
+        .drain(..)
+        .min_by_key(|blocker| (blocker.len(), blocker_min_cost(costs, blocker)))?;
+    branch.sort_by_key(|candidate| (costs[*candidate], *candidate));
+    Some(branch)
 }
 
 fn blocker_bound(costs: &[u64], blockers: &[Vec<usize>]) -> Result<u64> {
