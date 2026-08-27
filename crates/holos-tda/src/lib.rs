@@ -32,6 +32,8 @@ pub mod correspondence;
 pub mod coverage;
 /// Exact component frontiers for failure-tolerant coverage synthesis.
 pub mod coverage_frontier;
+/// Exact planar geometry bindings for finite coverage specifications.
+pub mod coverage_geometry;
 /// Failure-tolerant finite and kinetic relative coverage specifications.
 pub mod coverage_synthesis;
 /// Distance-matrix construction and storage.
@@ -128,6 +130,10 @@ pub use coverage::{
 pub use coverage_frontier::{
     CoverageComponentFrontier, CoverageComposition, CoverageCompositionStatus,
     CoverageFrontierEntry, compose_coverage_frontiers,
+};
+pub use coverage_geometry::{
+    CoverageGeometry, CoverageGeometryLimits, GeometryBoundCoverageArtifact,
+    GeometryBoundCoverageDecodeLimits, PlanarPoint,
 };
 pub use coverage_synthesis::{
     CoverageAction, CoverageComponent, CoverageCounterexample, CoveragePlanEvaluation,
