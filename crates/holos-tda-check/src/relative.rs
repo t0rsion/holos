@@ -86,15 +86,7 @@ pub fn verify_relative_interface(
     limits: ProofLimits,
 ) -> Result<VerifiedRelativeInterface, ProofError> {
     let certificate = decode_verified(bytes, limits)?;
-    Ok(VerifiedRelativeInterface {
-        digest: certificate.digest,
-        max_dim: certificate.max_dim,
-        input_cells: count_cells(&certificate.input),
-        cancellations: certificate.steps.len(),
-        core_cells: count_cells(&certificate.core),
-        reduction_columns: certificate.columns.iter().map(Vec::len).sum(),
-        bars: certificate.diagram.len(),
-    })
+    Ok(relative_summary(&certificate))
 }
 
 /// Verify that a parent input is the keyed union of checked child cores.
@@ -107,70 +99,116 @@ pub fn verify_relative_composition(
     expected_protected_vertices: &[usize],
     limits: ProofLimits,
 ) -> Result<VerifiedRelativeInterface, ProofError> {
-    if children.is_empty() {
-        return Err(ProofError::new(
-            "relative composition requires a child certificate",
-        ));
-    }
+    require_children(children)?;
     let parent = decode_verified(parent, limits)?;
-    if expected_protected_vertices
-        .windows(2)
-        .any(|pair| pair[0] >= pair[1])
-        || parent.protected_vertices != expected_protected_vertices
-    {
-        return Err(ProofError::new(
-            "relative parent has the wrong protected vertex set",
-        ));
-    }
+    verify_parent_protected(&parent, expected_protected_vertices)?;
     let mut union = vec![BTreeMap::<Vec<usize>, Cell>::new(); parent.max_dim + 2];
     for bytes in children {
         let child = decode_verified(bytes, limits)?;
-        if child.max_dim != parent.max_dim || child.modulus != parent.modulus {
-            return Err(ProofError::new(
-                "relative composition changes dimension or coefficient field",
-            ));
-        }
-        for (dimension, cells) in child.core.iter().enumerate() {
-            for cell in cells {
-                match union[dimension].get(&cell.vertices) {
-                    Some(existing) if existing != cell => {
-                        return Err(ProofError::new(
-                            "relative composition identifies conflicting cells",
-                        ));
-                    }
-                    Some(_) => {}
-                    None => {
-                        union[dimension].insert(cell.vertices.clone(), cell.clone());
-                    }
-                }
-            }
-        }
+        merge_child(&parent, &child, &mut union)?;
     }
-    let expected: Vec<Vec<Cell>> = union
-        .into_iter()
-        .map(|dimension| {
-            let mut cells: Vec<_> = dimension.into_values().collect();
-            cells.sort_by(cell_order);
-            cells
-        })
-        .collect();
+    let expected = union_cells(union);
     if expected != parent.input {
         return Err(ProofError::new(
             "relative parent input differs from the keyed child-core union",
         ));
     }
-    Ok(VerifiedRelativeInterface {
-        digest: parent.digest,
-        max_dim: parent.max_dim,
-        input_cells: count_cells(&parent.input),
-        cancellations: parent.steps.len(),
-        core_cells: count_cells(&parent.core),
-        reduction_columns: parent.columns.iter().map(Vec::len).sum(),
-        bars: parent.diagram.len(),
-    })
+    Ok(relative_summary(&parent))
+}
+
+fn relative_summary(certificate: &VerifiedCertificate) -> VerifiedRelativeInterface {
+    VerifiedRelativeInterface {
+        digest: certificate.digest,
+        max_dim: certificate.max_dim,
+        input_cells: count_cells(&certificate.input),
+        cancellations: certificate.steps.len(),
+        core_cells: count_cells(&certificate.core),
+        reduction_columns: certificate.columns.iter().map(Vec::len).sum(),
+        bars: certificate.diagram.len(),
+    }
+}
+
+fn require_children(children: &[&[u8]]) -> Result<(), ProofError> {
+    if children.is_empty() {
+        Err(ProofError::new(
+            "relative composition requires a child certificate",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_parent_protected(
+    parent: &VerifiedCertificate,
+    expected: &[usize],
+) -> Result<(), ProofError> {
+    if expected.windows(2).any(|pair| pair[0] >= pair[1]) || parent.protected_vertices != expected {
+        Err(ProofError::new(
+            "relative parent has the wrong protected vertex set",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn merge_child(
+    parent: &VerifiedCertificate,
+    child: &VerifiedCertificate,
+    union: &mut [DimensionMap],
+) -> Result<(), ProofError> {
+    if child.max_dim != parent.max_dim || child.modulus != parent.modulus {
+        return Err(ProofError::new(
+            "relative composition changes dimension or coefficient field",
+        ));
+    }
+    for (dimension, cells) in child.core.iter().enumerate() {
+        for cell in cells {
+            merge_child_cell(&mut union[dimension], cell)?;
+        }
+    }
+    Ok(())
+}
+
+fn merge_child_cell(dimension: &mut DimensionMap, cell: &Cell) -> Result<(), ProofError> {
+    match dimension.get(&cell.vertices) {
+        Some(existing) if existing != cell => Err(ProofError::new(
+            "relative composition identifies conflicting cells",
+        )),
+        Some(_) => Ok(()),
+        None => {
+            dimension.insert(cell.vertices.clone(), cell.clone());
+            Ok(())
+        }
+    }
+}
+
+fn union_cells(union: Vec<DimensionMap>) -> Vec<Vec<Cell>> {
+    union
+        .into_iter()
+        .map(|dimension| {
+            let mut cells = dimension.into_values().collect::<Vec<_>>();
+            cells.sort_by(cell_order);
+            cells
+        })
+        .collect()
 }
 
 pub(super) fn decode_verified(
+    bytes: &[u8],
+    limits: ProofLimits,
+) -> Result<VerifiedCertificate, ProofError> {
+    let certificate = decode_certificate(bytes, limits)?;
+    verify_certificate(&certificate, limits)?;
+    Ok(certificate)
+}
+
+struct CertificateHeader {
+    max_dim: usize,
+    modulus: u32,
+    protected_vertices: Vec<usize>,
+}
+
+fn decode_certificate(
     bytes: &[u8],
     limits: ProofLimits,
 ) -> Result<VerifiedCertificate, ProofError> {
@@ -182,6 +220,50 @@ pub(super) fn decode_verified(
         )));
     }
     let mut reader = Reader::new(bytes);
+    let header = decode_certificate_header(&mut reader, limits)?;
+    let input = decode_cells(&mut reader, header.max_dim, header.modulus, limits)?;
+    let input_count = count_cells(&input);
+    let steps = decode_steps(&mut reader, header.max_dim, input_count, limits)?;
+    let core = decode_cells(&mut reader, header.max_dim, header.modulus, limits)?;
+    let columns = decode_columns(&mut reader, header.max_dim, header.modulus, limits)?;
+    let diagram = decode_diagram(&mut reader, header.max_dim, limits)?;
+    let digest = reader.array32()?;
+    if reader.remaining() != 0 {
+        return Err(ProofError::new(
+            "trailing bytes after the relative-interface certificate",
+        ));
+    }
+
+    Ok(VerifiedCertificate {
+        digest,
+        max_dim: header.max_dim,
+        modulus: header.modulus,
+        protected_vertices: header.protected_vertices,
+        input,
+        steps,
+        core,
+        columns,
+        diagram,
+    })
+}
+
+fn decode_certificate_header(
+    reader: &mut Reader<'_>,
+    limits: ProofLimits,
+) -> Result<CertificateHeader, ProofError> {
+    decode_certificate_prefix(reader)?;
+    let max_dim = reader.bounded_usize("relative dimension", limits.max_dimension)?;
+    let modulus = reader.u32()?;
+    validate_modulus(modulus)?;
+    let protected_vertices = decode_protected_vertices(reader, limits)?;
+    Ok(CertificateHeader {
+        max_dim,
+        modulus,
+        protected_vertices,
+    })
+}
+
+fn decode_certificate_prefix(reader: &mut Reader<'_>) -> Result<(), ProofError> {
     if reader.take(8)? != MAGIC {
         return Err(ProofError::new("wrong relative-interface magic bytes"));
     }
@@ -190,94 +272,140 @@ pub(super) fn decode_verified(
             "unsupported relative-interface wire version or scalar codec",
         ));
     }
-    let max_dim = reader.bounded_usize("relative dimension", limits.max_dimension)?;
-    let modulus = reader.u32()?;
-    if !is_prime(modulus as u64) || modulus as u64 >= MODULUS_LIMIT {
-        return Err(ProofError::new(
-            "relative-interface modulus is not a supported prime",
-        ));
-    }
-    let protected_count = reader.bounded_usize("protected vertex count", limits.max_vertices)?;
-    let mut protected_vertices = Vec::with_capacity(protected_count);
-    for _ in 0..protected_count {
-        protected_vertices.push(reader.usize()?);
-    }
-    if !protected_vertices.windows(2).all(|pair| pair[0] < pair[1]) {
-        return Err(ProofError::new(
-            "relative-interface protected vertices are not canonical",
-        ));
-    }
-    let input = decode_cells(&mut reader, max_dim, modulus, limits)?;
-    let input_count = count_cells(&input);
-    let cancellation_limit = input_count / 2;
-    let cancellation_count =
-        reader.bounded_usize("relative cancellation count", cancellation_limit)?;
-    let mut steps = Vec::with_capacity(cancellation_count);
-    for _ in 0..cancellation_count {
-        steps.push(Step {
-            upper: decode_key(&mut reader, max_dim + 2, limits.max_vertices)?,
-            lower: decode_key(&mut reader, max_dim + 1, limits.max_vertices)?,
-            coefficient: reader.u32()?,
-        });
-    }
-    let core = decode_cells(&mut reader, max_dim, modulus, limits)?;
-    let columns = decode_columns(&mut reader, max_dim, modulus, limits)?;
-    let bar_count = reader.bounded_usize("relative bar count", limits.max_bars)?;
-    let mut diagram = Vec::with_capacity(bar_count);
-    for _ in 0..bar_count {
-        diagram.push(ProofBar {
-            dimension: reader.bounded_usize("bar dimension", max_dim)?,
-            birth: f64::from_bits(reader.u64()?),
-            death: f64::from_bits(reader.u64()?),
-        });
-    }
-    let digest = reader.array32()?;
-    if reader.remaining() != 0 {
-        return Err(ProofError::new(
-            "trailing bytes after the relative-interface certificate",
-        ));
-    }
+    Ok(())
+}
 
-    check_chain(&input, max_dim, modulus)?;
-    check_chain(&core, max_dim, modulus)?;
-    let protected: BTreeSet<_> = protected_vertices.iter().copied().collect();
-    let replayed = replay(input.clone(), &steps, &protected, modulus)?;
-    if replayed != core {
+fn validate_modulus(modulus: u32) -> Result<(), ProofError> {
+    if !is_prime(u64::from(modulus)) || u64::from(modulus) >= MODULUS_LIMIT {
+        Err(ProofError::new(
+            "relative-interface modulus is not a supported prime",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_protected_vertices(
+    reader: &mut Reader<'_>,
+    limits: ProofLimits,
+) -> Result<Vec<usize>, ProofError> {
+    let count = reader.bounded_usize("protected vertex count", limits.max_vertices)?;
+    let vertices = (0..count)
+        .map(|_| reader.usize())
+        .collect::<Result<Vec<_>, _>>()?;
+    if vertices.windows(2).any(|pair| pair[0] >= pair[1]) {
+        Err(ProofError::new(
+            "relative-interface protected vertices are not canonical",
+        ))
+    } else {
+        Ok(vertices)
+    }
+}
+
+fn decode_steps(
+    reader: &mut Reader<'_>,
+    max_dim: usize,
+    input_count: usize,
+    limits: ProofLimits,
+) -> Result<Vec<Step>, ProofError> {
+    let count = reader.bounded_usize("relative cancellation count", input_count / 2)?;
+    (0..count)
+        .map(|_| {
+            Ok(Step {
+                upper: decode_key(reader, max_dim + 2, limits.max_vertices)?,
+                lower: decode_key(reader, max_dim + 1, limits.max_vertices)?,
+                coefficient: reader.u32()?,
+            })
+        })
+        .collect()
+}
+
+fn decode_diagram(
+    reader: &mut Reader<'_>,
+    max_dim: usize,
+    limits: ProofLimits,
+) -> Result<Vec<ProofBar>, ProofError> {
+    let count = reader.bounded_usize("relative bar count", limits.max_bars)?;
+    (0..count)
+        .map(|_| {
+            Ok(ProofBar {
+                dimension: reader.bounded_usize("bar dimension", max_dim)?,
+                birth: f64::from_bits(reader.u64()?),
+                death: f64::from_bits(reader.u64()?),
+            })
+        })
+        .collect()
+}
+
+fn verify_certificate(
+    certificate: &VerifiedCertificate,
+    limits: ProofLimits,
+) -> Result<(), ProofError> {
+    check_chain(&certificate.input, certificate.max_dim, certificate.modulus)?;
+    check_chain(&certificate.core, certificate.max_dim, certificate.modulus)?;
+    let protected = certificate
+        .protected_vertices
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let replayed = replay(
+        certificate.input.clone(),
+        &certificate.steps,
+        &protected,
+        certificate.modulus,
+    )?;
+    verify_replay(certificate, replayed, &protected)?;
+    verify_certificate_reduction(certificate, limits)?;
+    verify_certificate_digest(certificate)
+}
+
+fn verify_replay(
+    certificate: &VerifiedCertificate,
+    replayed: Vec<Vec<Cell>>,
+    protected: &BTreeSet<usize>,
+) -> Result<(), ProofError> {
+    if replayed != certificate.core {
         return Err(ProofError::new(
             "relative cancellation trace does not produce the declared core",
         ));
     }
-    check_protected(&input, &core, &protected)?;
-    let checked_diagram = check_reduction(&core, modulus, &columns, limits)?;
-    if !diagrams_equal(&checked_diagram, &diagram) {
+    check_protected(&certificate.input, &certificate.core, protected)
+}
+
+fn verify_certificate_reduction(
+    certificate: &VerifiedCertificate,
+    limits: ProofLimits,
+) -> Result<(), ProofError> {
+    let checked = check_reduction(
+        &certificate.core,
+        certificate.modulus,
+        &certificate.columns,
+        limits,
+    )?;
+    if !diagrams_equal(&checked, &certificate.diagram) {
         return Err(ProofError::new(
             "relative-interface diagram differs from the checked reduction",
         ));
     }
+    Ok(())
+}
+
+fn verify_certificate_digest(certificate: &VerifiedCertificate) -> Result<(), ProofError> {
     let computed = certificate_digest(
-        max_dim,
-        modulus,
-        &protected_vertices,
-        &core,
-        &columns,
-        &diagram,
+        certificate.max_dim,
+        certificate.modulus,
+        &certificate.protected_vertices,
+        &certificate.core,
+        &certificate.columns,
+        &certificate.diagram,
     );
-    if computed != digest {
-        return Err(ProofError::new(
+    if computed != certificate.digest {
+        Err(ProofError::new(
             "relative-interface digest differs from checked content",
-        ));
+        ))
+    } else {
+        Ok(())
     }
-    Ok(VerifiedCertificate {
-        digest,
-        max_dim,
-        modulus,
-        protected_vertices,
-        input,
-        steps,
-        core,
-        columns,
-        diagram,
-    })
 }
 
 pub(super) struct IndexLeafContext<'a> {
@@ -338,6 +466,23 @@ fn enumerate_flag_cells(
     if labels.len() > limits.max_vertices {
         return Err(ProofError::new("relative leaf exceeds the vertex limit"));
     }
+    let mut cells = vec![vertex_cells(labels)];
+    for dimension in 1..=max_dim + 1 {
+        let next = enumerate_dimension(
+            graph,
+            labels,
+            threshold,
+            dimension,
+            &cells[dimension - 1],
+            dimension_limit(dimension, limits),
+            modulus,
+        )?;
+        cells.push(next);
+    }
+    Ok(cells)
+}
+
+fn vertex_cells(labels: &[usize]) -> Vec<Cell> {
     let mut vertices = labels
         .iter()
         .map(|&vertex| Cell {
@@ -347,61 +492,81 @@ fn enumerate_flag_cells(
         })
         .collect::<Vec<_>>();
     vertices.sort_by(cell_order);
-    let mut cells = vec![vertices];
-    for dimension in 1..=max_dim + 1 {
-        let limit = match dimension {
-            1 => limits.max_edges,
-            2 => limits.max_triangles,
-            _ => limits.max_higher_simplices,
-        };
-        let mut next = Vec::new();
-        for simplex in &cells[dimension - 1] {
-            let start = labels
-                .binary_search(simplex.vertices.last().expect("a simplex is nonempty"))
-                .expect("the preceding simplex uses declared labels")
-                + 1;
-            for &vertex in &labels[start..] {
-                let mut value = simplex.value;
-                let mut clique = true;
-                for &member in &simplex.vertices {
-                    let edge = graph.get(member, vertex);
-                    if !edge.is_finite() || edge > threshold {
-                        clique = false;
-                        break;
-                    }
-                    value = value.max(edge);
+    vertices
+}
+
+fn enumerate_dimension(
+    graph: &Graph,
+    labels: &[usize],
+    threshold: f64,
+    dimension: usize,
+    previous: &[Cell],
+    limit: usize,
+    modulus: u32,
+) -> Result<Vec<Cell>, ProofError> {
+    let mut next = Vec::new();
+    for simplex in previous {
+        let start = labels
+            .binary_search(simplex.vertices.last().expect("a simplex is nonempty"))
+            .expect("the preceding simplex uses declared labels")
+            + 1;
+        for &vertex in &labels[start..] {
+            if let Some(cell) = extend_simplex(graph, simplex, vertex, threshold, modulus) {
+                if next.len() == limit {
+                    return Err(ProofError::new(format!(
+                        "relative leaf dimension {dimension} exceeds the simplex limit"
+                    )));
                 }
-                if clique {
-                    if next.len() == limit {
-                        return Err(ProofError::new(format!(
-                            "relative leaf dimension {dimension} exceeds the simplex limit"
-                        )));
-                    }
-                    let mut vertices = simplex.vertices.clone();
-                    vertices.push(vertex);
-                    let mut boundary = (0..vertices.len())
-                        .map(|removed| {
-                            let mut cell = vertices.clone();
-                            cell.remove(removed);
-                            Term {
-                                cell,
-                                coefficient: if removed % 2 == 0 { 1 } else { modulus - 1 },
-                            }
-                        })
-                        .collect::<Vec<_>>();
-                    boundary.sort();
-                    next.push(Cell {
-                        vertices,
-                        value,
-                        boundary,
-                    });
-                }
+                next.push(cell);
             }
         }
-        next.sort_by(cell_order);
-        cells.push(next);
     }
-    Ok(cells)
+    next.sort_by(cell_order);
+    Ok(next)
+}
+
+fn extend_simplex(
+    graph: &Graph,
+    simplex: &Cell,
+    vertex: usize,
+    threshold: f64,
+    modulus: u32,
+) -> Option<Cell> {
+    let value = simplex_value(graph, simplex, vertex, threshold)?;
+    let mut vertices = simplex.vertices.clone();
+    vertices.push(vertex);
+    Some(Cell {
+        boundary: simplex_boundary(&vertices, modulus),
+        vertices,
+        value,
+    })
+}
+
+fn simplex_value(graph: &Graph, simplex: &Cell, vertex: usize, threshold: f64) -> Option<f64> {
+    let mut value = simplex.value;
+    for &member in &simplex.vertices {
+        let edge = graph.get(member, vertex);
+        if !edge.is_finite() || edge > threshold {
+            return None;
+        }
+        value = value.max(edge);
+    }
+    Some(value)
+}
+
+fn simplex_boundary(vertices: &[usize], modulus: u32) -> Vec<Term> {
+    let mut boundary = (0..vertices.len())
+        .map(|removed| {
+            let mut cell = vertices.to_vec();
+            cell.remove(removed);
+            Term {
+                cell,
+                coefficient: if removed % 2 == 0 { 1 } else { modulus - 1 },
+            }
+        })
+        .collect::<Vec<_>>();
+    boundary.sort();
+    boundary
 }
 
 fn decode_cells(
@@ -418,47 +583,97 @@ fn decode_cells(
     let mut cells = Vec::with_capacity(max_dim + 2);
     let mut total_terms = 0usize;
     for dimension in 0..=max_dim + 1 {
-        let limit = dimension_limit(dimension, limits);
-        let count = reader.bounded_usize("dimension cell count", limit)?;
-        let mut values = Vec::with_capacity(count);
-        for _ in 0..count {
-            let vertices = decode_key(reader, dimension + 1, limits.max_vertices)?;
-            if vertices.len() != dimension + 1 {
-                return Err(ProofError::new(
-                    "relative-interface cell has the wrong dimension",
-                ));
-            }
-            let value = f64::from_bits(reader.u64()?);
-            let term_count = reader.bounded_usize("cell boundary term count", limit)?;
-            total_terms = total_terms
-                .checked_add(term_count)
-                .ok_or_else(|| ProofError::new("relative boundary term count overflows"))?;
-            if total_terms > limits.max_terms {
-                return Err(ProofError::new("relative boundary terms exceed the limit"));
-            }
-            let mut boundary = Vec::with_capacity(term_count);
-            for _ in 0..term_count {
-                boundary.push(Term {
-                    cell: decode_key(reader, dimension, limits.max_vertices)?,
-                    coefficient: reader.u32()?,
-                });
-            }
-            if boundary.iter().any(|term| {
-                term.cell.len() != dimension || term.coefficient == 0 || term.coefficient >= modulus
-            }) {
-                return Err(ProofError::new(
-                    "relative boundary term has the wrong dimension or coefficient",
-                ));
-            }
-            values.push(Cell {
-                vertices,
-                value,
-                boundary,
-            });
-        }
-        cells.push(values);
+        cells.push(decode_cell_dimension(
+            reader,
+            dimension,
+            modulus,
+            &mut total_terms,
+            limits,
+        )?);
     }
     Ok(cells)
+}
+
+fn decode_cell_dimension(
+    reader: &mut Reader<'_>,
+    dimension: usize,
+    modulus: u32,
+    total_terms: &mut usize,
+    limits: ProofLimits,
+) -> Result<Vec<Cell>, ProofError> {
+    let limit = dimension_limit(dimension, limits);
+    let count = reader.bounded_usize("dimension cell count", limit)?;
+    (0..count)
+        .map(|_| decode_cell(reader, dimension, modulus, total_terms, limit, limits))
+        .collect()
+}
+
+fn decode_cell(
+    reader: &mut Reader<'_>,
+    dimension: usize,
+    modulus: u32,
+    total_terms: &mut usize,
+    term_limit: usize,
+    limits: ProofLimits,
+) -> Result<Cell, ProofError> {
+    let vertices = decode_key(reader, dimension + 1, limits.max_vertices)?;
+    if vertices.len() != dimension + 1 {
+        return Err(ProofError::new(
+            "relative-interface cell has the wrong dimension",
+        ));
+    }
+    let value = f64::from_bits(reader.u64()?);
+    let boundary = decode_boundary(reader, dimension, modulus, total_terms, term_limit, limits)?;
+    Ok(Cell {
+        vertices,
+        value,
+        boundary,
+    })
+}
+
+fn decode_boundary(
+    reader: &mut Reader<'_>,
+    dimension: usize,
+    modulus: u32,
+    total_terms: &mut usize,
+    term_limit: usize,
+    limits: ProofLimits,
+) -> Result<Vec<Term>, ProofError> {
+    let count = reader.bounded_usize("cell boundary term count", term_limit)?;
+    add_term_count(total_terms, count, limits.max_terms, "relative boundary")?;
+    let boundary = (0..count)
+        .map(|_| {
+            Ok(Term {
+                cell: decode_key(reader, dimension, limits.max_vertices)?,
+                coefficient: reader.u32()?,
+            })
+        })
+        .collect::<Result<Vec<_>, ProofError>>()?;
+    if boundary.iter().any(|term| {
+        term.cell.len() != dimension || term.coefficient == 0 || term.coefficient >= modulus
+    }) {
+        Err(ProofError::new(
+            "relative boundary term has the wrong dimension or coefficient",
+        ))
+    } else {
+        Ok(boundary)
+    }
+}
+
+fn add_term_count(
+    total: &mut usize,
+    add: usize,
+    maximum: usize,
+    kind: &str,
+) -> Result<(), ProofError> {
+    *total = total
+        .checked_add(add)
+        .ok_or_else(|| ProofError::new(format!("{kind} term count overflows")))?;
+    if *total > maximum {
+        Err(ProofError::new(format!("{kind} terms exceed the limit")))
+    } else {
+        Ok(())
+    }
 }
 
 fn decode_columns(
@@ -475,30 +690,50 @@ fn decode_columns(
     let mut columns = Vec::with_capacity(max_dim + 1);
     let mut total_terms = 0usize;
     for dimension in 1..=max_dim + 1 {
-        let count =
-            reader.bounded_usize("reduction column count", dimension_limit(dimension, limits))?;
-        let mut values = Vec::with_capacity(count);
-        for target in 0..count {
-            let term_count = reader.bounded_usize("change term count", limits.max_terms)?;
-            total_terms = total_terms
-                .checked_add(term_count)
-                .ok_or_else(|| ProofError::new("change term count overflows"))?;
-            if total_terms > limits.max_terms {
-                return Err(ProofError::new("change terms exceed the limit"));
-            }
-            let mut terms = Vec::with_capacity(term_count);
-            for _ in 0..term_count {
-                terms.push(ProofTerm {
-                    index: reader.usize()?,
-                    coefficient: reader.u32()?,
-                });
-            }
-            check_column(target, &terms, modulus)?;
-            values.push(ProofColumn { terms });
-        }
-        columns.push(values);
+        columns.push(decode_column_dimension(
+            reader,
+            dimension,
+            modulus,
+            &mut total_terms,
+            limits,
+        )?);
     }
     Ok(columns)
+}
+
+fn decode_column_dimension(
+    reader: &mut Reader<'_>,
+    dimension: usize,
+    modulus: u32,
+    total_terms: &mut usize,
+    limits: ProofLimits,
+) -> Result<Vec<ProofColumn>, ProofError> {
+    let count =
+        reader.bounded_usize("reduction column count", dimension_limit(dimension, limits))?;
+    (0..count)
+        .map(|target| decode_column(reader, target, modulus, total_terms, limits))
+        .collect()
+}
+
+fn decode_column(
+    reader: &mut Reader<'_>,
+    target: usize,
+    modulus: u32,
+    total_terms: &mut usize,
+    limits: ProofLimits,
+) -> Result<ProofColumn, ProofError> {
+    let count = reader.bounded_usize("change term count", limits.max_terms)?;
+    add_term_count(total_terms, count, limits.max_terms, "change")?;
+    let terms = (0..count)
+        .map(|_| {
+            Ok(ProofTerm {
+                index: reader.usize()?,
+                coefficient: reader.u32()?,
+            })
+        })
+        .collect::<Result<Vec<_>, ProofError>>()?;
+    check_column(target, &terms, modulus)?;
+    Ok(ProofColumn { terms })
 }
 
 fn decode_key(
@@ -536,21 +771,47 @@ fn apply_step(
     protected: &BTreeSet<usize>,
     modulus: u32,
 ) -> Result<(), ProofError> {
+    let dimension = cancellation_dimension(cells.len(), step)?;
+    verify_unprotected(step, protected)?;
+    let upper = prepare_cancellation(cells, step, dimension, modulus)?;
+    eliminate_lower(cells, step, dimension, &upper, modulus);
+    remove_upper_from_cofaces(cells, step, dimension);
+    cells[dimension].remove(&step.upper);
+    cells[dimension - 1].remove(&step.lower);
+    Ok(())
+}
+
+fn cancellation_dimension(cell_dimensions: usize, step: &Step) -> Result<usize, ProofError> {
     let dimension = step
         .upper
         .len()
         .checked_sub(1)
         .ok_or_else(|| ProofError::new("relative cancellation upper cell is empty"))?;
-    if dimension == 0 || step.lower.len() != dimension || dimension >= cells.len() {
-        return Err(ProofError::new(
+    if dimension == 0 || step.lower.len() != dimension || dimension >= cell_dimensions {
+        Err(ProofError::new(
             "relative cancellation dimensions are incompatible",
-        ));
+        ))
+    } else {
+        Ok(dimension)
     }
+}
+
+fn verify_unprotected(step: &Step, protected: &BTreeSet<usize>) -> Result<(), ProofError> {
     if is_protected(&step.upper, protected) || is_protected(&step.lower, protected) {
-        return Err(ProofError::new(
+        Err(ProofError::new(
             "relative cancellation removes a protected cell",
-        ));
+        ))
+    } else {
+        Ok(())
     }
+}
+
+fn prepare_cancellation(
+    cells: &[DimensionMap],
+    step: &Step,
+    dimension: usize,
+    modulus: u32,
+) -> Result<Cell, ProofError> {
     let upper = cells[dimension]
         .get(&step.upper)
         .cloned()
@@ -570,7 +831,17 @@ fn apply_step(
             "relative cancellation coefficient is wrong",
         ));
     }
-    let inverse = inverse_mod(coefficient as u64, modulus as u64) as u32;
+    Ok(upper)
+}
+
+fn eliminate_lower(
+    cells: &mut [DimensionMap],
+    step: &Step,
+    dimension: usize,
+    upper: &Cell,
+    modulus: u32,
+) {
+    let inverse = inverse_mod(u64::from(step.coefficient), u64::from(modulus)) as u32;
     let keys: Vec<_> = cells[dimension].keys().cloned().collect();
     for key in keys {
         if key == step.upper {
@@ -580,18 +851,19 @@ fn apply_step(
         let Some(value) = boundary_coefficient(&cell.boundary, &step.lower) else {
             continue;
         };
-        let factor = ((modulus as u64 - value as u64 * inverse as u64 % modulus as u64)
-            % modulus as u64) as u32;
+        let factor = ((u64::from(modulus)
+            - u64::from(value) * u64::from(inverse) % u64::from(modulus))
+            % u64::from(modulus)) as u32;
         add_boundary_scaled(&mut cell.boundary, &upper.boundary, factor, modulus);
     }
+}
+
+fn remove_upper_from_cofaces(cells: &mut [DimensionMap], step: &Step, dimension: usize) {
     if dimension + 1 < cells.len() {
         for cell in cells[dimension + 1].values_mut() {
             remove_boundary_term(&mut cell.boundary, &step.upper);
         }
     }
-    cells[dimension].remove(&step.upper);
-    cells[dimension - 1].remove(&step.lower);
-    Ok(())
 }
 
 fn cells_to_maps(cells: Vec<Vec<Cell>>) -> Result<Vec<DimensionMap>, ProofError> {
@@ -672,63 +944,109 @@ fn check_chain(cells: &[Vec<Cell>], max_dim: usize, modulus: u32) -> Result<(), 
         })
         .collect();
     for (dimension, values) in cells.iter().enumerate() {
-        let mut previous: Option<&Cell> = None;
-        for cell in values {
-            if cell.vertices.len() != dimension + 1
-                || !cell.value.is_finite()
-                || cell.value < 0.0
-                || previous.is_some_and(|prior| cell_order(prior, cell).is_gt())
-            {
-                return Err(ProofError::new(
-                    "relative-interface cell order or value is invalid",
-                ));
-            }
-            let mut prior_term: Option<&[usize]> = None;
-            for term in &cell.boundary {
-                let face = maps
-                    .get(dimension.wrapping_sub(1))
-                    .and_then(|rows| rows.get(&term.cell))
-                    .ok_or_else(|| ProofError::new("relative boundary cell is absent"))?;
-                if face.value > cell.value
-                    || term.coefficient == 0
-                    || term.coefficient >= modulus
-                    || prior_term.is_some_and(|prior| prior >= term.cell.as_slice())
-                {
-                    return Err(ProofError::new(
-                        "relative boundary is not canonical and filtered",
-                    ));
-                }
-                prior_term = Some(&term.cell);
-            }
-            previous = Some(cell);
-        }
-        if maps[dimension].len() != values.len() {
-            return Err(ProofError::new("relative interface repeats a cell"));
-        }
+        check_chain_dimension(dimension, values, &maps, modulus)?;
     }
     for dimension in 2..cells.len() {
         for cell in &cells[dimension] {
-            let mut square = BTreeMap::<Vec<usize>, u64>::new();
-            for term in &cell.boundary {
-                for lower in &maps[dimension - 1][&term.cell].boundary {
-                    let value = (square.get(&lower.cell).copied().unwrap_or(0)
-                        + term.coefficient as u64 * lower.coefficient as u64)
-                        % modulus as u64;
-                    if value == 0 {
-                        square.remove(&lower.cell);
-                    } else {
-                        square.insert(lower.cell.clone(), value);
-                    }
-                }
-            }
-            if !square.is_empty() {
-                return Err(ProofError::new(
-                    "relative-interface boundary does not square to zero",
-                ));
-            }
+            check_boundary_square(cell, &maps[dimension - 1], modulus)?;
         }
     }
     Ok(())
+}
+
+fn check_chain_dimension(
+    dimension: usize,
+    cells: &[Cell],
+    maps: &[BTreeMap<Vec<usize>, &Cell>],
+    modulus: u32,
+) -> Result<(), ProofError> {
+    let mut previous = None;
+    for cell in cells {
+        check_cell(dimension, cell, previous)?;
+        check_cell_boundary(dimension, cell, maps, modulus)?;
+        previous = Some(cell);
+    }
+    if maps[dimension].len() != cells.len() {
+        Err(ProofError::new("relative interface repeats a cell"))
+    } else {
+        Ok(())
+    }
+}
+
+fn check_cell(dimension: usize, cell: &Cell, previous: Option<&Cell>) -> Result<(), ProofError> {
+    if cell.vertices.len() != dimension + 1
+        || !cell.value.is_finite()
+        || cell.value < 0.0
+        || previous.is_some_and(|prior| cell_order(prior, cell).is_gt())
+    {
+        Err(ProofError::new(
+            "relative-interface cell order or value is invalid",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn check_cell_boundary(
+    dimension: usize,
+    cell: &Cell,
+    maps: &[BTreeMap<Vec<usize>, &Cell>],
+    modulus: u32,
+) -> Result<(), ProofError> {
+    let mut prior = None;
+    for term in &cell.boundary {
+        let face = maps
+            .get(dimension.wrapping_sub(1))
+            .and_then(|rows| rows.get(&term.cell))
+            .ok_or_else(|| ProofError::new("relative boundary cell is absent"))?;
+        if face.value > cell.value
+            || term.coefficient == 0
+            || term.coefficient >= modulus
+            || prior.is_some_and(|key: &[usize]| key >= term.cell.as_slice())
+        {
+            return Err(ProofError::new(
+                "relative boundary is not canonical and filtered",
+            ));
+        }
+        prior = Some(term.cell.as_slice());
+    }
+    Ok(())
+}
+
+fn check_boundary_square(
+    cell: &Cell,
+    lower_cells: &BTreeMap<Vec<usize>, &Cell>,
+    modulus: u32,
+) -> Result<(), ProofError> {
+    let mut square = BTreeMap::<Vec<usize>, u64>::new();
+    for term in &cell.boundary {
+        for lower in &lower_cells[&term.cell].boundary {
+            add_square_term(&mut square, term, lower, modulus);
+        }
+    }
+    if square.is_empty() {
+        Ok(())
+    } else {
+        Err(ProofError::new(
+            "relative-interface boundary does not square to zero",
+        ))
+    }
+}
+
+fn add_square_term(
+    square: &mut BTreeMap<Vec<usize>, u64>,
+    term: &Term,
+    lower: &Term,
+    modulus: u32,
+) {
+    let value = (square.get(&lower.cell).copied().unwrap_or(0)
+        + u64::from(term.coefficient) * u64::from(lower.coefficient))
+        % u64::from(modulus);
+    if value == 0 {
+        square.remove(&lower.cell);
+    } else {
+        square.insert(lower.cell.clone(), value);
+    }
 }
 
 fn check_protected(
@@ -767,71 +1085,140 @@ fn check_reduction(
             "relative reduction has the wrong dimension count",
         ));
     }
+    let reduced = reduce_boundaries(&boundaries, columns, modulus, limits)?;
+    Ok(reduction_diagram(cells, columns, &reduced))
+}
+
+fn reduce_boundaries(
+    boundaries: &[Vec<SparseColumn>],
+    columns: &[Vec<ProofColumn>],
+    modulus: u32,
+    limits: ProofLimits,
+) -> Result<Vec<Vec<SparseColumn>>, ProofError> {
     let mut total_terms = 0usize;
     let mut reduced = Vec::with_capacity(columns.len());
     for (matrix, transforms) in boundaries.iter().zip(columns) {
-        if matrix.len() != transforms.len() {
-            return Err(ProofError::new(
-                "relative reduction has the wrong column count",
-            ));
-        }
-        let mut values = Vec::with_capacity(matrix.len());
-        let mut pivots = BTreeSet::new();
-        for (target, transform) in transforms.iter().enumerate() {
-            check_column(target, &transform.terms, modulus)?;
-            total_terms = total_terms
-                .checked_add(transform.terms.len())
-                .ok_or_else(|| ProofError::new("relative change term count overflows"))?;
-            if total_terms > limits.max_terms {
-                return Err(ProofError::new("relative change terms exceed the limit"));
-            }
-            let mut result = SparseColumn::default();
-            for term in &transform.terms {
-                result.add_scaled(&matrix[term.index], term.coefficient as u64, modulus as u64);
-            }
-            if let Some((pivot, _)) = result.pivot()
-                && !pivots.insert(pivot)
-            {
-                return Err(ProofError::new("relative reduced matrix repeats a pivot"));
-            }
-            values.push(result);
-        }
-        reduced.push(values);
+        reduced.push(reduce_dimension(
+            matrix,
+            transforms,
+            modulus,
+            &mut total_terms,
+            limits,
+        )?);
     }
+    Ok(reduced)
+}
+
+fn reduce_dimension(
+    matrix: &[SparseColumn],
+    transforms: &[ProofColumn],
+    modulus: u32,
+    total_terms: &mut usize,
+    limits: ProofLimits,
+) -> Result<Vec<SparseColumn>, ProofError> {
+    if matrix.len() != transforms.len() {
+        return Err(ProofError::new(
+            "relative reduction has the wrong column count",
+        ));
+    }
+    let mut values = Vec::with_capacity(matrix.len());
+    let mut pivots = BTreeSet::new();
+    for (target, transform) in transforms.iter().enumerate() {
+        let result = reduce_column(matrix, transform, target, modulus, total_terms, limits)?;
+        if result
+            .pivot()
+            .is_some_and(|(pivot, _)| !pivots.insert(pivot))
+        {
+            return Err(ProofError::new("relative reduced matrix repeats a pivot"));
+        }
+        values.push(result);
+    }
+    Ok(values)
+}
+
+fn reduce_column(
+    matrix: &[SparseColumn],
+    transform: &ProofColumn,
+    target: usize,
+    modulus: u32,
+    total_terms: &mut usize,
+    limits: ProofLimits,
+) -> Result<SparseColumn, ProofError> {
+    check_column(target, &transform.terms, modulus)?;
+    add_term_count(
+        total_terms,
+        transform.terms.len(),
+        limits.max_terms,
+        "relative change",
+    )?;
+    let mut result = SparseColumn::default();
+    for term in &transform.terms {
+        result.add_scaled(
+            &matrix[term.index],
+            u64::from(term.coefficient),
+            u64::from(modulus),
+        );
+    }
+    Ok(result)
+}
+
+fn reduction_diagram(
+    cells: &[Vec<Cell>],
+    columns: &[Vec<ProofColumn>],
+    reduced: &[Vec<SparseColumn>],
+) -> Vec<ProofBar> {
     let mut diagram = Vec::new();
     for dimension in 0..columns.len() {
-        let births = if dimension == 0 {
-            vec![true; cells[0].len()]
-        } else {
-            reduced[dimension - 1]
-                .iter()
-                .map(|column| column.0.is_empty())
-                .collect()
-        };
-        let deaths: BTreeMap<_, _> = reduced[dimension]
-            .iter()
-            .enumerate()
-            .filter_map(|(column, value)| value.pivot().map(|(row, _)| (row, column)))
-            .collect();
-        for (position, is_birth) in births.into_iter().enumerate() {
-            if !is_birth {
-                continue;
-            }
-            let birth = cells[dimension][position].value;
-            let death = deaths
-                .get(&position)
-                .map_or(f64::INFINITY, |&column| cells[dimension + 1][column].value);
-            if death > birth {
-                diagram.push(ProofBar {
-                    dimension,
-                    birth,
-                    death,
-                });
-            }
-        }
+        append_dimension_bars(&mut diagram, cells, reduced, dimension);
     }
     canonicalize_diagram(&mut diagram);
-    Ok(diagram)
+    diagram
+}
+
+fn append_dimension_bars(
+    diagram: &mut Vec<ProofBar>,
+    cells: &[Vec<Cell>],
+    reduced: &[Vec<SparseColumn>],
+    dimension: usize,
+) {
+    let births = if dimension == 0 {
+        vec![true; cells[0].len()]
+    } else {
+        reduced[dimension - 1]
+            .iter()
+            .map(|column| column.0.is_empty())
+            .collect()
+    };
+    let deaths = reduced[dimension]
+        .iter()
+        .enumerate()
+        .filter_map(|(column, value)| value.pivot().map(|(row, _)| (row, column)))
+        .collect::<BTreeMap<_, _>>();
+    for (position, is_birth) in births.into_iter().enumerate() {
+        if is_birth {
+            append_bar(diagram, cells, dimension, position, &deaths);
+        }
+    }
+}
+
+fn append_bar(
+    diagram: &mut Vec<ProofBar>,
+    cells: &[Vec<Cell>],
+    dimension: usize,
+    position: usize,
+    deaths: &BTreeMap<usize, usize>,
+) {
+    let birth = cells[dimension][position].value;
+    let death = deaths
+        .get(&position)
+        .map_or(f64::INFINITY, |&column| cells[dimension + 1][column].value);
+    if death > birth {
+        diagram.push(ProofBar {
+            dimension,
+            birth,
+            death,
+        });
+    }
 }
 
 fn boundary_matrices(cells: &[Vec<Cell>]) -> Result<Vec<Vec<SparseColumn>>, ProofError> {
