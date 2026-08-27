@@ -1,6 +1,6 @@
 [package]
 name = "holos-tda-check"
-version = "0.22.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Independent checker for proof-carrying holos persistence"
