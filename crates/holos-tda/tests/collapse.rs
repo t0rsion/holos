@@ -10,6 +10,9 @@
 //! index) and the frozen witness rule, so the expected certificates below are
 //! derived from the specification, not observed from a run.
 
+mod common;
+
+use common::ref_test_edge;
 use holos_tda::collapse::verify::{verify_dense, verify_sparse};
 use holos_tda::collapse::{
     collapse_dense, collapse_dense_rounds_parallel, collapse_sparse,
@@ -1598,56 +1601,6 @@ struct RefRun {
 /// Section 2 predicate with the section 3 witness rule, evaluated against the
 /// value matrix `f`. Returns the witness segments, or `None` when some level
 /// has no dominating vertex.
-fn ref_test_edge(
-    f: &[Vec<f64>],
-    u: usize,
-    v: usize,
-    a: f64,
-    terminal: f64,
-) -> Option<Vec<(f64, usize)>> {
-    let mut cands: Vec<(usize, f64)> = Vec::new();
-    for (x, (&du, &dv)) in f[u].iter().zip(f[v].iter()).enumerate() {
-        if x == u || x == v || !du.is_finite() || !dv.is_finite() {
-            continue;
-        }
-        let b = a.max(du).max(dv);
-        if b <= terminal {
-            cands.push((x, b));
-        }
-    }
-
-    let mut critical: Vec<f64> = std::iter::once(a)
-        .chain(cands.iter().map(|&(_, b)| b))
-        .collect();
-    critical.sort_by(f64::total_cmp);
-    critical.dedup();
-
-    let mut segments: Vec<(f64, usize)> = Vec::new();
-    let mut apex: Option<usize> = None;
-    for t in critical {
-        // C_t in increasing vertex order, as the witness rule requires.
-        let level: Vec<usize> = cands
-            .iter()
-            .filter(|&&(_, b)| b <= t)
-            .map(|&(x, _)| x)
-            .collect();
-        if level.is_empty() {
-            return None;
-        }
-        let dominates = |w: usize| level.iter().all(|&x| x == w || f[w][x] <= t);
-        let birth = |w: usize| cands.iter().find(|&&(x, _)| x == w).map(|&(_, b)| b);
-        if let Some(w) = apex {
-            if birth(w).is_some_and(|b| b <= t) && dominates(w) {
-                continue;
-            }
-        }
-        let found = level.iter().copied().find(|&w| dominates(w))?;
-        segments.push((t, found));
-        apex = Some(found);
-    }
-    Some(segments)
-}
-
 /// Run the frozen schedule with no pruning: every pass tests every live edge.
 /// `all_edges` is the raw edge set, `resolved` the threshold after the input's
 /// own rule.

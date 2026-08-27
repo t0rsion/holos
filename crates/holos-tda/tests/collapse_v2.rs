@@ -15,6 +15,9 @@
 //! attack. Their expected certificates are derived from the specification,
 //! not observed from a run.
 
+mod common;
+
+use common::ref_test_edge;
 use holos_tda::collapse::verify::{verify_dense, verify_sparse};
 use holos_tda::collapse::{
     collapse_dense, collapse_dense_rounds_parallel, collapse_sparse,
@@ -383,58 +386,83 @@ struct RefRun {
     terminal: f64,
 }
 
-/// The version 1 section 2 predicate with the section 3 witness rule,
-/// evaluated against the value matrix `f`. Returns the witness segments, or
-/// `None` when some level has no dominating vertex. The version 2 schedule
-/// leaves this rule untouched; only the graph it reads changes.
-fn ref_test_edge(
-    f: &[Vec<f64>],
-    u: usize,
-    v: usize,
-    a: f64,
+fn reference_matrix(n: usize, edges: &[(usize, usize, f64)]) -> Vec<Vec<f64>> {
+    let mut matrix = vec![vec![f64::INFINITY; n]; n];
+    for (vertex, row) in matrix.iter_mut().enumerate() {
+        row[vertex] = 0.0;
+    }
+    for &(u, v, distance) in edges {
+        matrix[u][v] = distance;
+        matrix[v][u] = distance;
+    }
+    matrix
+}
+
+fn reference_successes(
+    live: &[(usize, usize, f64)],
+    snapshot: &[Vec<f64>],
     terminal: f64,
-) -> Option<Vec<(f64, usize)>> {
-    let mut cands: Vec<(usize, f64)> = Vec::new();
-    for (x, (&du, &dv)) in f[u].iter().zip(f[v].iter()).enumerate() {
-        if x == u || x == v || !du.is_finite() || !dv.is_finite() {
+) -> Vec<RefSuccess> {
+    let mut successes: Vec<_> = live
+        .iter()
+        .filter_map(|&(u, v, value)| {
+            ref_test_edge(snapshot, u, v, value, terminal).map(|witnesses| RefSuccess {
+                u,
+                v,
+                value,
+                witnesses,
+            })
+        })
+        .collect();
+    successes.sort_by(|a, b| {
+        b.value
+            .total_cmp(&a.value)
+            .then((a.v, a.u).cmp(&(b.v, b.u)))
+    });
+    successes
+}
+
+fn reference_read_set(snapshot: &[Vec<f64>], u: usize, v: usize) -> Vec<bool> {
+    (0..snapshot.len())
+        .map(|vertex| {
+            vertex == u
+                || vertex == v
+                || (snapshot[u][vertex].is_finite() && snapshot[v][vertex].is_finite())
+        })
+        .collect()
+}
+
+fn reference_batch(successes: &[RefSuccess], snapshot: &[Vec<f64>]) -> Vec<usize> {
+    let mut read_sets: Vec<Vec<bool>> = Vec::new();
+    let mut batch = Vec::new();
+    for (index, success) in successes.iter().enumerate() {
+        if read_sets.iter().any(|set| set[success.u] && set[success.v]) {
             continue;
         }
-        let b = a.max(du).max(dv);
-        if b <= terminal {
-            cands.push((x, b));
-        }
+        read_sets.push(reference_read_set(snapshot, success.u, success.v));
+        batch.push(index);
     }
+    batch
+}
 
-    let mut critical: Vec<f64> = std::iter::once(a)
-        .chain(cands.iter().map(|&(_, b)| b))
-        .collect();
-    critical.sort_by(f64::total_cmp);
-    critical.dedup();
-
-    let mut segments: Vec<(f64, usize)> = Vec::new();
-    let mut apex: Option<usize> = None;
-    for t in critical {
-        // C_t in increasing vertex order, as the witness rule requires.
-        let level: Vec<usize> = cands
-            .iter()
-            .filter(|&&(_, b)| b <= t)
-            .map(|&(x, _)| x)
-            .collect();
-        if level.is_empty() {
-            return None;
-        }
-        let dominates = |w: usize| level.iter().all(|&x| x == w || f[w][x] <= t);
-        let birth = |w: usize| cands.iter().find(|&&(x, _)| x == w).map(|&(_, b)| b);
-        if let Some(w) = apex {
-            if birth(w).is_some_and(|b| b <= t) && dominates(w) {
-                continue;
-            }
-        }
-        let found = level.iter().copied().find(|&w| dominates(w))?;
-        segments.push((t, found));
-        apex = Some(found);
+fn commit_reference_batch(
+    matrix: &mut [Vec<f64>],
+    successes: &[RefSuccess],
+    batch: &[usize],
+    epoch: usize,
+    steps: &mut Vec<RefStep>,
+) {
+    for &index in batch {
+        let success = &successes[index];
+        steps.push(RefStep {
+            edge: (success.u, success.v),
+            value: success.value,
+            epoch,
+            witnesses: success.witnesses.clone(),
+        });
+        matrix[success.u][success.v] = f64::INFINITY;
+        matrix[success.v][success.u] = f64::INFINITY;
     }
-    Some(segments)
 }
 
 /// Run the version 2 schedule with no pruning: every round tests every live
@@ -454,15 +482,7 @@ fn reference_collapse_v2(n: usize, all_edges: &[(usize, usize, f64)], resolved: 
         edges.iter().map(|e| e.2).fold(0.0f64, f64::max)
     };
 
-    let mut f = vec![vec![f64::INFINITY; n]; n];
-    for (x, row) in f.iter_mut().enumerate() {
-        row[x] = 0.0;
-    }
-    for &(u, v, d) in &edges {
-        f[u][v] = d;
-        f[v][u] = d;
-    }
-
+    let mut f = reference_matrix(n, &edges);
     let mut live = edges.clone();
     let mut steps: Vec<RefStep> = Vec::new();
     let mut epochs = 0;
@@ -470,54 +490,12 @@ fn reference_collapse_v2(n: usize, all_edges: &[(usize, usize, f64)], resolved: 
         epochs += 1;
         let snapshot = f.clone();
 
-        let mut successes: Vec<RefSuccess> = live
-            .iter()
-            .filter_map(|&(u, v, value)| {
-                ref_test_edge(&snapshot, u, v, value, terminal).map(|witnesses| RefSuccess {
-                    u,
-                    v,
-                    value,
-                    witnesses,
-                })
-            })
-            .collect();
+        let successes = reference_successes(&live, &snapshot, terminal);
         if successes.is_empty() {
             break;
         }
-        successes.sort_by(|a, b| {
-            b.value
-                .total_cmp(&a.value)
-                .then((a.v, a.u).cmp(&(b.v, b.u)))
-        });
-
-        let mut read_sets: Vec<Vec<bool>> = Vec::new();
-        let mut batch: Vec<&RefSuccess> = Vec::new();
-        for success in &successes {
-            let (u, v) = (success.u, success.v);
-            if read_sets.iter().any(|s| s[u] && s[v]) {
-                continue;
-            }
-            let mut s = vec![false; n];
-            for (x, flag) in s.iter_mut().enumerate() {
-                *flag =
-                    x == u || x == v || (snapshot[u][x].is_finite() && snapshot[v][x].is_finite());
-            }
-            read_sets.push(s);
-            batch.push(success);
-        }
-
-        for success in &batch {
-            steps.push(RefStep {
-                edge: (success.u, success.v),
-                value: success.value,
-                epoch: epochs,
-                witnesses: success.witnesses.clone(),
-            });
-        }
-        for success in &batch {
-            f[success.u][success.v] = f64::INFINITY;
-            f[success.v][success.u] = f64::INFINITY;
-        }
+        let batch = reference_batch(&successes, &snapshot);
+        commit_reference_batch(&mut f, &successes, &batch, epochs, &mut steps);
         live.retain(|&(u, v, _)| f[u][v].is_finite());
     }
 
