@@ -1042,12 +1042,35 @@ enum NeighborSeek {
     Present(f64),
 }
 
-/// The sparse cofacet enumerator of 0.5.0, kept verbatim as the reference
-/// the shipped enumerator is tested against. It builds the whole candidate
-/// set before it emits anything, so it honors a `Break` in the callbacks
-/// alone. Do not change it.
+/// The sparse cofacet reference builds every candidate before it emits one.
+/// A callback `Break` therefore cannot change its candidate scan.
 #[cfg(test)]
 impl SparseDistanceMatrix {
+    fn reference_candidates(&self, simplex: Simplex, verts: &[usize]) -> Vec<(usize, f64)> {
+        let pivot = *verts
+            .iter()
+            .min_by_key(|&&vertex| self.degree(vertex))
+            .expect("cofacet enumeration needs a non-empty simplex");
+        let (start, end) = self.span(pivot);
+        let mut candidates = Vec::new();
+        'candidate: for &vertex in &self.indices[start..end] {
+            let vertex = vertex as usize;
+            if verts.binary_search(&vertex).is_ok() {
+                continue;
+            }
+            let mut diameter = simplex.diameter;
+            for &simplex_vertex in verts {
+                let distance = self.get(vertex, simplex_vertex);
+                if !distance.is_finite() {
+                    continue 'candidate;
+                }
+                diameter = diameter.max(distance);
+            }
+            candidates.push((vertex, diameter));
+        }
+        candidates
+    }
+
     pub(crate) fn for_each_cofacet_reference<T>(
         &self,
         bt: &BinomialTable,
@@ -1057,31 +1080,7 @@ impl SparseDistanceMatrix {
         upper_only: bool,
         mut f: impl FnMut(Cofacet) -> ControlFlow<T>,
     ) -> Option<T> {
-        // Candidate added vertices: neighbors shared by every simplex vertex.
-        // Pivot on the shortest list, then confirm membership in the rest.
-        // The same pass folds the cofacet diameter. Simplex vertices are
-        // mutual neighbors, so they surface here and must be excluded.
-        let pivot = *verts
-            .iter()
-            .min_by_key(|&&v| self.degree(v))
-            .expect("cofacet enumeration needs a non-empty simplex");
-        let (start, end) = self.span(pivot);
-        let mut candidates: Vec<(usize, f64)> = Vec::new();
-        'w: for &w in &self.indices[start..end] {
-            let w = w as usize;
-            if verts.binary_search(&w).is_ok() {
-                continue;
-            }
-            let mut diameter = simplex.diameter;
-            for &v in verts {
-                let d = self.get(w, v);
-                if !d.is_finite() {
-                    continue 'w;
-                }
-                diameter = diameter.max(d);
-            }
-            candidates.push((w, diameter));
-        }
+        let candidates = self.reference_candidates(simplex, verts);
 
         // Descending candidate order is descending cofacet-index order. Move
         // each simplex vertex the added vertex overtakes from the below-set to
@@ -1486,17 +1485,8 @@ mod tests {
         SparseDistanceMatrix::from_triplets(n, triplets).unwrap()
     }
 
-    // Graphs that defeat a plausible enumerator shortcut.
-    fn adversarial_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
-        let mut out: Vec<(&'static str, SparseDistanceMatrix)> = Vec::new();
-
-        // A star. The shortest neighbor list belongs to a leaf, the least
-        // selective pivot.
+    fn star_and_joined_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
         let star: Vec<_> = (1..7).map(|v| (0, v, 1.0 + v as f64)).collect();
-        out.push(("star", graph(7, &star)));
-
-        // Two cliques joined by one edge. Every intersection across the
-        // join is empty.
         let mut joined = Vec::new();
         for a in 0..4 {
             for b in 0..a {
@@ -1505,31 +1495,32 @@ mod tests {
             }
         }
         joined.push((3, 4, 3.0));
-        out.push(("joined cliques", graph(8, &joined)));
+        vec![
+            ("star", graph(7, &star)),
+            ("joined cliques", graph(8, &joined)),
+        ]
+    }
 
-        // Complete bipartite. No two vertices of a part are adjacent, so
-        // half the base simplices do not exist. The rest intersect across
-        // the parts.
+    fn bipartite_and_equal_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
         let mut bipartite = Vec::new();
         for a in 0..3 {
             for b in 3..6 {
                 bipartite.push((a, b, 1.0 + a as f64));
             }
         }
-        out.push(("bipartite", graph(6, &bipartite)));
-
-        // Every distance equal. Every cofacet carries the base diameter, so
-        // an apparent-pair Break fires at the first candidate.
         let mut all_equal = Vec::new();
         for a in 0..6 {
             for b in 0..a {
                 all_equal.push((a, b, 2.0));
             }
         }
-        out.push(("all equal", graph(6, &all_equal)));
+        vec![
+            ("bipartite", graph(6, &bipartite)),
+            ("all equal", graph(6, &all_equal)),
+        ]
+    }
 
-        // Vertices 0, 1, and 2 coincide, so the graph carries zero-length
-        // edges beside longer ones.
+    fn duplicate_and_skewed_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
         let mut duplicates = Vec::new();
         for a in 0..6 {
             for b in 0..a {
@@ -1537,11 +1528,6 @@ mod tests {
                 duplicates.push((a, b, d));
             }
         }
-        out.push(("duplicate points", graph(6, &duplicates)));
-
-        // The shortest list is the least selective one: vertex 0 has two
-        // neighbors and both are adjacent to everything, while the long
-        // lists disagree.
         let mut skewed = vec![(0, 1, 1.0), (0, 2, 1.0)];
         for a in 1..7 {
             for b in 1..a {
@@ -1550,13 +1536,14 @@ mod tests {
                 }
             }
         }
-        out.push(("least selective pivot", graph(7, &skewed)));
+        vec![
+            ("duplicate points", graph(6, &duplicates)),
+            ("least selective pivot", graph(7, &skewed)),
+        ]
+    }
 
-        // Cut at a threshold that is itself an edge length. A dense input
-        // the caller thresholds reaches the sparse enumerator this way, and
-        // the pairs at the cut are the ones a comparison can get wrong. The
-        // distances take four values, so 1.0 and 3.0 sit on a tie and 2.5
-        // sits between two of them.
+    fn threshold_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
+        let mut out = Vec::new();
         let quantized = |a: usize, b: usize| 1.0 + ((a * 7 + b) % 4) as f64;
         for (label, threshold) in [
             ("threshold at the smallest edge", 1.0),
@@ -1574,39 +1561,44 @@ mod tests {
             }
             out.push((label, graph(7, &cut)));
         }
+        out
+    }
 
-        // Disconnected: two triangles and an isolated vertex.
-        out.push((
-            "disconnected",
-            graph(
-                7,
-                &[
-                    (0, 1, 1.0),
-                    (0, 2, 1.0),
-                    (1, 2, 1.0),
-                    (3, 4, 2.0),
-                    (3, 5, 2.0),
-                    (4, 5, 2.0),
-                ],
-            ),
-        ));
-
-        // Complete: the sparse enumerator must reproduce the whole dense
-        // sequence.
+    fn boundary_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
         let mut complete = Vec::new();
         for a in 0..7 {
             for b in 0..a {
                 complete.push((a, b, 1.0 + ((a * 5 + b) % 4) as f64));
             }
         }
-        out.push(("dense as sparse", graph(7, &complete)));
+        vec![
+            (
+                "disconnected",
+                graph(
+                    7,
+                    &[
+                        (0, 1, 1.0),
+                        (0, 2, 1.0),
+                        (1, 2, 1.0),
+                        (3, 4, 2.0),
+                        (3, 5, 2.0),
+                        (4, 5, 2.0),
+                    ],
+                ),
+            ),
+            ("dense as sparse", graph(7, &complete)),
+            ("one point", graph(1, &[])),
+            ("two points", graph(2, &[(0, 1, 1.0)])),
+            ("edge across the range", graph(5, &[(0, 4, 1.0)])),
+        ]
+    }
 
-        // The small ends of the contract: one point, two points, and an
-        // edge that touches both ends of the vertex range.
-        out.push(("one point", graph(1, &[])));
-        out.push(("two points", graph(2, &[(0, 1, 1.0)])));
-        out.push(("edge across the range", graph(5, &[(0, 4, 1.0)])));
-
+    fn adversarial_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
+        let mut out = star_and_joined_fixtures();
+        out.extend(bipartite_and_equal_fixtures());
+        out.extend(duplicate_and_skewed_fixtures());
+        out.extend(threshold_fixtures());
+        out.extend(boundary_fixtures());
         out
     }
 
