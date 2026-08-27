@@ -177,50 +177,122 @@ impl ProofArtifact {
     /// Encode the canonical `HOLOSPF` version 1 envelope.
     pub fn encode(&self) -> Result<Vec<u8>, ProofArtifactError> {
         let mut output = Vec::new();
-        output.extend_from_slice(MAGIC);
-        put_u16(&mut output, VERSION);
-        output.push(F64_BITS_CODEC);
-        put_u32(&mut output, self.modulus);
-        put_optional_f64(&mut output, self.threshold);
-        put_usize(&mut output, self.nodes.len())?;
-        put_usize(&mut output, self.snapshots.len())?;
-        for node in &self.nodes {
-            output.extend_from_slice(&node.digest);
-            put_usize(&mut output, node.vertices.len())?;
-            put_usize(&mut output, node.edges.len())?;
-            put_usize(&mut output, node.edge_columns.len())?;
-            put_usize(&mut output, node.triangle_columns.len())?;
-            for &vertex in &node.vertices {
-                put_usize(&mut output, vertex)?;
-            }
-            for &[u, v] in &node.edges {
-                put_usize(&mut output, u)?;
-                put_usize(&mut output, v)?;
-            }
-            encode_columns(&mut output, &node.edge_columns)?;
-            encode_columns(&mut output, &node.triangle_columns)?;
-        }
-        for snapshot in &self.snapshots {
-            put_usize(&mut output, snapshot.graph.len())?;
-            put_usize(&mut output, snapshot.graph.num_edges())?;
-            put_usize(&mut output, snapshot.atom_refs.len())?;
-            put_usize(&mut output, snapshot.diagram.len())?;
-            for (u, v, value) in snapshot.graph.edges() {
-                put_usize(&mut output, u)?;
-                put_usize(&mut output, v)?;
-                put_u64(&mut output, value.to_bits());
-            }
-            for digest in &snapshot.atom_refs {
-                output.extend_from_slice(digest);
-            }
-            for bar in &snapshot.diagram {
-                put_usize(&mut output, bar.dim)?;
-                put_u64(&mut output, bar.birth.to_bits());
-                put_u64(&mut output, bar.death.to_bits());
-            }
-        }
+        encode_proof_header(&mut output, self)?;
+        encode_nodes(&mut output, &self.nodes)?;
+        encode_snapshots(&mut output, &self.snapshots)?;
         Ok(output)
     }
+}
+
+fn encode_proof_header(
+    output: &mut Vec<u8>,
+    artifact: &ProofArtifact,
+) -> Result<(), ProofArtifactError> {
+    output.extend_from_slice(MAGIC);
+    put_u16(output, VERSION);
+    output.push(F64_BITS_CODEC);
+    put_u32(output, artifact.modulus);
+    put_optional_f64(output, artifact.threshold);
+    put_usize(output, artifact.nodes.len())?;
+    put_usize(output, artifact.snapshots.len())?;
+    Ok(())
+}
+
+fn encode_nodes(output: &mut Vec<u8>, nodes: &[ProofNode]) -> Result<(), ProofArtifactError> {
+    for node in nodes {
+        encode_node(output, node)?;
+    }
+    Ok(())
+}
+
+fn encode_node(output: &mut Vec<u8>, node: &ProofNode) -> Result<(), ProofArtifactError> {
+    output.extend_from_slice(&node.digest);
+    encode_node_counts(output, node)?;
+    encode_usizes(output, &node.vertices)?;
+    encode_edges(output, &node.edges)?;
+    encode_columns(output, &node.edge_columns)?;
+    encode_columns(output, &node.triangle_columns)
+}
+
+fn encode_node_counts(output: &mut Vec<u8>, node: &ProofNode) -> Result<(), ProofArtifactError> {
+    put_usize(output, node.vertices.len())?;
+    put_usize(output, node.edges.len())?;
+    put_usize(output, node.edge_columns.len())?;
+    put_usize(output, node.triangle_columns.len())?;
+    Ok(())
+}
+
+fn encode_usizes(output: &mut Vec<u8>, values: &[usize]) -> Result<(), ProofArtifactError> {
+    for &value in values {
+        put_usize(output, value)?;
+    }
+    Ok(())
+}
+
+fn encode_edges(output: &mut Vec<u8>, edges: &[[usize; 2]]) -> Result<(), ProofArtifactError> {
+    for &[u, v] in edges {
+        put_usize(output, u)?;
+        put_usize(output, v)?;
+    }
+    Ok(())
+}
+
+fn encode_snapshots(
+    output: &mut Vec<u8>,
+    snapshots: &[ProofSnapshot],
+) -> Result<(), ProofArtifactError> {
+    for snapshot in snapshots {
+        encode_snapshot(output, snapshot)?;
+    }
+    Ok(())
+}
+
+fn encode_snapshot(
+    output: &mut Vec<u8>,
+    snapshot: &ProofSnapshot,
+) -> Result<(), ProofArtifactError> {
+    encode_snapshot_counts(output, snapshot)?;
+    encode_graph(output, &snapshot.graph)?;
+    encode_digests(output, &snapshot.atom_refs);
+    encode_diagram(output, &snapshot.diagram)
+}
+
+fn encode_snapshot_counts(
+    output: &mut Vec<u8>,
+    snapshot: &ProofSnapshot,
+) -> Result<(), ProofArtifactError> {
+    put_usize(output, snapshot.graph.len())?;
+    put_usize(output, snapshot.graph.num_edges())?;
+    put_usize(output, snapshot.atom_refs.len())?;
+    put_usize(output, snapshot.diagram.len())?;
+    Ok(())
+}
+
+fn encode_graph(
+    output: &mut Vec<u8>,
+    graph: &SparseDistanceMatrix,
+) -> Result<(), ProofArtifactError> {
+    for (u, v, value) in graph.edges() {
+        put_usize(output, u)?;
+        put_usize(output, v)?;
+        put_u64(output, value.to_bits());
+    }
+    Ok(())
+}
+
+fn encode_digests(output: &mut Vec<u8>, digests: &[[u8; 32]]) {
+    for digest in digests {
+        output.extend_from_slice(digest);
+    }
+}
+
+fn encode_diagram(output: &mut Vec<u8>, diagram: &[Bar]) -> Result<(), ProofArtifactError> {
+    for bar in diagram {
+        put_usize(output, bar.dim)?;
+        put_u64(output, bar.birth.to_bits());
+        put_u64(output, bar.death.to_bits());
+    }
+    Ok(())
 }
 
 struct ProofBuilder {
