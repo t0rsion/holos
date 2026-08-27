@@ -301,35 +301,9 @@ impl PointCloudGraph {
     /// worker count and under both forced strategies.
     pub fn build(points: &[Vec<f64>], params: PointCloudParams) -> Result<Self> {
         let dimensions = validate_points(points)?;
-        if params.threshold.is_nan() || params.threshold < 0.0 {
-            return Err(Error::InvalidInput(format!(
-                "threshold must be non-negative, got {}",
-                params.threshold
-            )));
-        }
-        if points.len() > u32::MAX as usize {
-            return Err(Error::InvalidInput(format!(
-                "sparse matrix holds at most {} points, got {}",
-                u32::MAX,
-                points.len()
-            )));
-        }
-        let strategy = match params.strategy {
-            PointCloudStrategy::Auto if dimensions <= 12 && params.threshold.is_finite() => {
-                PointCloudStrategy::KdTree
-            }
-            PointCloudStrategy::Auto => PointCloudStrategy::Exhaustive,
-            strategy => strategy,
-        };
-        let rows = match strategy {
-            PointCloudStrategy::KdTree => {
-                threshold_rows_kd(points, dimensions, params.threshold, params.threads)?
-            }
-            PointCloudStrategy::Exhaustive => {
-                threshold_rows_exhaustive(points, params.threshold, params.threads)?
-            }
-            PointCloudStrategy::Auto => unreachable!("automatic strategy was resolved"),
-        };
+        validate_point_cloud_params(points.len(), params.threshold)?;
+        let strategy = resolve_point_cloud_strategy(params, dimensions);
+        let rows = build_threshold_rows(points, dimensions, params, strategy)?;
         let distance_evaluations = rows.iter().fold(0u64, |total, row| {
             total.saturating_add(row.evaluations as u64)
         });
@@ -358,6 +332,48 @@ impl PointCloudGraph {
     /// Construction counters.
     pub fn stats(&self) -> PointCloudStats {
         self.stats
+    }
+}
+
+fn validate_point_cloud_params(points: usize, threshold: f64) -> Result<()> {
+    if threshold.is_nan() || threshold < 0.0 {
+        return Err(Error::InvalidInput(format!(
+            "threshold must be non-negative, got {threshold}"
+        )));
+    }
+    if points > u32::MAX as usize {
+        return Err(Error::InvalidInput(format!(
+            "sparse matrix holds at most {} points, got {points}",
+            u32::MAX
+        )));
+    }
+    Ok(())
+}
+
+fn resolve_point_cloud_strategy(params: PointCloudParams, dimensions: usize) -> PointCloudStrategy {
+    match params.strategy {
+        PointCloudStrategy::Auto if dimensions <= 12 && params.threshold.is_finite() => {
+            PointCloudStrategy::KdTree
+        }
+        PointCloudStrategy::Auto => PointCloudStrategy::Exhaustive,
+        strategy => strategy,
+    }
+}
+
+fn build_threshold_rows(
+    points: &[Vec<f64>],
+    dimensions: usize,
+    params: PointCloudParams,
+    strategy: PointCloudStrategy,
+) -> Result<Vec<ThresholdRow>> {
+    match strategy {
+        PointCloudStrategy::KdTree => {
+            threshold_rows_kd(points, dimensions, params.threshold, params.threads)
+        }
+        PointCloudStrategy::Exhaustive => {
+            threshold_rows_exhaustive(points, params.threshold, params.threads)
+        }
+        PointCloudStrategy::Auto => unreachable!("automatic strategy was resolved"),
     }
 }
 
@@ -661,99 +677,10 @@ impl SparseDistanceMatrix {
     /// non-negative. Omit a pair to make it absent. `n` must be at or below
     /// `u32::MAX`.
     pub fn from_triplets(n: usize, triplets: &[(usize, usize, f64)]) -> Result<Self> {
-        if n > u32::MAX as usize {
-            return Err(Error::InvalidInput(format!(
-                "sparse matrix holds at most {} points, got {n}",
-                u32::MAX
-            )));
-        }
-        // Validate and count the degrees first, then lay the lists out end
-        // to end. A repeated pair is counted twice, so the offsets are an
-        // upper bound and the dedup below closes the gaps.
-        let mut degree = vec![0usize; n];
-        for (idx, &(i, j, d)) in triplets.iter().enumerate() {
-            if i >= n || j >= n {
-                return Err(Error::InvalidInput(format!(
-                    "triplet {idx}: vertex out of range ({i}, {j}) for n = {n}"
-                )));
-            }
-            if i == j {
-                return Err(Error::InvalidInput(format!(
-                    "triplet {idx}: self-distance for vertex {i}"
-                )));
-            }
-            if !d.is_finite() || d < 0.0 {
-                return Err(Error::InvalidDistance(format!(
-                    "triplet {idx}: distance must be finite and non-negative, got {d}"
-                )));
-            }
-            degree[i] += 1;
-            degree[j] += 1;
-        }
-        let mut offsets = vec![0usize; n + 1];
-        let mut total = 0usize;
-        for (v, &deg) in degree.iter().enumerate() {
-            offsets[v] = total;
-            total += deg;
-        }
-        offsets[n] = total;
-
-        let mut indices = vec![0u32; total];
-        let mut values = vec![0.0f64; total];
-        let mut cursor = offsets[..n].to_vec();
-        for &(i, j, d) in triplets {
-            let d = if d == 0.0 { 0.0 } else { d };
-            indices[cursor[i]] = j as u32;
-            values[cursor[i]] = d;
-            cursor[i] += 1;
-            indices[cursor[j]] = i as u32;
-            values[cursor[j]] = d;
-            cursor[j] += 1;
-        }
-
-        // Sort and dedup one list at a time through a buffer the widest
-        // list sizes, then write the survivors back. The write position
-        // never passes the read position, because a list only shrinks, so
-        // the block compacts in place. A list that already ascends with no
-        // repeat skips the buffer: triplets in row-major order, which is
-        // what the sparse reader and the collapse write, land that way.
-        let widest = degree.iter().copied().max().unwrap_or(0);
-        let mut list: Vec<(u32, f64)> = Vec::with_capacity(widest);
-        let mut write = 0usize;
-        for v in 0..n {
-            let (start, end) = (offsets[v], offsets[v + 1]);
-            offsets[v] = write;
-            if indices[start..end].is_sorted_by(|a, b| a < b) {
-                if start != write {
-                    indices.copy_within(start..end, write);
-                    values.copy_within(start..end, write);
-                }
-                write += end - start;
-                continue;
-            }
-            list.clear();
-            list.extend(
-                indices[start..end]
-                    .iter()
-                    .zip(&values[start..end])
-                    .map(|(&w, &d)| (w, d)),
-            );
-            list.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-            for w in list.windows(2) {
-                if w[0].0 == w[1].0 && w[0].1 != w[1].1 {
-                    return Err(Error::InvalidInput(format!(
-                        "conflicting distances for pair ({v}, {}): {} vs {}",
-                        w[0].0, w[0].1, w[1].1
-                    )));
-                }
-            }
-            list.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
-            for &(w, d) in &list {
-                indices[write] = w;
-                values[write] = d;
-                write += 1;
-            }
-        }
+        let degree = validate_triplets(n, triplets)?;
+        let mut offsets = offsets_from_degrees(&degree);
+        let (mut indices, mut values) = fill_neighbor_storage(triplets, &offsets);
+        let write = compact_neighbor_storage(n, &degree, &mut offsets, &mut indices, &mut values)?;
         offsets[n] = write;
         indices.truncate(write);
         values.truncate(write);
@@ -822,6 +749,147 @@ impl SparseDistanceMatrix {
                 .map(move |(&v, &d)| (u, v as usize, d))
         })
     }
+}
+
+fn validate_triplets(n: usize, triplets: &[(usize, usize, f64)]) -> Result<Vec<usize>> {
+    if n > u32::MAX as usize {
+        return Err(Error::InvalidInput(format!(
+            "sparse matrix holds at most {} points, got {n}",
+            u32::MAX
+        )));
+    }
+    let mut degree = vec![0usize; n];
+    for (index, &(i, j, distance)) in triplets.iter().enumerate() {
+        validate_triplet(index, i, j, distance, n)?;
+        degree[i] += 1;
+        degree[j] += 1;
+    }
+    Ok(degree)
+}
+
+fn validate_triplet(index: usize, i: usize, j: usize, distance: f64, n: usize) -> Result<()> {
+    if i >= n || j >= n {
+        return Err(Error::InvalidInput(format!(
+            "triplet {index}: vertex out of range ({i}, {j}) for n = {n}"
+        )));
+    }
+    if i == j {
+        return Err(Error::InvalidInput(format!(
+            "triplet {index}: self-distance for vertex {i}"
+        )));
+    }
+    if !distance.is_finite() || distance < 0.0 {
+        return Err(Error::InvalidDistance(format!(
+            "triplet {index}: distance must be finite and non-negative, got {distance}"
+        )));
+    }
+    Ok(())
+}
+
+fn offsets_from_degrees(degree: &[usize]) -> Vec<usize> {
+    let mut offsets = vec![0usize; degree.len() + 1];
+    let mut total = 0usize;
+    for (vertex, &value) in degree.iter().enumerate() {
+        offsets[vertex] = total;
+        total += value;
+    }
+    offsets[degree.len()] = total;
+    offsets
+}
+
+fn fill_neighbor_storage(
+    triplets: &[(usize, usize, f64)],
+    offsets: &[usize],
+) -> (Vec<u32>, Vec<f64>) {
+    let total = offsets.last().copied().unwrap_or(0);
+    let mut indices = vec![0u32; total];
+    let mut values = vec![0.0f64; total];
+    let mut cursor = offsets[..offsets.len() - 1].to_vec();
+    for &(i, j, distance) in triplets {
+        let distance = if distance == 0.0 { 0.0 } else { distance };
+        indices[cursor[i]] = j as u32;
+        values[cursor[i]] = distance;
+        cursor[i] += 1;
+        indices[cursor[j]] = i as u32;
+        values[cursor[j]] = distance;
+        cursor[j] += 1;
+    }
+    (indices, values)
+}
+
+fn compact_neighbor_storage(
+    n: usize,
+    degree: &[usize],
+    offsets: &mut [usize],
+    indices: &mut [u32],
+    values: &mut [f64],
+) -> Result<usize> {
+    let widest = degree.iter().copied().max().unwrap_or(0);
+    let mut list = Vec::<(u32, f64)>::with_capacity(widest);
+    let mut write = 0usize;
+    for vertex in 0..n {
+        let (start, end) = (offsets[vertex], offsets[vertex + 1]);
+        offsets[vertex] = write;
+        if indices[start..end].is_sorted_by(|a, b| a < b) {
+            copy_sorted_neighbors(start, end, write, indices, values);
+            write += end - start;
+        } else {
+            write = sort_and_copy_neighbors(vertex, start, end, write, indices, values, &mut list)?;
+        }
+    }
+    Ok(write)
+}
+
+fn copy_sorted_neighbors(
+    start: usize,
+    end: usize,
+    write: usize,
+    indices: &mut [u32],
+    values: &mut [f64],
+) {
+    if start != write {
+        indices.copy_within(start..end, write);
+        values.copy_within(start..end, write);
+    }
+}
+
+fn sort_and_copy_neighbors(
+    vertex: usize,
+    start: usize,
+    end: usize,
+    mut write: usize,
+    indices: &mut [u32],
+    values: &mut [f64],
+    list: &mut Vec<(u32, f64)>,
+) -> Result<usize> {
+    list.clear();
+    list.extend(
+        indices[start..end]
+            .iter()
+            .zip(&values[start..end])
+            .map(|(&neighbor, &distance)| (neighbor, distance)),
+    );
+    list.sort_unstable_by(|left, right| left.0.cmp(&right.0).then(left.1.total_cmp(&right.1)));
+    reject_conflicting_neighbors(vertex, list)?;
+    list.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
+    for &(neighbor, distance) in list.iter() {
+        indices[write] = neighbor;
+        values[write] = distance;
+        write += 1;
+    }
+    Ok(write)
+}
+
+fn reject_conflicting_neighbors(vertex: usize, neighbors: &[(u32, f64)]) -> Result<()> {
+    for pair in neighbors.windows(2) {
+        if pair[0].0 == pair[1].0 && pair[0].1 != pair[1].1 {
+            return Err(Error::InvalidInput(format!(
+                "conflicting distances for pair ({vertex}, {}): {} vs {}",
+                pair[0].0, pair[0].1, pair[1].1
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// A cofacet produced during enumeration: its combinadic index, the position
@@ -1279,10 +1347,6 @@ impl Distances for SparseDistanceMatrix {
         let width = verts.len();
         let indices = &self.indices[..];
         let values = &self.values[..];
-        // Where each neighbor list starts, and one past the entry it has
-        // reached walking downward. Both are positions in the flat block.
-        // The first simplex vertex drives the merge; the other lists follow
-        // it.
         let mut inline = [(0usize, 0usize); INLINE_VERTS];
         let mut spill: Vec<(usize, usize)>;
         let cursor: &mut [(usize, usize)] = if width <= INLINE_VERTS {
@@ -1295,75 +1359,30 @@ impl Distances for SparseDistanceMatrix {
         for (slot, &v) in cursor.iter_mut().zip(verts) {
             *slot = self.span(v);
         }
-        // Under `upper_only` the walk ends at the highest simplex vertex: no
-        // candidate at or below it is above every simplex vertex, and the
-        // candidates descend. The driver's list is sorted, so one search
-        // finds where that is and the merge tests it no further.
-        let floor = if upper_only {
-            let (start, end) = cursor[0];
-            start + indices[start..end].partition_point(|&v| (v as usize) <= verts[width - 1])
-        } else {
-            cursor[0].0
-        };
-
-        // Move each simplex vertex the added vertex overtakes from the
-        // below-set to the above-set, exactly as `advance` does.
+        let floor = cofacet_floor(cursor[0], indices, verts, upper_only);
         let mut idx_below = simplex.index;
         let mut idx_above = 0u64;
         let mut k = dim + 1;
-        'candidate: loop {
-            if cursor[0].1 == floor {
-                return None;
-            }
-            cursor[0].1 -= 1;
-            counters::note_candidate();
-            let at = cursor[0].1;
-            let w = indices[at];
-            let d0 = values[at];
-            if BOUNDED && d0 > bound {
-                continue 'candidate;
-            }
-            // The fold takes the vertices in ascending position, as the
-            // dense default does, so the diameter matches bit for bit.
-            let mut diameter = simplex.diameter.max(d0);
-            for slot in cursor[1..].iter_mut() {
-                let lo = slot.0;
-                loop {
-                    if slot.1 == lo {
-                        // This list holds nothing at or below `w`, and
-                        // every later candidate is smaller.
-                        return None;
-                    }
-                    counters::note_candidate();
-                    let at = slot.1 - 1;
-                    let x = indices[at];
-                    if x > w {
-                        slot.1 = at;
-                        continue;
-                    }
-                    if x < w {
-                        continue 'candidate;
-                    }
-                    slot.1 = at;
-                    if BOUNDED && values[at] > bound {
-                        continue 'candidate;
-                    }
-                    diameter = diameter.max(values[at]);
-                    break;
-                }
-            }
-
+        while let Some((w, first_distance)) =
+            next_driver_candidate::<BOUNDED>(cursor, floor, indices, values, bound)
+        {
+            let diameter = match match_sparse_candidate::<BOUNDED>(
+                &mut cursor[1..],
+                w,
+                indices,
+                values,
+                bound,
+                simplex.diameter.max(first_distance),
+            ) {
+                CandidateMatch::Exhausted => return None,
+                CandidateMatch::Rejected => continue,
+                CandidateMatch::Matched(diameter) => diameter,
+            };
             let w = w as usize;
-            while k >= 1 && verts[k - 1] > w {
-                idx_below -= bt.get(verts[k - 1], k);
-                idx_above += bt.get(verts[k - 1], k + 1);
-                k -= 1;
-            }
+            advance_cofacet_index(bt, verts, w, &mut k, &mut idx_below, &mut idx_above);
             debug_assert!(!upper_only || k == dim + 1);
             let cofacet = Cofacet {
                 index: idx_above + bt.get(w, k + 1) + idx_below,
-                // Under `upper_only` both enumerators report 0 rather than
-                // `dim + 1`. No caller reads `k` there.
                 k: if upper_only { 0 } else { k },
                 vertex: w,
                 diameter,
@@ -1374,15 +1393,97 @@ impl Distances for SparseDistanceMatrix {
                 return Some(t);
             }
         }
+        None
     }
 }
 
-/// The sparse cofacet enumerator of 0.5.0, kept verbatim as the reference
-/// the shipped enumerator is tested against. It builds the whole candidate
-/// set before it emits anything, so it honors a `Break` in the callbacks
-/// alone. Do not change it: its worth is that it is the old body, and the
-/// tests in this file require the shipped one to agree with it bit for
-/// bit.
+fn cofacet_floor(
+    driver: (usize, usize),
+    indices: &[u32],
+    vertices: &[usize],
+    upper_only: bool,
+) -> usize {
+    if !upper_only {
+        return driver.0;
+    }
+    let (start, end) = driver;
+    let highest = vertices[vertices.len() - 1];
+    start + indices[start..end].partition_point(|&vertex| vertex as usize <= highest)
+}
+
+fn next_driver_candidate<const BOUNDED: bool>(
+    cursor: &mut [(usize, usize)],
+    floor: usize,
+    indices: &[u32],
+    values: &[f64],
+    bound: f64,
+) -> Option<(u32, f64)> {
+    while cursor[0].1 != floor {
+        cursor[0].1 -= 1;
+        counters::note_candidate();
+        let at = cursor[0].1;
+        if !BOUNDED || values[at] <= bound {
+            return Some((indices[at], values[at]));
+        }
+    }
+    None
+}
+
+enum CandidateMatch {
+    Exhausted,
+    Rejected,
+    Matched(f64),
+}
+
+fn match_sparse_candidate<const BOUNDED: bool>(
+    cursors: &mut [(usize, usize)],
+    candidate: u32,
+    indices: &[u32],
+    values: &[f64],
+    bound: f64,
+    mut diameter: f64,
+) -> CandidateMatch {
+    for cursor in cursors {
+        loop {
+            if cursor.1 == cursor.0 {
+                return CandidateMatch::Exhausted;
+            }
+            counters::note_candidate();
+            let at = cursor.1 - 1;
+            match indices[at].cmp(&candidate) {
+                std::cmp::Ordering::Greater => cursor.1 = at,
+                std::cmp::Ordering::Less => return CandidateMatch::Rejected,
+                std::cmp::Ordering::Equal => {
+                    cursor.1 = at;
+                    if BOUNDED && values[at] > bound {
+                        return CandidateMatch::Rejected;
+                    }
+                    diameter = diameter.max(values[at]);
+                    break;
+                }
+            }
+        }
+    }
+    CandidateMatch::Matched(diameter)
+}
+
+fn advance_cofacet_index(
+    table: &BinomialTable,
+    vertices: &[usize],
+    candidate: usize,
+    position: &mut usize,
+    below: &mut u64,
+    above: &mut u64,
+) {
+    while *position >= 1 && vertices[*position - 1] > candidate {
+        *below -= table.get(vertices[*position - 1], *position);
+        *above += table.get(vertices[*position - 1], *position + 1);
+        *position -= 1;
+    }
+}
+
+/// The sparse cofacet algorithm from 0.5.0, retained as a test reference.
+/// It builds the complete candidate set before it emits callbacks.
 #[cfg(test)]
 impl SparseDistanceMatrix {
     pub(crate) fn for_each_cofacet_reference<T>(
@@ -1394,10 +1495,11 @@ impl SparseDistanceMatrix {
         upper_only: bool,
         mut f: impl FnMut(Cofacet) -> ControlFlow<T>,
     ) -> Option<T> {
-        // Candidate added vertices: neighbors shared by every simplex vertex.
-        // Pivot on the shortest list, then confirm membership in the rest.
-        // The same pass folds the cofacet diameter. Simplex vertices are
-        // mutual neighbors, so they surface here and must be excluded.
+        let candidates = self.reference_candidates(simplex, verts);
+        emit_reference_candidates(bt, simplex, verts, dim, upper_only, &candidates, &mut f)
+    }
+
+    fn reference_candidates(&self, simplex: Simplex, verts: &[usize]) -> Vec<(usize, f64)> {
         let pivot = *verts
             .iter()
             .min_by_key(|&&v| self.degree(v))
@@ -1419,35 +1521,47 @@ impl SparseDistanceMatrix {
             }
             candidates.push((w, diameter));
         }
-
-        // Descending candidate order is descending cofacet-index order. Move
-        // each simplex vertex the added vertex overtakes from the below-set to
-        // the above-set exactly as `advance` does.
-        let mut idx_below = simplex.index;
-        let mut idx_above = 0u64;
-        let mut k = dim + 1;
-        for &(w, diameter) in candidates.iter().rev() {
-            while k >= 1 && verts[k - 1] > w {
-                idx_below -= bt.get(verts[k - 1], k);
-                idx_above += bt.get(verts[k - 1], k + 1);
-                k -= 1;
-            }
-            if upper_only && k != dim + 1 {
-                break;
-            }
-            let index = idx_above + bt.get(w, k + 1) + idx_below;
-            let cofacet = Cofacet {
-                index,
-                k: if upper_only { 0 } else { k },
-                vertex: w,
-                diameter,
-            };
-            if let ControlFlow::Break(t) = f(cofacet) {
-                return Some(t);
-            }
-        }
-        None
+        candidates
     }
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn emit_reference_candidates<T>(
+    table: &BinomialTable,
+    simplex: Simplex,
+    vertices: &[usize],
+    dimension: usize,
+    upper_only: bool,
+    candidates: &[(usize, f64)],
+    callback: &mut impl FnMut(Cofacet) -> ControlFlow<T>,
+) -> Option<T> {
+    let mut below = simplex.index;
+    let mut above = 0u64;
+    let mut position = dimension + 1;
+    for &(vertex, diameter) in candidates.iter().rev() {
+        advance_cofacet_index(
+            table,
+            vertices,
+            vertex,
+            &mut position,
+            &mut below,
+            &mut above,
+        );
+        if upper_only && position != dimension + 1 {
+            break;
+        }
+        let cofacet = Cofacet {
+            index: above + table.get(vertex, position + 1) + below,
+            k: if upper_only { 0 } else { position },
+            vertex,
+            diameter,
+        };
+        if let ControlFlow::Break(value) = callback(cofacet) {
+            return Some(value);
+        }
+    }
+    None
 }
 
 /// Scaled two-norm: exact where the naive sum of squares would overflow or
@@ -1825,95 +1939,87 @@ mod tests {
     // The adversarial graphs, each one a shape that defeats a plausible
     // enumerator shortcut.
     fn adversarial_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
-        let mut out: Vec<(&'static str, SparseDistanceMatrix)> = Vec::new();
+        let mut fixtures = vec![
+            star_fixture(),
+            joined_cliques_fixture(),
+            bipartite_fixture(),
+            all_equal_fixture(),
+            duplicate_points_fixture(),
+            skewed_fixture(),
+            disconnected_fixture(),
+        ];
+        fixtures.extend(cut_fixtures());
+        fixtures.push(complete_fixture());
+        fixtures.push(("one point", graph(1, &[])));
+        fixtures.push(("two points", graph(2, &[(0, 1, 1.0)])));
+        fixtures.push(("edge across the range", graph(5, &[(0, 4, 1.0)])));
+        fixtures
+    }
 
-        // A star. The shortest neighbor list belongs to a leaf, which is
-        // the least selective pivot there is.
-        let star: Vec<_> = (1..7).map(|v| (0, v, 1.0 + v as f64)).collect();
-        out.push(("star", graph(7, &star)));
+    fn star_fixture() -> (&'static str, SparseDistanceMatrix) {
+        let edges: Vec<_> = (1..7)
+            .map(|vertex| (0, vertex, 1.0 + vertex as f64))
+            .collect();
+        ("star", graph(7, &edges))
+    }
 
-        // Two cliques joined by one edge. Every intersection across the
-        // join is empty.
-        let mut joined = Vec::new();
+    fn joined_cliques_fixture() -> (&'static str, SparseDistanceMatrix) {
+        let mut edges = Vec::new();
         for a in 0..4 {
             for b in 0..a {
-                joined.push((a, b, 1.0));
-                joined.push((a + 4, b + 4, 2.0));
+                edges.push((a, b, 1.0));
+                edges.push((a + 4, b + 4, 2.0));
             }
         }
-        joined.push((3, 4, 3.0));
-        out.push(("joined cliques", graph(8, &joined)));
+        edges.push((3, 4, 3.0));
+        ("joined cliques", graph(8, &edges))
+    }
 
-        // Complete bipartite. No two vertices of a part are adjacent, so
-        // half the base simplices do not exist and the rest intersect
-        // across the parts.
-        let mut bipartite = Vec::new();
+    fn bipartite_fixture() -> (&'static str, SparseDistanceMatrix) {
+        let mut edges = Vec::new();
         for a in 0..3 {
             for b in 3..6 {
-                bipartite.push((a, b, 1.0 + a as f64));
+                edges.push((a, b, 1.0 + a as f64));
             }
         }
-        out.push(("bipartite", graph(6, &bipartite)));
+        ("bipartite", graph(6, &edges))
+    }
 
-        // Every distance equal. Every cofacet carries the base diameter, so
-        // an apparent-pair Break fires at the first candidate.
-        let mut all_equal = Vec::new();
+    fn all_equal_fixture() -> (&'static str, SparseDistanceMatrix) {
+        let mut edges = Vec::new();
         for a in 0..6 {
             for b in 0..a {
-                all_equal.push((a, b, 2.0));
+                edges.push((a, b, 2.0));
             }
         }
-        out.push(("all equal", graph(6, &all_equal)));
+        ("all equal", graph(6, &edges))
+    }
 
-        // Duplicate points: vertices 0, 1, and 2 coincide, so the graph
-        // carries zero-length edges beside longer ones.
-        let mut duplicates = Vec::new();
+    fn duplicate_points_fixture() -> (&'static str, SparseDistanceMatrix) {
+        let mut edges = Vec::new();
         for a in 0..6 {
             for b in 0..a {
-                let d = if a < 3 { 0.0 } else { 1.0 + b as f64 };
-                duplicates.push((a, b, d));
+                let distance = if a < 3 { 0.0 } else { 1.0 + b as f64 };
+                edges.push((a, b, distance));
             }
         }
-        out.push(("duplicate points", graph(6, &duplicates)));
+        ("duplicate points", graph(6, &edges))
+    }
 
-        // The shortest list is the least selective one: vertex 0 has two
-        // neighbors and both are adjacent to everything, while the long
-        // lists disagree.
-        let mut skewed = vec![(0, 1, 1.0), (0, 2, 1.0)];
+    fn skewed_fixture() -> (&'static str, SparseDistanceMatrix) {
+        let mut edges = vec![(0, 1, 1.0), (0, 2, 1.0)];
         for a in 1..7 {
             for b in 1..a {
                 if (a + b) % 3 != 0 {
-                    skewed.push((a, b, 1.0 + (a * b) as f64 / 8.0));
+                    edges.push((a, b, 1.0 + (a * b) as f64 / 8.0));
                 }
             }
         }
-        out.push(("least selective pivot", graph(7, &skewed)));
+        ("least selective pivot", graph(7, &edges))
+    }
 
-        // Cut at a threshold that is itself an edge length. A dense input
-        // that the caller thresholds reaches the sparse enumerator this
-        // way, and the pairs at the cut are the ones a comparison can get
-        // wrong. The distances take four values, so 1.0 and 3.0 sit on a
-        // tie and 2.5 sits between two of them.
-        let quantized = |a: usize, b: usize| 1.0 + ((a * 7 + b) % 4) as f64;
-        for (label, threshold) in [
-            ("threshold at the smallest edge", 1.0),
-            ("threshold at a tie", 3.0),
-            ("threshold between edge values", 2.5),
-        ] {
-            let mut cut = Vec::new();
-            for a in 0..7 {
-                for b in 0..a {
-                    let d = quantized(b, a);
-                    if d <= threshold {
-                        cut.push((a, b, d));
-                    }
-                }
-            }
-            out.push((label, graph(7, &cut)));
-        }
-
-        // Disconnected: two triangles and an isolated vertex.
-        out.push((
+    fn disconnected_fixture() -> (&'static str, SparseDistanceMatrix) {
+        (
             "disconnected",
             graph(
                 7,
@@ -1926,25 +2032,41 @@ mod tests {
                     (4, 5, 2.0),
                 ],
             ),
-        ));
+        )
+    }
 
-        // Complete, so the sparse enumerator must reproduce the whole dense
-        // sequence with nothing omitted.
+    fn cut_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
+        [
+            ("threshold at the smallest edge", 1.0),
+            ("threshold at a tie", 3.0),
+            ("threshold between edge values", 2.5),
+        ]
+        .into_iter()
+        .map(|(label, threshold)| (label, graph(7, &quantized_edges(threshold))))
+        .collect()
+    }
+
+    fn quantized_edges(threshold: f64) -> Vec<(usize, usize, f64)> {
+        let mut edges = Vec::new();
+        for a in 0..7 {
+            for b in 0..a {
+                let distance = 1.0 + ((b * 7 + a) % 4) as f64;
+                if distance <= threshold {
+                    edges.push((a, b, distance));
+                }
+            }
+        }
+        edges
+    }
+
+    fn complete_fixture() -> (&'static str, SparseDistanceMatrix) {
         let mut complete = Vec::new();
         for a in 0..7 {
             for b in 0..a {
                 complete.push((a, b, 1.0 + ((a * 5 + b) % 4) as f64));
             }
         }
-        out.push(("dense as sparse", graph(7, &complete)));
-
-        // The small ends of the contract: one point, two points, and a
-        // graph whose only edge touches both ends of the vertex range.
-        out.push(("one point", graph(1, &[])));
-        out.push(("two points", graph(2, &[(0, 1, 1.0)])));
-        out.push(("edge across the range", graph(5, &[(0, 4, 1.0)])));
-
-        out
+        ("dense as sparse", graph(7, &complete))
     }
 
     // A random sparse graph plus the dense matrix that uses +inf for every

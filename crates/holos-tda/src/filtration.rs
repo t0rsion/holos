@@ -269,67 +269,103 @@ impl<G: FiltrationGrade> FilteredSimplicialComplex<G> {
         let mut grades = BTreeMap::<Vec<usize>, &G>::new();
         for (dimension, simplices) in self.simplices.iter().enumerate() {
             for simplex in simplices {
-                if simplex.vertices.len() != dimension + 1 {
-                    return Err(FiltrationError::new(format!(
-                        "simplex {:?} is stored in dimension {dimension}",
-                        simplex.vertices
-                    )));
-                }
-                if simplex.vertices.windows(2).any(|pair| pair[0] >= pair[1]) {
-                    return Err(FiltrationError::new(format!(
-                        "simplex {:?} does not have a canonical vertex key",
-                        simplex.vertices
-                    )));
-                }
-                if simplex
-                    .vertices
-                    .iter()
-                    .any(|vertex| !labels.contains(vertex))
-                {
-                    return Err(FiltrationError::new(format!(
-                        "simplex {:?} uses an unknown vertex label",
-                        simplex.vertices
-                    )));
-                }
-                if grades
-                    .insert(simplex.vertices.clone(), &simplex.grade)
-                    .is_some()
-                {
-                    return Err(FiltrationError::new(format!(
-                        "simplex {:?} occurs more than once",
-                        simplex.vertices
-                    )));
-                }
+                validate_simplex_key(simplex, dimension, &labels)?;
+                insert_simplex_grade(simplex, &mut grades)?;
             }
         }
-        let declared_vertices: Vec<_> = self.simplices[0]
-            .iter()
-            .map(|simplex| simplex.vertices[0])
-            .collect();
-        if declared_vertices != self.vertex_labels {
-            return Err(FiltrationError::new(
-                "zero-dimensional simplices must match the vertex labels",
-            ));
-        }
-        for (key, grade) in &grades {
-            if key.len() == 1 {
-                continue;
-            }
-            for removed in 0..key.len() {
-                let mut face = key.clone();
-                face.remove(removed);
-                let face_grade = grades.get(&face).ok_or_else(|| {
-                    FiltrationError::new(format!("simplex {key:?} is missing the face {face:?}"))
-                })?;
-                if !face_grade.precedes(grade) {
-                    return Err(FiltrationError::new(format!(
-                        "face {face:?} appears after its coface {key:?}"
-                    )));
-                }
-            }
-        }
-        Ok(())
+        validate_declared_vertices(&self.simplices[0], &self.vertex_labels)?;
+        validate_faces(&grades)
     }
+}
+
+fn validate_simplex_key<G>(
+    simplex: &FilteredSimplex<G>,
+    dimension: usize,
+    labels: &BTreeSet<usize>,
+) -> Result<(), FiltrationError> {
+    if simplex.vertices.len() != dimension + 1 {
+        return Err(FiltrationError::new(format!(
+            "simplex {:?} is stored in dimension {dimension}",
+            simplex.vertices
+        )));
+    }
+    if simplex.vertices.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(FiltrationError::new(format!(
+            "simplex {:?} does not have a canonical vertex key",
+            simplex.vertices
+        )));
+    }
+    if simplex
+        .vertices
+        .iter()
+        .any(|vertex| !labels.contains(vertex))
+    {
+        return Err(FiltrationError::new(format!(
+            "simplex {:?} uses an unknown vertex label",
+            simplex.vertices
+        )));
+    }
+    Ok(())
+}
+
+fn insert_simplex_grade<'a, G>(
+    simplex: &'a FilteredSimplex<G>,
+    grades: &mut BTreeMap<Vec<usize>, &'a G>,
+) -> Result<(), FiltrationError> {
+    if grades
+        .insert(simplex.vertices.clone(), &simplex.grade)
+        .is_some()
+    {
+        return Err(FiltrationError::new(format!(
+            "simplex {:?} occurs more than once",
+            simplex.vertices
+        )));
+    }
+    Ok(())
+}
+
+fn validate_declared_vertices<G>(
+    vertices: &[FilteredSimplex<G>],
+    labels: &[usize],
+) -> Result<(), FiltrationError> {
+    let declared: Vec<_> = vertices.iter().map(|simplex| simplex.vertices[0]).collect();
+    if declared != labels {
+        return Err(FiltrationError::new(
+            "zero-dimensional simplices must match the vertex labels",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_faces<G: FiltrationGrade>(
+    grades: &BTreeMap<Vec<usize>, &G>,
+) -> Result<(), FiltrationError> {
+    for (key, grade) in grades {
+        if key.len() > 1 {
+            validate_simplex_faces(key, *grade, grades)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_simplex_faces<G: FiltrationGrade>(
+    key: &[usize],
+    grade: &G,
+    grades: &BTreeMap<Vec<usize>, &G>,
+) -> Result<(), FiltrationError> {
+    for removed in 0..key.len() {
+        let mut face = key.to_vec();
+        face.remove(removed);
+        let face_grade = grades.get(&face).ok_or_else(|| {
+            FiltrationError::new(format!("simplex {key:?} is missing the face {face:?}"))
+        })?;
+        if !face_grade.precedes(grade) {
+            return Err(FiltrationError::new(format!(
+                "face {face:?} appears after its coface {key:?}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Per-dimension bounds for an explicit complex materialization.
@@ -385,22 +421,7 @@ impl FilteredSimplicialComplex<ScalarGrade> {
         labels: &[usize],
         params: FlagComplexParams,
     ) -> Result<Self, FiltrationError> {
-        if labels.len() != input.len() || labels.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(FiltrationError::new(
-                "flag-complex labels must match the graph and increase strictly",
-            ));
-        }
-        let threshold = params.threshold.unwrap_or(f64::INFINITY);
-        if threshold.is_nan() || threshold < 0.0 {
-            return Err(FiltrationError::new(
-                "a flag-complex threshold must be non-negative",
-            ));
-        }
-        if labels.len() > params.limits.max_vertices {
-            return Err(FiltrationError::new(
-                "flag-complex vertices exceed the per-dimension limit",
-            ));
-        }
+        let threshold = validate_flag_params(input, labels, params)?;
         let zero = ScalarGrade::new(0.0)?;
         let vertices = labels
             .iter()
@@ -414,36 +435,101 @@ impl FilteredSimplicialComplex<ScalarGrade> {
             .map(|(local, label)| (label, local))
             .collect();
         for dimension in 1..=params.max_dimension {
-            let mut next = Vec::new();
-            for simplex in &simplices[dimension - 1] {
-                let last_local = label_to_local[&simplex.vertices[dimension - 1]];
-                for (local_vertex, &label) in labels.iter().enumerate().skip(last_local + 1) {
-                    let mut value = simplex.grade.value();
-                    let mut clique = true;
-                    for member in &simplex.vertices {
-                        let edge = input.get(label_to_local[member], local_vertex);
-                        if !edge.is_finite() || edge > threshold {
-                            clique = false;
-                            break;
-                        }
-                        value = value.max(edge);
-                    }
-                    if clique {
-                        let mut vertices = simplex.vertices.clone();
-                        vertices.push(label);
-                        next.push(FilteredSimplex::new(vertices, ScalarGrade::new(value)?));
-                        if next.len() > params.limits.for_dimension(dimension) {
-                            return Err(FiltrationError::new(format!(
-                                "flag-complex dimension {dimension} exceeds the simplex limit"
-                            )));
-                        }
-                    }
-                }
-            }
+            let next = extend_flag_dimension(
+                input,
+                labels,
+                &label_to_local,
+                &simplices[dimension - 1],
+                dimension,
+                threshold,
+                params.limits.for_dimension(dimension),
+            )?;
             simplices.push(next);
         }
         Self::new(labels.to_vec(), simplices)
     }
+}
+
+fn validate_flag_params(
+    input: &SparseDistanceMatrix,
+    labels: &[usize],
+    params: FlagComplexParams,
+) -> Result<f64, FiltrationError> {
+    if labels.len() != input.len() || labels.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(FiltrationError::new(
+            "flag-complex labels must match the graph and increase strictly",
+        ));
+    }
+    let threshold = params.threshold.unwrap_or(f64::INFINITY);
+    if threshold.is_nan() || threshold < 0.0 {
+        return Err(FiltrationError::new(
+            "a flag-complex threshold must be non-negative",
+        ));
+    }
+    if labels.len() > params.limits.max_vertices {
+        return Err(FiltrationError::new(
+            "flag-complex vertices exceed the per-dimension limit",
+        ));
+    }
+    Ok(threshold)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn extend_flag_dimension(
+    input: &SparseDistanceMatrix,
+    labels: &[usize],
+    label_to_local: &BTreeMap<usize, usize>,
+    faces: &[FilteredSimplex<ScalarGrade>],
+    dimension: usize,
+    threshold: f64,
+    limit: usize,
+) -> Result<Vec<FilteredSimplex<ScalarGrade>>, FiltrationError> {
+    let mut simplices = Vec::new();
+    for simplex in faces {
+        let last_local = label_to_local[&simplex.vertices[dimension - 1]];
+        for (local_vertex, &label) in labels.iter().enumerate().skip(last_local + 1) {
+            if let Some(coface) = extend_flag_simplex(
+                input,
+                label_to_local,
+                simplex,
+                local_vertex,
+                label,
+                threshold,
+            )? {
+                simplices.push(coface);
+                if simplices.len() > limit {
+                    return Err(FiltrationError::new(format!(
+                        "flag-complex dimension {dimension} exceeds the simplex limit"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(simplices)
+}
+
+fn extend_flag_simplex(
+    input: &SparseDistanceMatrix,
+    label_to_local: &BTreeMap<usize, usize>,
+    simplex: &FilteredSimplex<ScalarGrade>,
+    local_vertex: usize,
+    label: usize,
+    threshold: f64,
+) -> Result<Option<FilteredSimplex<ScalarGrade>>, FiltrationError> {
+    let mut value = simplex.grade.value();
+    for member in &simplex.vertices {
+        let edge = input.get(label_to_local[member], local_vertex);
+        if !edge.is_finite() || edge > threshold {
+            return Ok(None);
+        }
+        value = value.max(edge);
+    }
+    let mut vertices = simplex.vertices.clone();
+    vertices.push(label);
+    Ok(Some(FilteredSimplex::new(
+        vertices,
+        ScalarGrade::new(value)?,
+    )))
 }
 
 #[cfg(test)]
