@@ -90,6 +90,11 @@ enum ExploreStart {
     Continue(u64),
 }
 
+enum GreedyPlan {
+    Return(bool),
+    Minimize(Vec<usize>),
+}
+
 impl<F> Search<'_, F>
 where
     F: FnMut(&[usize]) -> Result<bool>,
@@ -214,14 +219,12 @@ where
     }
 
     fn greedy_upper(&mut self, available: &[usize]) -> Result<bool> {
-        let Some(mut selected) = self.grow_greedy(available)? else {
-            return Ok(false);
+        let mut selected = match self.grow_greedy(available)? {
+            GreedyPlan::Return(complete) => return Ok(complete),
+            GreedyPlan::Minimize(selected) => selected,
         };
-        let Some(survives) = self.evaluate(&selected)? else {
+        if self.evaluate(&selected)?.is_none() {
             return Ok(false);
-        };
-        if survives {
-            return Ok(true);
         }
         if !self.minimize_greedy(&mut selected)? {
             return Ok(false);
@@ -230,22 +233,16 @@ where
         Ok(true)
     }
 
-    fn grow_greedy(&mut self, available: &[usize]) -> Result<Option<Vec<usize>>> {
+    fn grow_greedy(&mut self, available: &[usize]) -> Result<GreedyPlan> {
         let mut selected = Vec::new();
-        loop {
-            let Some(survives) = self.evaluate(&selected)? else {
-                return Ok(None);
-            };
-            if !survives {
-                return Ok(Some(selected));
-            }
+        while self.evaluate(&selected)?.is_some_and(|survives| survives) {
             if selected.len() == self.max_selected {
-                return Ok(Some(selected));
+                return Ok(GreedyPlan::Return(true));
             }
             let remaining = difference(available, &selected);
             let packing = self.pack_blockers(&selected, &remaining)?;
             let Some(blocker) = packing.blockers.first() else {
-                return Ok(packing.complete.then_some(selected));
+                return Ok(GreedyPlan::Return(packing.complete));
             };
             let candidate = blocker
                 .iter()
@@ -254,9 +251,10 @@ where
                 .expect("a blocker is nonempty");
             insert_sorted(&mut selected, candidate);
             if !packing.complete {
-                return Ok(None);
+                return Ok(GreedyPlan::Return(false));
             }
         }
+        Ok(GreedyPlan::Minimize(selected))
     }
 
     fn minimize_greedy(&mut self, selected: &mut Vec<usize>) -> Result<bool> {
