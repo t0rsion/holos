@@ -198,11 +198,9 @@ fn report_collapse(collapsed: &crate::collapse::CollapsedRips) {
     );
 }
 
-fn run(cli: Cli) -> crate::Result<()> {
-    let format = cli.format.unwrap_or_else(|| infer_format(&cli.input));
-    let params = RipsParams {
+fn rips_params(cli: &Cli) -> RipsParams {
+    RipsParams {
         max_dim: cli.dim,
-        // None lets the library apply the input's own default.
         threshold: cli.threshold,
         modulus: cli.modulus,
         threads: cli.threads.max(1),
@@ -214,76 +212,95 @@ fn run(cli: Cli) -> crate::Result<()> {
         collapse_schedule: cli.collapse_schedule.unwrap_or(Schedule::Serial).into(),
         engine: cli.engine.into(),
         dense_storage: cli.dense_storage.into(),
+    }
+}
+
+fn solve_sparse(cli: &Cli, params: &RipsParams) -> crate::Result<(crate::Diagram, usize)> {
+    let dist = io::read_sparse_matrix(&cli.input, params.threads)?;
+    match cli.threshold {
+        Some(t) => eprintln!(
+            "{} points, {} edges, threshold {t}",
+            dist.len(),
+            dist.num_edges()
+        ),
+        None => eprintln!(
+            "{} points, {} edges, no threshold (all listed edges)",
+            dist.len(),
+            dist.num_edges()
+        ),
+    }
+    let n = dist.len();
+    let diagram = if cli.collapse_edges {
+        crate::collapse_and_solve(&dist, params, report_collapse)?
+    } else {
+        crate::rips_persistence_sparse(&dist, params)?
     };
+    Ok((diagram, n))
+}
+
+fn read_dense(cli: &Cli, format: InputFormat, threads: usize) -> crate::Result<DistanceMatrix> {
+    match format {
+        InputFormat::PointCloud => {
+            let points = io::read_point_cloud(&cli.input, threads)?;
+            DistanceMatrix::from_points(&points)
+        }
+        _ => io::read_lower_distance_matrix(&cli.input, threads),
+    }
+}
+
+fn solve_dense(
+    cli: &Cli,
+    format: InputFormat,
+    params: &RipsParams,
+) -> crate::Result<(crate::Diagram, usize)> {
+    let dist = read_dense(cli, format, params.threads)?;
+    match cli.threshold {
+        Some(t) => eprintln!("{} points, threshold {t}", dist.len()),
+        None => eprintln!(
+            "{} points, threshold {} (enclosing radius)",
+            dist.len(),
+            dist.enclosing_radius()
+        ),
+    }
+    let n = dist.len();
+    let diagram = if cli.collapse_edges {
+        crate::collapse_and_solve(&dist, params, report_collapse)?
+    } else {
+        crate::rips_persistence(&dist, params)?
+    };
+    Ok((diagram, n))
+}
+
+fn write_output(cli: &Cli, diagram: &crate::Diagram, n_points: usize) -> crate::Result<()> {
+    let output = match cli.output {
+        DiagramFormat::Ripser => OutputFormat::Ripser,
+        DiagramFormat::Csv => OutputFormat::Csv,
+    };
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::with_capacity(1 << 16, stdout.lock());
+    io::write_diagram(
+        &mut out,
+        diagram,
+        output,
+        cli.dim.min(n_points.saturating_sub(1)),
+    )?;
+    out.flush().map_err(|e| crate::Error::Io(e.to_string()))
+}
+
+fn run(cli: Cli) -> crate::Result<()> {
     if cli.collapse_schedule.is_some() && !cli.collapse_edges {
         return Err(crate::Error::InvalidInput(
             "--collapse-schedule requires --collapse-edges".into(),
         ));
     }
+    let format = cli.format.unwrap_or_else(|| infer_format(&cli.input));
+    let params = rips_params(&cli);
     let (mut diagram, n_points) = match format {
-        InputFormat::Sparse => {
-            let dist = io::read_sparse_matrix(&cli.input, params.threads)?;
-            match cli.threshold {
-                Some(t) => eprintln!(
-                    "{} points, {} edges, threshold {t}",
-                    dist.len(),
-                    dist.num_edges()
-                ),
-                None => eprintln!(
-                    "{} points, {} edges, no threshold (all listed edges)",
-                    dist.len(),
-                    dist.num_edges()
-                ),
-            }
-            let n = dist.len();
-            let diagram = if cli.collapse_edges {
-                crate::collapse_and_solve(&dist, &params, report_collapse)?
-            } else {
-                crate::rips_persistence_sparse(&dist, &params)?
-            };
-            (diagram, n)
-        }
-        _ => {
-            let dist = match format {
-                InputFormat::PointCloud => {
-                    let points = io::read_point_cloud(&cli.input, params.threads)?;
-                    DistanceMatrix::from_points(&points)?
-                }
-                _ => io::read_lower_distance_matrix(&cli.input, params.threads)?,
-            };
-            match cli.threshold {
-                Some(t) => eprintln!("{} points, threshold {t}", dist.len()),
-                None => eprintln!(
-                    "{} points, threshold {} (enclosing radius)",
-                    dist.len(),
-                    dist.enclosing_radius()
-                ),
-            }
-            let n = dist.len();
-            let diagram = if cli.collapse_edges {
-                crate::collapse_and_solve(&dist, &params, report_collapse)?
-            } else {
-                crate::rips_persistence(&dist, &params)?
-            };
-            (diagram, n)
-        }
+        InputFormat::Sparse => solve_sparse(&cli, &params)?,
+        _ => solve_dense(&cli, format, &params)?,
     };
     diagram.canonicalize();
-    let output = match cli.output {
-        DiagramFormat::Ripser => OutputFormat::Ripser,
-        DiagramFormat::Csv => OutputFormat::Csv,
-    };
-    // Stdout flushes on every line; a diagram of many bars is written once
-    // through a buffer.
-    let stdout = std::io::stdout();
-    let mut out = std::io::BufWriter::with_capacity(1 << 16, stdout.lock());
-    io::write_diagram(
-        &mut out,
-        &diagram,
-        output,
-        cli.dim.min(n_points.saturating_sub(1)),
-    )?;
-    out.flush().map_err(|e| crate::Error::Io(e.to_string()))
+    write_output(&cli, &diagram, n_points)
 }
 
 /// Run the `holos` CLI on `argv` and return the process exit code.
