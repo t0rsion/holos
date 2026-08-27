@@ -22,6 +22,121 @@ pub(crate) struct Space {
     basis: Vec<Vector>,
 }
 
+fn adjacency(vertex_count: usize, edges: &[Edge]) -> Vec<BTreeSet<usize>> {
+    let mut adjacency = vec![BTreeSet::new(); vertex_count];
+    for edge in edges {
+        adjacency[edge.u].insert(edge.v);
+        adjacency[edge.v].insert(edge.u);
+    }
+    adjacency
+}
+
+fn flag_dimensions(
+    vertex_count: usize,
+    dimension: usize,
+    adjacency: &[BTreeSet<usize>],
+    limits: ProofLimits,
+) -> Result<Vec<Vec<Vec<usize>>>, ProofError> {
+    let vertices = (0..vertex_count)
+        .map(|vertex| vec![vertex])
+        .collect::<Vec<Vec<usize>>>();
+    let mut dimensions = vec![vertices];
+    for current in 1..=dimension + 1 {
+        let next = flag_cofacets(
+            vertex_count,
+            current,
+            &dimensions[current - 1],
+            adjacency,
+            simplex_limit(current, limits),
+        )?;
+        dimensions.push(next);
+    }
+    Ok(dimensions)
+}
+
+fn flag_cofacets(
+    vertex_count: usize,
+    dimension: usize,
+    simplices: &[Vec<usize>],
+    adjacency: &[BTreeSet<usize>],
+    maximum: usize,
+) -> Result<Vec<Vec<usize>>, ProofError> {
+    let mut next = Vec::new();
+    for simplex in simplices {
+        for vertex in simplex.last().copied().unwrap_or(0) + 1..vertex_count {
+            if simplex
+                .iter()
+                .all(|member| adjacency[*member].contains(&vertex))
+            {
+                let mut cofacet = simplex.clone();
+                cofacet.push(vertex);
+                next.push(cofacet);
+                if next.len() > maximum {
+                    return Err(ProofError::new(format!(
+                        "dimension {dimension} zigzag simplex count exceeds {maximum}"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(next)
+}
+
+fn simplex_limit(dimension: usize, limits: ProofLimits) -> usize {
+    match dimension {
+        1 => limits.max_edges,
+        2 => limits.max_triangles,
+        _ => limits.max_higher_simplices,
+    }
+}
+
+fn validate_incidence_count(
+    dimensions: &[Vec<Vec<usize>>],
+    dimension: usize,
+    limits: ProofLimits,
+) -> Result<(), ProofError> {
+    let incidences = dimensions[dimension]
+        .len()
+        .checked_mul(dimension + 1)
+        .and_then(|count| {
+            dimensions[dimension + 1]
+                .len()
+                .checked_mul(dimension + 2)
+                .and_then(|next| count.checked_add(next))
+        })
+        .ok_or_else(|| ProofError::new("zigzag incidence count overflows"))?;
+    if incidences > limits.max_terms {
+        Err(ProofError::new("zigzag incidence count exceeds its limit"))
+    } else {
+        Ok(())
+    }
+}
+
+fn coboundary_space(
+    dimensions: &[Vec<Vec<usize>>],
+    dimension: usize,
+    q_simplices: &[Vec<usize>],
+    modulus: u32,
+) -> Result<Vec<Vector>, ProofError> {
+    let rows = if dimension == 0 {
+        Vec::new()
+    } else {
+        image_rows(&dimensions[dimension - 1], q_simplices, u64::from(modulus))?
+    };
+    Ok(rref(rows, u64::from(modulus)))
+}
+
+fn quotient_basis(cocycles: Vec<Vector>, coboundaries: &[Vector], modulus: u32) -> Vec<Vector> {
+    let mut quotient = Vec::new();
+    for mut cocycle in cocycles {
+        reduce(&mut cocycle, coboundaries, u64::from(modulus));
+        if !cocycle.is_zero() {
+            quotient.push(cocycle);
+        }
+    }
+    quotient
+}
+
 impl Space {
     pub(crate) fn build(
         vertex_count: usize,
@@ -30,54 +145,9 @@ impl Space {
         modulus: u32,
         limits: ProofLimits,
     ) -> Result<Self, ProofError> {
-        let mut adjacency = vec![BTreeSet::new(); vertex_count];
-        for edge in edges {
-            adjacency[edge.u].insert(edge.v);
-            adjacency[edge.v].insert(edge.u);
-        }
-        let mut dimensions: Vec<Vec<Vec<usize>>> =
-            vec![(0..vertex_count).map(|vertex| vec![vertex]).collect()];
-        for current in 1..=dimension + 1 {
-            let mut next = Vec::new();
-            for simplex in &dimensions[current - 1] {
-                for vertex in simplex.last().copied().unwrap_or(0) + 1..vertex_count {
-                    if simplex
-                        .iter()
-                        .all(|member| adjacency[*member].contains(&vertex))
-                    {
-                        let mut cofacet = simplex.clone();
-                        cofacet.push(vertex);
-                        next.push(cofacet);
-                        let maximum = if current == 1 {
-                            limits.max_edges
-                        } else if current == 2 {
-                            limits.max_triangles
-                        } else {
-                            limits.max_higher_simplices
-                        };
-                        if next.len() > maximum {
-                            return Err(ProofError::new(format!(
-                                "dimension {current} zigzag simplex count exceeds {maximum}"
-                            )));
-                        }
-                    }
-                }
-            }
-            dimensions.push(next);
-        }
-        let incidences = dimensions[dimension]
-            .len()
-            .checked_mul(dimension + 1)
-            .and_then(|count| {
-                dimensions[dimension + 1]
-                    .len()
-                    .checked_mul(dimension + 2)
-                    .and_then(|next| count.checked_add(next))
-            })
-            .ok_or_else(|| ProofError::new("zigzag incidence count overflows"))?;
-        if incidences > limits.max_terms {
-            return Err(ProofError::new("zigzag incidence count exceeds its limit"));
-        }
+        let adjacency = adjacency(vertex_count, edges);
+        let dimensions = flag_dimensions(vertex_count, dimension, &adjacency, limits)?;
+        validate_incidence_count(&dimensions, dimension, limits)?;
         let q_simplices = &dimensions[dimension];
         let positions: BTreeMap<_, _> = q_simplices
             .iter()
@@ -90,19 +160,8 @@ impl Space {
             .map(|simplex| boundary_row(simplex, &positions, modulus as u64))
             .collect::<Result<Vec<_>, _>>()?;
         let cocycles = nullspace(equations, q_simplices.len(), modulus as u64);
-        let coboundaries = if dimension == 0 {
-            Vec::new()
-        } else {
-            image_rows(&dimensions[dimension - 1], q_simplices, modulus as u64)?
-        };
-        let coboundaries = rref(coboundaries, modulus as u64);
-        let mut quotient = Vec::new();
-        for mut cocycle in cocycles {
-            reduce(&mut cocycle, &coboundaries, modulus as u64);
-            if !cocycle.is_zero() {
-                quotient.push(cocycle);
-            }
-        }
+        let coboundaries = coboundary_space(&dimensions, dimension, q_simplices, modulus)?;
+        let quotient = quotient_basis(cocycles, &coboundaries, modulus);
         Ok(Self {
             simplices: q_simplices.clone(),
             coboundaries,
