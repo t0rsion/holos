@@ -92,37 +92,146 @@ pub fn is_coverage(bytes: &[u8]) -> bool {
 
 /// Verify one bounded coverage proof without invoking `holos-tda`.
 pub fn verify_coverage(bytes: &[u8], limits: ProofLimits) -> Result<VerifiedCoverage, ProofError> {
+    let decoded = decode_coverage(bytes, limits)?;
+    let checked = verify_claim(&decoded, limits)?;
+    Ok(coverage_summary(&decoded, checked))
+}
+
+struct DecodedCoverage {
+    claim: Claim,
+    producer_oracle_calls: usize,
+    producer_search_nodes: usize,
+    proof_nodes: usize,
+    proof_topology_checks: usize,
+    proof_terms: usize,
+}
+
+struct PhysicalHeader {
+    vertex_count: usize,
+    broadcast_radius: f64,
+    modulus: u32,
+    fence: Vec<usize>,
+}
+
+struct CoverageHeader {
+    physical: PhysicalHeader,
+    failable: Vec<usize>,
+    failure_budget: usize,
+    source: Source,
+}
+
+struct WorkLimits {
+    oracle: usize,
+    nodes: usize,
+}
+
+struct Selection {
+    status: VerifiedCoverageStatus,
+    selected: Vec<usize>,
+    lower_bound: Option<u64>,
+    upper_bound: Option<u64>,
+}
+
+struct SearchData {
+    max_activations: usize,
+    selection: Selection,
+    producer_oracle_calls: usize,
+    producer_search_nodes: usize,
+}
+
+struct ProofData {
+    root_blockers: Vec<Vec<usize>>,
+    before: Evaluation,
+    after: Evaluation,
+    proof: Option<ProofNode>,
+    nodes: usize,
+    topology_checks: usize,
+    terms: usize,
+}
+
+struct CheckedCoverage {
+    after: Evaluation,
+    selected_cost: u64,
+}
+
+fn decode_coverage(bytes: &[u8], limits: ProofLimits) -> Result<DecodedCoverage, ProofError> {
+    let expected = expected_digest(bytes, limits)?;
+    let mut reader = Reader::new(bytes);
+    decode_prefix(&mut reader)?;
+    let header = decode_header(&mut reader, limits)?;
+    let states = decode_states(
+        &mut reader,
+        header.physical.vertex_count,
+        &header.physical.fence,
+        limits,
+    )?;
+    let actions = decode_actions(
+        &mut reader,
+        header.physical.vertex_count,
+        &header.physical.fence,
+        &states,
+        limits,
+    )?;
+    let search = decode_search(&mut reader, actions.len())?;
+    let proof = decode_proof_data(&mut reader, actions.len(), limits)?;
+    decode_trailer(&mut reader, expected)?;
+    let claim = Claim {
+        vertex_count: header.physical.vertex_count,
+        broadcast_radius: header.physical.broadcast_radius,
+        modulus: header.physical.modulus,
+        fence: header.physical.fence,
+        failable: header.failable,
+        failure_budget: header.failure_budget,
+        source: header.source,
+        states,
+        actions,
+        max_activations: search.max_activations,
+        status: search.selection.status,
+        selected: search.selection.selected,
+        lower_bound: search.selection.lower_bound,
+        upper_bound: search.selection.upper_bound,
+        root_blockers: proof.root_blockers,
+        before: proof.before,
+        after: proof.after,
+        proof: proof.proof,
+    };
+    Ok(DecodedCoverage {
+        claim,
+        producer_oracle_calls: search.producer_oracle_calls,
+        producer_search_nodes: search.producer_search_nodes,
+        proof_nodes: proof.nodes,
+        proof_topology_checks: proof.topology_checks,
+        proof_terms: proof.terms,
+    })
+}
+
+fn expected_digest(bytes: &[u8], limits: ProofLimits) -> Result<[u8; 32], ProofError> {
     if bytes.len() > limits.max_bytes || bytes.len() < 32 {
         return Err(ProofError::new(
             "coverage artifact exceeds its byte limit or is truncated",
         ));
     }
-    let payload_end = bytes.len() - 32;
-    let expected: [u8; 32] = Sha256::digest(&bytes[..payload_end]).into();
-    let mut reader = Reader::new(bytes);
-    if reader.take(8)? != MAGIC || reader.u16()? != VERSION || reader.u8()? != F64_BITS_CODEC {
+    Ok(Sha256::digest(&bytes[..bytes.len() - 32]).into())
+}
+
+fn decode_prefix(reader: &mut Reader<'_>) -> Result<(), ProofError> {
+    let magic = reader.take(8)?;
+    let version = reader.u16()?;
+    let codec = reader.u8()?;
+    if magic != MAGIC || version != VERSION || codec != F64_BITS_CODEC {
         return Err(ProofError::new("unsupported coverage artifact"));
     }
-    let vertex_count = reader.bounded_usize("vertex count", limits.max_vertices)?;
-    let broadcast_radius = f64::from_bits(reader.u64()?);
-    let sensing_radius = f64::from_bits(reader.u64()?);
-    validate_radii(broadcast_radius, sensing_radius)?;
-    let modulus = reader.u32()?;
-    if !is_prime(u64::from(modulus)) || u64::from(modulus) >= MODULUS_LIMIT {
-        return Err(ProofError::new(
-            "coverage modulus must be a supported prime",
-        ));
-    }
-    let fence = decode_usizes(&mut reader, limits.max_vertices)?;
-    if fence.len() < 3
-        || fence.iter().any(|vertex| *vertex >= vertex_count)
-        || fence.iter().copied().collect::<BTreeSet<_>>().len() != fence.len()
-        || canonical_fence(&fence) != fence
-    {
-        return Err(ProofError::new("coverage fence is not a canonical cycle"));
-    }
-    let failable = decode_indices(&mut reader, vertex_count, limits.max_vertices)?;
-    if fence
+    Ok(())
+}
+
+fn decode_header(
+    reader: &mut Reader<'_>,
+    limits: ProofLimits,
+) -> Result<CoverageHeader, ProofError> {
+    let physical = decode_physical_header(reader, limits)?;
+    let failable = decode_indices(reader, physical.vertex_count, limits.max_vertices)?;
+    if physical
+        .fence
         .iter()
         .any(|vertex| failable.binary_search(vertex).is_ok())
     {
@@ -134,165 +243,328 @@ pub fn verify_coverage(bytes: &[u8], limits: ProofLimits) -> Result<VerifiedCove
             "coverage failure budget exceeds the failable sensor count",
         ));
     }
-    let source = decode_source(&mut reader, limits)?;
-    let state_count =
-        reader.bounded_usize("state count", limits.max_snapshots.min(FORMAT_MAX_STATES))?;
-    if vertex_count == 0 || state_count == 0 {
+    let source = decode_source(reader, limits)?;
+    Ok(CoverageHeader {
+        physical,
+        failable,
+        failure_budget,
+        source,
+    })
+}
+
+fn decode_physical_header(
+    reader: &mut Reader<'_>,
+    limits: ProofLimits,
+) -> Result<PhysicalHeader, ProofError> {
+    let vertex_count = reader.bounded_usize("vertex count", limits.max_vertices)?;
+    let broadcast_radius = f64::from_bits(reader.u64()?);
+    let sensing_radius = f64::from_bits(reader.u64()?);
+    validate_radii(broadcast_radius, sensing_radius)?;
+    let modulus = reader.u32()?;
+    validate_modulus(modulus)?;
+    let fence = decode_usizes(reader, limits.max_vertices)?;
+    validate_fence(vertex_count, &fence)?;
+    Ok(PhysicalHeader {
+        vertex_count,
+        broadcast_radius,
+        modulus,
+        fence,
+    })
+}
+
+fn validate_modulus(modulus: u32) -> Result<(), ProofError> {
+    if !is_prime(u64::from(modulus)) || u64::from(modulus) >= MODULUS_LIMIT {
+        return Err(ProofError::new(
+            "coverage modulus must be a supported prime",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_fence(vertex_count: usize, fence: &[usize]) -> Result<(), ProofError> {
+    let distinct = fence.iter().copied().collect::<BTreeSet<_>>().len();
+    if fence.len() < 3
+        || fence.iter().any(|vertex| *vertex >= vertex_count)
+        || distinct != fence.len()
+        || canonical_fence(fence) != fence
+    {
+        return Err(ProofError::new("coverage fence is not a canonical cycle"));
+    }
+    Ok(())
+}
+
+fn decode_states(
+    reader: &mut Reader<'_>,
+    vertex_count: usize,
+    fence: &[usize],
+    limits: ProofLimits,
+) -> Result<Vec<State>, ProofError> {
+    let count = reader.bounded_usize("state count", limits.max_snapshots.min(FORMAT_MAX_STATES))?;
+    if vertex_count == 0 || count == 0 {
         return Err(ProofError::new("coverage specification has an empty scope"));
     }
-    let mut states = Vec::with_capacity(state_count);
+    let mut states = Vec::with_capacity(count);
     let mut total_edges = 0usize;
     let mut prior = None;
-    for _ in 0..state_count {
-        let scenario = reader.u64()?;
-        let step = reader.u64()?;
-        if prior.is_some_and(|key| key >= (scenario, step)) {
-            return Err(ProofError::new(
-                "coverage states are not in canonical scenario and step order",
-            ));
-        }
-        prior = Some((scenario, step));
-        let base = decode_indices(&mut reader, vertex_count, limits.max_vertices)?;
-        if fence
-            .iter()
-            .any(|vertex| base.binary_search(vertex).is_err())
-        {
-            return Err(ProofError::new("coverage state omits a fence vertex"));
-        }
-        let edges = decode_edges(&mut reader, vertex_count, limits.max_edges)?;
-        total_edges = total_edges
-            .checked_add(edges.len())
-            .ok_or_else(|| ProofError::new("coverage edge count overflows"))?;
-        if total_edges > limits.max_edges {
-            return Err(ProofError::new(
-                "coverage state edges exceed their total limit",
-            ));
-        }
-        states.push(State {
-            scenario,
-            step,
-            base,
-            edges,
-        });
+    for _ in 0..count {
+        let state = decode_state(reader, vertex_count, fence, limits)?;
+        validate_state_order(prior, &state)?;
+        prior = Some((state.scenario, state.step));
+        total_edges = add_edge_count(total_edges, state.edges.len(), limits)?;
+        states.push(state);
     }
-    let action_count = reader.bounded_usize(
+    Ok(states)
+}
+
+fn decode_state(
+    reader: &mut Reader<'_>,
+    vertex_count: usize,
+    fence: &[usize],
+    limits: ProofLimits,
+) -> Result<State, ProofError> {
+    let scenario = reader.u64()?;
+    let step = reader.u64()?;
+    let base = decode_indices(reader, vertex_count, limits.max_vertices)?;
+    if fence
+        .iter()
+        .any(|vertex| base.binary_search(vertex).is_err())
+    {
+        return Err(ProofError::new("coverage state omits a fence vertex"));
+    }
+    let edges = decode_edges(reader, vertex_count, limits.max_edges)?;
+    Ok(State {
+        scenario,
+        step,
+        base,
+        edges,
+    })
+}
+
+fn validate_state_order(prior: Option<(u64, u64)>, state: &State) -> Result<(), ProofError> {
+    if prior.is_some_and(|key| key >= (state.scenario, state.step)) {
+        return Err(ProofError::new(
+            "coverage states are not in canonical scenario and step order",
+        ));
+    }
+    Ok(())
+}
+
+fn add_edge_count(total: usize, add: usize, limits: ProofLimits) -> Result<usize, ProofError> {
+    let total = total
+        .checked_add(add)
+        .ok_or_else(|| ProofError::new("coverage edge count overflows"))?;
+    if total > limits.max_edges {
+        return Err(ProofError::new(
+            "coverage state edges exceed their total limit",
+        ));
+    }
+    Ok(total)
+}
+
+fn decode_actions(
+    reader: &mut Reader<'_>,
+    vertex_count: usize,
+    fence: &[usize],
+    states: &[State],
+    limits: ProofLimits,
+) -> Result<Vec<Action>, ProofError> {
+    let count = reader.bounded_usize(
         "action count",
         limits.max_references.min(FORMAT_MAX_ACTIONS),
     )?;
-    let mut actions = Vec::with_capacity(action_count);
-    let mut action_vertices = BTreeSet::new();
+    let mut actions = Vec::with_capacity(count);
+    let mut vertices = BTreeSet::new();
     let mut cost_sum = 0u64;
-    for _ in 0..action_count {
-        let vertex = reader.usize()?;
-        let cost = reader.u64()?;
-        let action_states = decode_indices(&mut reader, state_count, state_count)?;
-        if vertex >= vertex_count
-            || cost == 0
-            || action_states.is_empty()
-            || fence.contains(&vertex)
-            || !action_vertices.insert(vertex)
-            || action_states
-                .iter()
-                .any(|state| states[*state].base.binary_search(&vertex).is_ok())
-        {
-            return Err(ProofError::new(
-                "coverage action list is not a canonical activation set",
-            ));
-        }
+    for _ in 0..count {
+        let action = decode_action(reader, vertex_count, states.len())?;
+        validate_action(&action, vertex_count, fence, states, &mut vertices)?;
         cost_sum = cost_sum
-            .checked_add(cost)
+            .checked_add(action.cost)
             .ok_or_else(|| ProofError::new("coverage action cost sum overflows"))?;
-        actions.push(Action {
-            vertex,
-            cost,
-            states: action_states,
-        });
+        actions.push(action);
     }
+    Ok(actions)
+}
+
+fn decode_action(
+    reader: &mut Reader<'_>,
+    _vertex_count: usize,
+    state_count: usize,
+) -> Result<Action, ProofError> {
+    Ok(Action {
+        vertex: reader.usize()?,
+        cost: reader.u64()?,
+        states: decode_indices(reader, state_count, state_count)?,
+    })
+}
+
+fn validate_action(
+    action: &Action,
+    vertex_count: usize,
+    fence: &[usize],
+    states: &[State],
+    vertices: &mut BTreeSet<usize>,
+) -> Result<(), ProofError> {
+    let already_active = action
+        .states
+        .iter()
+        .any(|state| states[*state].base.binary_search(&action.vertex).is_ok());
+    if action.vertex >= vertex_count
+        || action.cost == 0
+        || action.states.is_empty()
+        || fence.contains(&action.vertex)
+        || !vertices.insert(action.vertex)
+        || already_active
+    {
+        return Err(ProofError::new(
+            "coverage action list is not a canonical activation set",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_search(reader: &mut Reader<'_>, action_count: usize) -> Result<SearchData, ProofError> {
     let max_activations = reader.usize()?;
-    let oracle_limit = reader.usize()?;
-    let node_limit = reader.usize()?;
-    if oracle_limit == 0
-        || oracle_limit > FORMAT_MAX_ORACLE_CALLS
-        || node_limit == 0
-        || node_limit > FORMAT_MAX_SEARCH_NODES
+    let limits = decode_work_limits(reader)?;
+    let selection = decode_selection(reader, action_count, max_activations)?;
+    let producer_oracle_calls = reader.usize()?;
+    let producer_search_nodes = reader.usize()?;
+    let _producer_cache_hits = reader.usize()?;
+    if producer_oracle_calls > limits.oracle || producer_search_nodes > limits.nodes {
+        return Err(ProofError::new(
+            "coverage producer work exceeds its declared limit",
+        ));
+    }
+    Ok(SearchData {
+        max_activations,
+        selection,
+        producer_oracle_calls,
+        producer_search_nodes,
+    })
+}
+
+fn decode_work_limits(reader: &mut Reader<'_>) -> Result<WorkLimits, ProofError> {
+    let oracle = reader.usize()?;
+    let nodes = reader.usize()?;
+    if oracle == 0
+        || oracle > FORMAT_MAX_ORACLE_CALLS
+        || nodes == 0
+        || nodes > FORMAT_MAX_SEARCH_NODES
     {
         return Err(ProofError::new("coverage producer work limit is invalid"));
     }
+    Ok(WorkLimits { oracle, nodes })
+}
+
+fn decode_selection(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    max_activations: usize,
+) -> Result<Selection, ProofError> {
     let status = VerifiedCoverageStatus::from_code(reader.u8()?)?;
-    let selected = decode_indices(&mut reader, action_count, action_count)?;
+    let selected = decode_indices(reader, action_count, action_count)?;
     if selected.len() > max_activations.min(action_count) {
         return Err(ProofError::new(
             "coverage selection exceeds the activation limit",
         ));
     }
-    let lower_bound = reader.optional_u64()?;
-    let upper_bound = reader.optional_u64()?;
-    let producer_oracle_calls = reader.usize()?;
-    let producer_search_nodes = reader.usize()?;
-    let _producer_cache_hits = reader.usize()?;
-    if producer_oracle_calls > oracle_limit || producer_search_nodes > node_limit {
-        return Err(ProofError::new(
-            "coverage producer work exceeds its declared limit",
-        ));
-    }
-    let root_count = reader.bounded_usize("root blocker count", limits.max_terms)?;
-    let mut root_blockers = Vec::with_capacity(root_count);
-    let mut root_terms = 0usize;
-    for _ in 0..root_count {
-        let blocker = decode_indices(&mut reader, action_count, limits.max_terms)?;
-        add_terms(&mut root_terms, blocker.len(), limits)?;
-        root_blockers.push(blocker);
-    }
-    let before = decode_evaluation(&mut reader)?;
-    let after = decode_evaluation(&mut reader)?;
+    Ok(Selection {
+        status,
+        selected,
+        lower_bound: reader.optional_u64()?,
+        upper_bound: reader.optional_u64()?,
+    })
+}
+
+fn decode_proof_data(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    limits: ProofLimits,
+) -> Result<ProofData, ProofError> {
+    let root_blockers = decode_root_blockers(reader, action_count, limits)?;
+    let before = decode_evaluation(reader)?;
+    let after = decode_evaluation(reader)?;
     let mut decoded_nodes = 0usize;
     let mut decoded_terms = 0usize;
-    let proof = match reader.u8()? {
-        0 => None,
-        1 => Some(decode_proof(
-            &mut reader,
+    let proof = decode_optional_proof(
+        reader,
+        action_count,
+        &mut decoded_nodes,
+        &mut decoded_terms,
+        limits,
+    )?;
+    let nodes = reader.usize()?;
+    let topology_checks = reader.usize()?;
+    let terms = reader.usize()?;
+    if nodes != decoded_nodes || terms != decoded_terms {
+        return Err(ProofError::new("coverage proof size differs from its tree"));
+    }
+    Ok(ProofData {
+        root_blockers,
+        before,
+        after,
+        proof,
+        nodes,
+        topology_checks,
+        terms,
+    })
+}
+
+fn decode_root_blockers(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    limits: ProofLimits,
+) -> Result<Vec<Vec<usize>>, ProofError> {
+    let count = reader.bounded_usize("root blocker count", limits.max_terms)?;
+    let mut blockers = Vec::with_capacity(count);
+    let mut terms = 0usize;
+    for _ in 0..count {
+        let blocker = decode_indices(reader, action_count, limits.max_terms)?;
+        add_terms(&mut terms, blocker.len(), limits)?;
+        blockers.push(blocker);
+    }
+    Ok(blockers)
+}
+
+fn decode_optional_proof(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    decoded_nodes: &mut usize,
+    decoded_terms: &mut usize,
+    limits: ProofLimits,
+) -> Result<Option<ProofNode>, ProofError> {
+    match reader.u8()? {
+        0 => Ok(None),
+        1 => decode_proof(
+            reader,
             action_count,
             0,
-            &mut decoded_nodes,
-            &mut decoded_terms,
+            decoded_nodes,
+            decoded_terms,
             limits,
-        )?),
-        _ => return Err(ProofError::new("coverage proof-presence flag is invalid")),
-    };
-    let proof_nodes = reader.usize()?;
-    let proof_topology_checks = reader.usize()?;
-    let proof_terms = reader.usize()?;
+        )
+        .map(Some),
+        _ => Err(ProofError::new("coverage proof-presence flag is invalid")),
+    }
+}
+
+fn decode_trailer(reader: &mut Reader<'_>, expected: [u8; 32]) -> Result<(), ProofError> {
     if reader.array32()? != expected || reader.remaining() != 0 {
         return Err(ProofError::new(
             "coverage artifact has a wrong digest or trailing bytes",
         ));
     }
-    if proof_nodes != decoded_nodes || proof_terms != decoded_terms {
-        return Err(ProofError::new("coverage proof size differs from its tree"));
-    }
-    let claim = Claim {
-        vertex_count,
-        broadcast_radius,
-        modulus,
-        fence,
-        failable,
-        failure_budget,
-        source,
-        states,
-        actions,
-        max_activations,
-        status,
-        selected,
-        lower_bound,
-        upper_bound,
-        root_blockers,
-        before,
-        after,
-        proof,
-    };
-    validate_source(&claim, limits)?;
-    let checked_before = evaluate(&claim, &[], limits)?;
-    let checked_after = evaluate(&claim, &claim.selected, limits)?;
+    Ok(())
+}
+
+fn verify_claim(
+    decoded: &DecodedCoverage,
+    limits: ProofLimits,
+) -> Result<CheckedCoverage, ProofError> {
+    let claim = &decoded.claim;
+    validate_source(claim, limits)?;
+    let checked_before = evaluate(claim, &[], limits)?;
+    let checked_after = evaluate(claim, &claim.selected, limits)?;
     if claim.before != checked_before || claim.after != checked_after {
         return Err(ProofError::new(
             "coverage evaluation claims differ from exact checks",
@@ -305,7 +577,7 @@ pub fn verify_coverage(bytes: &[u8], limits: ProofLimits) -> Result<VerifiedCove
         .collect::<Vec<_>>();
     let selected_cost = selected_cost(&costs, &claim.selected)?;
     verify_root_blockers(
-        &claim,
+        claim,
         &claim.root_blockers,
         &costs,
         claim.lower_bound,
@@ -313,95 +585,157 @@ pub fn verify_coverage(bytes: &[u8], limits: ProofLimits) -> Result<VerifiedCove
     )?;
     let mut verifier = TreeVerifier::new(
         &costs,
-        claim.max_activations.min(action_count),
-        match claim.status {
-            VerifiedCoverageStatus::Optimal => Some(selected_cost),
-            VerifiedCoverageStatus::Infeasible => None,
-            VerifiedCoverageStatus::SearchIncomplete => claim.upper_bound,
-        },
-        &claim,
+        claim.max_activations.min(claim.actions.len()),
+        verifier_incumbent(claim, selected_cost),
+        claim,
         limits,
     );
+    verify_status(decoded, checked_after, selected_cost, &costs, &mut verifier)?;
+    verify_proof_work(decoded, &verifier)?;
+    Ok(CheckedCoverage {
+        after: checked_after,
+        selected_cost,
+    })
+}
+
+fn verifier_incumbent(claim: &Claim, selected_cost: u64) -> Option<u64> {
     match claim.status {
+        VerifiedCoverageStatus::Optimal => Some(selected_cost),
+        VerifiedCoverageStatus::Infeasible => None,
+        VerifiedCoverageStatus::SearchIncomplete => claim.upper_bound,
+    }
+}
+
+fn verify_status(
+    decoded: &DecodedCoverage,
+    checked_after: Evaluation,
+    selected_cost: u64,
+    costs: &[u64],
+    verifier: &mut TreeVerifier<'_>,
+) -> Result<(), ProofError> {
+    match decoded.claim.status {
         VerifiedCoverageStatus::Optimal => {
-            if !checked_after.criterion_holds
-                || claim.lower_bound != Some(selected_cost)
-                || claim.upper_bound != Some(selected_cost)
-            {
-                return Err(ProofError::new(
-                    "optimal coverage result has an invalid incumbent or bound",
-                ));
-            }
-            verifier.verify_root(
-                claim
-                    .proof
-                    .as_ref()
-                    .ok_or_else(|| ProofError::new("optimal coverage result has no proof tree"))?,
-            )?;
+            verify_optimal(&decoded.claim, checked_after, selected_cost, verifier)
         }
         VerifiedCoverageStatus::Infeasible => {
-            if !claim.selected.is_empty()
-                || claim.lower_bound.is_some()
-                || claim.upper_bound.is_some()
-                || checked_after.criterion_holds
-            {
-                return Err(ProofError::new(
-                    "infeasible coverage result has an incumbent or finite bound",
-                ));
-            }
-            verifier.verify_root(claim.proof.as_ref().ok_or_else(|| {
-                ProofError::new("infeasible coverage result has no proof tree")
-            })?)?;
+            verify_infeasible(&decoded.claim, checked_after, verifier)
         }
         VerifiedCoverageStatus::SearchIncomplete => {
-            let root_bound = blocker_bound(&costs, &claim.root_blockers)?;
-            if claim.proof.is_some()
-                || proof_nodes != 0
-                || proof_topology_checks != 0
-                || proof_terms != 0
-                || claim.upper_bound.is_some() != checked_after.criterion_holds
-                || claim.upper_bound.is_some_and(|cost| cost != selected_cost)
-                || claim.lower_bound != Some(root_bound)
-                || claim
-                    .lower_bound
-                    .zip(claim.upper_bound)
-                    .is_some_and(|(lower, upper)| lower > upper)
-            {
-                return Err(ProofError::new(
-                    "incomplete coverage result has an invalid gap",
-                ));
-            }
+            verify_incomplete(decoded, checked_after, selected_cost, costs)
         }
     }
-    if verifier.nodes != proof_nodes
-        || verifier.checks != proof_topology_checks
-        || verifier.terms != proof_terms
+}
+
+fn verify_optimal(
+    claim: &Claim,
+    checked_after: Evaluation,
+    selected_cost: u64,
+    verifier: &mut TreeVerifier<'_>,
+) -> Result<(), ProofError> {
+    if !checked_after.criterion_holds
+        || claim.lower_bound != Some(selected_cost)
+        || claim.upper_bound != Some(selected_cost)
+    {
+        return Err(ProofError::new(
+            "optimal coverage result has an invalid incumbent or bound",
+        ));
+    }
+    let proof = claim
+        .proof
+        .as_ref()
+        .ok_or_else(|| ProofError::new("optimal coverage result has no proof tree"))?;
+    verifier.verify_root(proof)
+}
+
+fn verify_infeasible(
+    claim: &Claim,
+    checked_after: Evaluation,
+    verifier: &mut TreeVerifier<'_>,
+) -> Result<(), ProofError> {
+    if !claim.selected.is_empty()
+        || claim.lower_bound.is_some()
+        || claim.upper_bound.is_some()
+        || checked_after.criterion_holds
+    {
+        return Err(ProofError::new(
+            "infeasible coverage result has an incumbent or finite bound",
+        ));
+    }
+    let proof = claim
+        .proof
+        .as_ref()
+        .ok_or_else(|| ProofError::new("infeasible coverage result has no proof tree"))?;
+    verifier.verify_root(proof)
+}
+
+fn verify_incomplete(
+    decoded: &DecodedCoverage,
+    checked_after: Evaluation,
+    selected_cost: u64,
+    costs: &[u64],
+) -> Result<(), ProofError> {
+    let claim = &decoded.claim;
+    let root_bound = blocker_bound(costs, &claim.root_blockers)?;
+    if claim.proof.is_some()
+        || decoded.proof_nodes != 0
+        || decoded.proof_topology_checks != 0
+        || decoded.proof_terms != 0
+        || claim.upper_bound.is_some() != checked_after.criterion_holds
+        || claim.upper_bound.is_some_and(|cost| cost != selected_cost)
+        || claim.lower_bound != Some(root_bound)
+        || claim
+            .lower_bound
+            .zip(claim.upper_bound)
+            .is_some_and(|(lower, upper)| lower > upper)
+    {
+        return Err(ProofError::new(
+            "incomplete coverage result has an invalid gap",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_proof_work(
+    decoded: &DecodedCoverage,
+    verifier: &TreeVerifier<'_>,
+) -> Result<(), ProofError> {
+    if verifier.nodes != decoded.proof_nodes
+        || verifier.checks != decoded.proof_topology_checks
+        || verifier.terms != decoded.proof_terms
     {
         return Err(ProofError::new(
             "coverage proof work differs from the checked tree",
         ));
     }
-    Ok(VerifiedCoverage {
-        modulus,
+    Ok(())
+}
+
+fn coverage_summary(decoded: &DecodedCoverage, checked: CheckedCoverage) -> VerifiedCoverage {
+    let claim = &decoded.claim;
+    VerifiedCoverage {
+        modulus: claim.modulus,
         source: match claim.source {
             Source::Finite => VerifiedCoverageSource::Finite,
             Source::Affine { .. } => VerifiedCoverageSource::Affine,
         },
-        states: state_count,
-        actions: action_count,
-        failure_budget,
-        status,
+        states: claim.states.len(),
+        actions: claim.actions.len(),
+        failure_budget: claim.failure_budget,
+        status: claim.status,
         selected: claim.selected.len(),
-        total_cost: checked_after.criterion_holds.then_some(selected_cost),
-        lower_bound_cost: lower_bound,
-        upper_bound_cost: upper_bound,
-        producer_oracle_calls,
-        producer_search_nodes,
-        proof_nodes,
-        proof_topology_checks,
-        selected_failure_checks: checked_after.checks,
-        minimum_witness_triangles: checked_after.minimum_witness,
-    })
+        total_cost: checked
+            .after
+            .criterion_holds
+            .then_some(checked.selected_cost),
+        lower_bound_cost: claim.lower_bound,
+        upper_bound_cost: claim.upper_bound,
+        producer_oracle_calls: decoded.producer_oracle_calls,
+        producer_search_nodes: decoded.producer_search_nodes,
+        proof_nodes: decoded.proof_nodes,
+        proof_topology_checks: decoded.proof_topology_checks,
+        selected_failure_checks: checked.after.checks,
+        minimum_witness_triangles: checked.after.minimum_witness,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -473,36 +807,45 @@ struct Evaluation {
 fn decode_source(reader: &mut Reader<'_>, limits: ProofLimits) -> Result<Source, ProofError> {
     match reader.u8()? {
         0 => Ok(Source::Finite),
-        1 => {
-            let scenario = reader.u64()?;
-            let start = f64::from_bits(reader.u64()?);
-            let end = f64::from_bits(reader.u64()?);
-            let count = reader.bounded_usize("affine edge count", limits.max_edges)?;
-            if count > reader.remaining() / 32 {
-                return Err(ProofError::new(
-                    "coverage affine edges exceed the remaining bytes",
-                ));
-            }
-            let mut edges = Vec::with_capacity(count);
-            for _ in 0..count {
-                edges.push(AffineEdge {
-                    edge: Edge {
-                        u: reader.usize()?,
-                        v: reader.usize()?,
-                    },
-                    intercept: f64::from_bits(reader.u64()?),
-                    velocity: f64::from_bits(reader.u64()?),
-                });
-            }
-            Ok(Source::Affine {
-                scenario,
-                edges,
-                start,
-                end,
-            })
-        }
+        1 => decode_affine_source(reader, limits),
         _ => Err(ProofError::new("coverage source kind is invalid")),
     }
+}
+
+fn decode_affine_source(
+    reader: &mut Reader<'_>,
+    limits: ProofLimits,
+) -> Result<Source, ProofError> {
+    let scenario = reader.u64()?;
+    let start = f64::from_bits(reader.u64()?);
+    let end = f64::from_bits(reader.u64()?);
+    let count = reader.bounded_usize("affine edge count", limits.max_edges)?;
+    if count > reader.remaining() / 32 {
+        return Err(ProofError::new(
+            "coverage affine edges exceed the remaining bytes",
+        ));
+    }
+    let mut edges = Vec::with_capacity(count);
+    for _ in 0..count {
+        edges.push(decode_affine_edge(reader)?);
+    }
+    Ok(Source::Affine {
+        scenario,
+        edges,
+        start,
+        end,
+    })
+}
+
+fn decode_affine_edge(reader: &mut Reader<'_>) -> Result<AffineEdge, ProofError> {
+    Ok(AffineEdge {
+        edge: Edge {
+            u: reader.usize()?,
+            v: reader.usize()?,
+        },
+        intercept: f64::from_bits(reader.u64()?),
+        velocity: f64::from_bits(reader.u64()?),
+    })
 }
 
 fn validate_source(claim: &Claim, limits: ProofLimits) -> Result<(), ProofError> {
@@ -551,32 +894,53 @@ fn validate_affine(
     start: f64,
     end: f64,
 ) -> Result<(), ProofError> {
-    if !start.is_finite() || !end.is_finite() || start >= end {
-        return Err(ProofError::new("coverage affine interval is invalid"));
-    }
+    validate_affine_interval(start, end)?;
     let mut previous = None;
     for trajectory in edges {
-        if trajectory.edge.u >= trajectory.edge.v
-            || trajectory.edge.v >= vertex_count
-            || !trajectory.intercept.is_finite()
-            || !trajectory.velocity.is_finite()
-            || previous.is_some_and(|edge| edge >= trajectory.edge)
-        {
-            return Err(ProofError::new(
-                "coverage affine edge trajectory is not canonical",
-            ));
-        }
-        for time in [start, end] {
-            let weight = trajectory.intercept + trajectory.velocity * time;
-            if !weight.is_finite() || weight < 0.0 {
-                return Err(ProofError::new(
-                    "coverage affine edge weight leaves its valid range",
-                ));
-            }
-        }
+        validate_trajectory(trajectory, previous, vertex_count, start, end)?;
         previous = Some(trajectory.edge);
     }
     Ok(())
+}
+
+fn validate_affine_interval(start: f64, end: f64) -> Result<(), ProofError> {
+    if !start.is_finite() || !end.is_finite() || start >= end {
+        Err(ProofError::new("coverage affine interval is invalid"))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_trajectory(
+    trajectory: &AffineEdge,
+    previous: Option<Edge>,
+    vertex_count: usize,
+    start: f64,
+    end: f64,
+) -> Result<(), ProofError> {
+    if trajectory.edge.u >= trajectory.edge.v
+        || trajectory.edge.v >= vertex_count
+        || !trajectory.intercept.is_finite()
+        || !trajectory.velocity.is_finite()
+        || previous.is_some_and(|edge| edge >= trajectory.edge)
+    {
+        return Err(ProofError::new(
+            "coverage affine edge trajectory is not canonical",
+        ));
+    }
+    validate_trajectory_weight(trajectory, start)?;
+    validate_trajectory_weight(trajectory, end)
+}
+
+fn validate_trajectory_weight(trajectory: &AffineEdge, time: f64) -> Result<(), ProofError> {
+    let weight = trajectory.intercept + trajectory.velocity * time;
+    if !weight.is_finite() || weight < 0.0 {
+        Err(ProofError::new(
+            "coverage affine edge weight leaves its valid range",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn complete_threshold_graphs(
@@ -798,6 +1162,20 @@ fn solve_boundary(
     target: &[u32],
     modulus: u32,
 ) -> Option<Vec<u32>> {
+    let mut rows = boundary_rows(edges, triangles, target, modulus);
+    let pivots = reduce_boundary_rows(&mut rows, triangles.len(), modulus);
+    if boundary_inconsistent(&rows, triangles.len()) {
+        return None;
+    }
+    Some(boundary_solution(&rows, &pivots, triangles.len()))
+}
+
+fn boundary_rows(
+    edges: &[Edge],
+    triangles: &[[usize; 3]],
+    target: &[u32],
+    modulus: u32,
+) -> Vec<Vec<u32>> {
     let positions = edges
         .iter()
         .copied()
@@ -813,43 +1191,59 @@ fn solve_boundary(
     for (row, value) in rows.iter_mut().zip(target) {
         row[triangles.len()] = *value;
     }
+    rows
+}
+
+fn reduce_boundary_rows(rows: &mut [Vec<u32>], columns: usize, modulus: u32) -> Vec<usize> {
     let mut pivot_row = 0usize;
     let mut pivots = Vec::new();
-    for column in 0..triangles.len() {
+    for column in 0..columns {
         let Some(found) = (pivot_row..rows.len()).find(|row| rows[*row][column] != 0) else {
             continue;
         };
         rows.swap(pivot_row, found);
-        let inverse = inverse(rows[pivot_row][column], modulus);
-        for value in &mut rows[pivot_row][column..] {
-            *value = multiply(*value, inverse, modulus);
-        }
-        for row in 0..rows.len() {
-            if row == pivot_row || rows[row][column] == 0 {
-                continue;
-            }
-            let factor = rows[row][column];
-            let pivot = rows[pivot_row][column..].to_vec();
-            for (value, pivot_value) in rows[row][column..].iter_mut().zip(pivot) {
-                *value = subtract(*value, multiply(factor, pivot_value, modulus), modulus);
-            }
-        }
+        normalize_boundary_pivot(rows, pivot_row, column, modulus);
+        eliminate_boundary_pivot(rows, pivot_row, column, modulus);
         pivots.push(column);
         pivot_row += 1;
         if pivot_row == rows.len() {
             break;
         }
     }
-    if rows.iter().any(|row| {
-        row[..triangles.len()].iter().all(|value| *value == 0) && row[triangles.len()] != 0
-    }) {
-        return None;
+    pivots
+}
+
+fn normalize_boundary_pivot(rows: &mut [Vec<u32>], pivot_row: usize, column: usize, modulus: u32) {
+    let inverse = inverse(rows[pivot_row][column], modulus);
+    for value in &mut rows[pivot_row][column..] {
+        *value = multiply(*value, inverse, modulus);
     }
-    let mut solution = vec![0u32; triangles.len()];
+}
+
+fn eliminate_boundary_pivot(rows: &mut [Vec<u32>], pivot_row: usize, column: usize, modulus: u32) {
+    let pivot = rows[pivot_row][column..].to_vec();
+    for (row_index, row) in rows.iter_mut().enumerate() {
+        if row_index == pivot_row || row[column] == 0 {
+            continue;
+        }
+        let factor = row[column];
+        for (value, pivot_value) in row[column..].iter_mut().zip(&pivot) {
+            *value = subtract(*value, multiply(factor, *pivot_value, modulus), modulus);
+        }
+    }
+}
+
+fn boundary_inconsistent(rows: &[Vec<u32>], columns: usize) -> bool {
+    rows.iter()
+        .any(|row| row[..columns].iter().all(|value| *value == 0) && row[columns] != 0)
+}
+
+fn boundary_solution(rows: &[Vec<u32>], pivots: &[usize], columns: usize) -> Vec<u32> {
+    let mut solution = vec![0u32; columns];
     for (row, &column) in pivots.iter().enumerate() {
-        solution[column] = rows[row][triangles.len()];
+        solution[column] = rows[row][columns];
     }
-    Some(solution)
+    solution
 }
 
 #[derive(Clone, Copy)]
@@ -914,6 +1308,22 @@ impl<'a> TreeVerifier<'a> {
         available: Vec<usize>,
         depth: usize,
     ) -> Result<(), ProofError> {
+        self.record_node(depth)?;
+        let included_cost = selected_cost(self.costs, &included)?;
+        match proof {
+            ProofNode::Cost => self.verify_cost_leaf(included_cost),
+            ProofNode::SurvivingMaximum => self.verify_maximum_leaf(&included, &available),
+            ProofNode::SurvivingActivationLimit => self.verify_activation_leaf(&included),
+            ProofNode::BlockerBound { kind, blockers } => {
+                self.verify_bound_leaf(*kind, &included, &available, blockers, included_cost)
+            }
+            ProofNode::Branch { blocker, children } => {
+                self.verify_branch(&included, &available, blocker, children, depth)
+            }
+        }
+    }
+
+    fn record_node(&mut self, depth: usize) -> Result<(), ProofError> {
         self.nodes = self
             .nodes
             .checked_add(1)
@@ -925,68 +1335,105 @@ impl<'a> TreeVerifier<'a> {
                 "coverage proof tree exceeds its node or depth limit",
             ));
         }
-        let included_cost = selected_cost(self.costs, &included)?;
-        match proof {
-            ProofNode::Cost => {
-                if self.cutoff.is_none_or(|cutoff| included_cost < cutoff) {
-                    return Err(ProofError::new(
-                        "coverage cost leaf does not reach the incumbent",
-                    ));
-                }
+        Ok(())
+    }
+
+    fn verify_cost_leaf(&self, included_cost: u64) -> Result<(), ProofError> {
+        if self.cutoff.is_none_or(|cutoff| included_cost < cutoff) {
+            Err(ProofError::new(
+                "coverage cost leaf does not reach the incumbent",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn verify_maximum_leaf(
+        &mut self,
+        included: &[usize],
+        available: &[usize],
+    ) -> Result<(), ProofError> {
+        if !self.check_survival(&merge(included, available))? {
+            Err(ProofError::new(
+                "coverage maximal-survival leaf is feasible",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn verify_activation_leaf(&mut self, included: &[usize]) -> Result<(), ProofError> {
+        if included.len() != self.max_activations || !self.check_survival(included)? {
+            Err(ProofError::new("coverage activation-limit leaf is invalid"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn verify_bound_leaf(
+        &mut self,
+        kind: BoundKind,
+        included: &[usize],
+        available: &[usize],
+        blockers: &[Vec<usize>],
+        included_cost: u64,
+    ) -> Result<(), ProofError> {
+        self.verify_blockers(included, available, blockers)?;
+        if self.bound_closes(kind, included.len(), blockers, included_cost) {
+            Ok(())
+        } else {
+            Err(ProofError::new(
+                "coverage blocker leaf does not close its branch",
+            ))
+        }
+    }
+
+    fn bound_closes(
+        &self,
+        kind: BoundKind,
+        included: usize,
+        blockers: &[Vec<usize>],
+        included_cost: u64,
+    ) -> bool {
+        match kind {
+            BoundKind::Activations => {
+                included.saturating_add(blockers.len()) > self.max_activations
             }
-            ProofNode::SurvivingMaximum => {
-                if !self.check_survival(&merge(&included, &available))? {
-                    return Err(ProofError::new(
-                        "coverage maximal-survival leaf is feasible",
-                    ));
-                }
-            }
-            ProofNode::SurvivingActivationLimit => {
-                if included.len() != self.max_activations || !self.check_survival(&included)? {
-                    return Err(ProofError::new("coverage activation-limit leaf is invalid"));
-                }
-            }
-            ProofNode::BlockerBound { kind, blockers } => {
-                self.verify_blockers(&included, &available, blockers)?;
-                match kind {
-                    BoundKind::Activations
-                        if included.len().saturating_add(blockers.len()) > self.max_activations => {
-                    }
-                    BoundKind::Cost
-                        if self.cutoff.is_some_and(|cutoff| {
-                            included_cost
-                                .checked_add(
-                                    blocker_bound(self.costs, blockers).unwrap_or(u64::MAX),
-                                )
-                                .is_some_and(|bound| bound >= cutoff)
-                        }) => {}
-                    _ => {
-                        return Err(ProofError::new(
-                            "coverage blocker leaf does not close its branch",
-                        ));
-                    }
-                }
-            }
-            ProofNode::Branch { blocker, children } => {
-                self.verify_blockers(&included, &available, std::slice::from_ref(blocker))?;
-                if blocker.len() != children.len() {
-                    return Err(ProofError::new(
-                        "coverage branch child count differs from its blocker",
-                    ));
-                }
-                let mut excluded = BTreeSet::new();
-                for (&candidate, child) in blocker.iter().zip(children) {
-                    let mut child_included = included.clone();
-                    insert_sorted(&mut child_included, candidate);
-                    let child_available = available
-                        .iter()
-                        .copied()
-                        .filter(|item| *item != candidate && !excluded.contains(item))
-                        .collect();
-                    self.verify_node(child, child_included, child_available, depth + 1)?;
-                    excluded.insert(candidate);
-                }
-            }
+            BoundKind::Cost => self.cutoff.is_some_and(|cutoff| {
+                let add = blocker_bound(self.costs, blockers).unwrap_or(u64::MAX);
+                included_cost
+                    .checked_add(add)
+                    .is_some_and(|bound| bound >= cutoff)
+            }),
+        }
+    }
+
+    fn verify_branch(
+        &mut self,
+        included: &[usize],
+        available: &[usize],
+        blocker: &[usize],
+        children: &[ProofNode],
+        depth: usize,
+    ) -> Result<(), ProofError> {
+        let blocker_family = [blocker.to_vec()];
+        self.verify_blockers(included, available, &blocker_family)?;
+        if blocker.len() != children.len() {
+            return Err(ProofError::new(
+                "coverage branch child count differs from its blocker",
+            ));
+        }
+        let mut excluded = BTreeSet::new();
+        for (&candidate, child) in blocker.iter().zip(children) {
+            let mut child_included = included.to_vec();
+            insert_sorted(&mut child_included, candidate);
+            let child_available = available
+                .iter()
+                .copied()
+                .filter(|item| *item != candidate && !excluded.contains(item))
+                .collect();
+            self.verify_node(child, child_included, child_available, depth + 1)?;
+            excluded.insert(candidate);
         }
         Ok(())
     }
@@ -1077,6 +1524,22 @@ fn decode_proof(
     terms: &mut usize,
     limits: ProofLimits,
 ) -> Result<ProofNode, ProofError> {
+    record_decoded_node(nodes, depth, limits)?;
+    match reader.u8()? {
+        1 => Ok(ProofNode::Cost),
+        2 => Ok(ProofNode::SurvivingMaximum),
+        3 => Ok(ProofNode::SurvivingActivationLimit),
+        4 => decode_bound_node(reader, action_count, terms, limits),
+        5 => decode_branch_node(reader, action_count, depth, nodes, terms, limits),
+        _ => Err(ProofError::new("coverage proof node kind is invalid")),
+    }
+}
+
+fn record_decoded_node(
+    nodes: &mut usize,
+    depth: usize,
+    limits: ProofLimits,
+) -> Result<(), ProofError> {
     *nodes = nodes
         .checked_add(1)
         .ok_or_else(|| ProofError::new("coverage proof node count overflows"))?;
@@ -1085,49 +1548,93 @@ fn decode_proof(
             "coverage proof tree exceeds its node or depth limit",
         ));
     }
+    Ok(())
+}
+
+fn decode_bound_node(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    terms: &mut usize,
+    limits: ProofLimits,
+) -> Result<ProofNode, ProofError> {
+    let kind = decode_bound_kind(reader)?;
+    let blockers = decode_proof_blockers(reader, action_count, terms, limits)?;
+    Ok(ProofNode::BlockerBound { kind, blockers })
+}
+
+fn decode_bound_kind(reader: &mut Reader<'_>) -> Result<BoundKind, ProofError> {
     match reader.u8()? {
-        1 => Ok(ProofNode::Cost),
-        2 => Ok(ProofNode::SurvivingMaximum),
-        3 => Ok(ProofNode::SurvivingActivationLimit),
-        4 => {
-            let kind = match reader.u8()? {
-                1 => BoundKind::Cost,
-                2 => BoundKind::Activations,
-                _ => return Err(ProofError::new("coverage proof bound kind is invalid")),
-            };
-            let count = reader.bounded_usize("proof blocker count", limits.max_terms)?;
-            let mut blockers = Vec::with_capacity(count);
-            for _ in 0..count {
-                let blocker = decode_indices(reader, action_count, limits.max_terms)?;
-                add_terms(terms, blocker.len(), limits)?;
-                blockers.push(blocker);
-            }
-            Ok(ProofNode::BlockerBound { kind, blockers })
-        }
-        5 => {
-            let blocker = decode_indices(reader, action_count, limits.max_terms)?;
-            add_terms(terms, blocker.len(), limits)?;
-            let child_count = reader.bounded_usize("proof child count", action_count)?;
-            if child_count != blocker.len() {
-                return Err(ProofError::new(
-                    "coverage branch child count differs from its blocker",
-                ));
-            }
-            let mut children = Vec::with_capacity(child_count);
-            for _ in 0..child_count {
-                children.push(decode_proof(
-                    reader,
-                    action_count,
-                    depth + 1,
-                    nodes,
-                    terms,
-                    limits,
-                )?);
-            }
-            Ok(ProofNode::Branch { blocker, children })
-        }
-        _ => Err(ProofError::new("coverage proof node kind is invalid")),
+        1 => Ok(BoundKind::Cost),
+        2 => Ok(BoundKind::Activations),
+        _ => Err(ProofError::new("coverage proof bound kind is invalid")),
     }
+}
+
+fn decode_proof_blockers(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    terms: &mut usize,
+    limits: ProofLimits,
+) -> Result<Vec<Vec<usize>>, ProofError> {
+    let count = reader.bounded_usize("proof blocker count", limits.max_terms)?;
+    let mut blockers = Vec::with_capacity(count);
+    for _ in 0..count {
+        let blocker = decode_indices(reader, action_count, limits.max_terms)?;
+        add_terms(terms, blocker.len(), limits)?;
+        blockers.push(blocker);
+    }
+    Ok(blockers)
+}
+
+fn decode_branch_node(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    depth: usize,
+    nodes: &mut usize,
+    terms: &mut usize,
+    limits: ProofLimits,
+) -> Result<ProofNode, ProofError> {
+    let blocker = decode_indices(reader, action_count, limits.max_terms)?;
+    add_terms(terms, blocker.len(), limits)?;
+    let child_count = reader.bounded_usize("proof child count", action_count)?;
+    if child_count != blocker.len() {
+        return Err(ProofError::new(
+            "coverage branch child count differs from its blocker",
+        ));
+    }
+    let children = decode_children(
+        reader,
+        action_count,
+        child_count,
+        depth + 1,
+        nodes,
+        terms,
+        limits,
+    )?;
+    Ok(ProofNode::Branch { blocker, children })
+}
+
+fn decode_children(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    count: usize,
+    depth: usize,
+    nodes: &mut usize,
+    terms: &mut usize,
+    limits: ProofLimits,
+) -> Result<Vec<ProofNode>, ProofError> {
+    let mut children = Vec::with_capacity(count);
+    for _ in 0..count {
+        children.push(decode_proof(
+            reader,
+            action_count,
+            depth,
+            nodes,
+            terms,
+            limits,
+        )?);
+    }
+    Ok(children)
 }
 
 fn decode_evaluation(reader: &mut Reader<'_>) -> Result<Evaluation, ProofError> {
