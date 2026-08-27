@@ -13,6 +13,13 @@ struct Simplex {
     diam: f64,
 }
 
+type OracleColumn = Vec<(usize, u64)>;
+
+struct OracleReduction {
+    columns: Vec<OracleColumn>,
+    pivots: Vec<Option<usize>>,
+}
+
 /// Textbook persistence of the Rips filtration over Z/2. It shares no code
 /// with the solver path. Feasible only for small inputs.
 pub fn rips_persistence_oracle(
@@ -31,18 +38,33 @@ pub fn rips_persistence_oracle_mod(
     modulus: u32,
 ) -> Diagram {
     let p = modulus as u64;
-    // The oracle runs its own primality check: a composite p makes pivots
-    // noninvertible.
-    assert!(
-        p >= 2 && (2..p).take_while(|d| d * d <= p).all(|d| p % d != 0),
-        "oracle modulus must be prime, got {p}"
-    );
-    let n = dist.len();
+    assert_oracle_prime(p);
     let threshold = threshold.unwrap_or_else(|| naive_enclosing_radius(dist));
+    let simplices = oracle_simplices(dist, max_dim, threshold);
+    let position: HashMap<Vec<usize>, usize> = simplices
+        .iter()
+        .enumerate()
+        .map(|(index, simplex)| (simplex.verts.clone(), index))
+        .collect();
+    let columns = boundary_columns(&simplices, &position, p);
+    let reduction = reduce_columns(columns, p);
+    oracle_diagram(&simplices, &reduction.columns, &reduction.pivots, max_dim)
+}
 
-    let mut simplices: Vec<Simplex> = Vec::new();
+fn assert_oracle_prime(modulus: u64) {
+    assert!(
+        modulus >= 2
+            && (2..modulus)
+                .take_while(|divisor| divisor * divisor <= modulus)
+                .all(|divisor| modulus % divisor != 0),
+        "oracle modulus must be prime, got {modulus}"
+    );
+}
+
+fn oracle_simplices(dist: &DistanceMatrix, max_dim: usize, threshold: f64) -> Vec<Simplex> {
+    let mut simplices = Vec::new();
     for dim in 0..=max_dim + 1 {
-        for verts in combinations(n, dim + 1) {
+        for verts in combinations(dist.len(), dim + 1) {
             let diam = diameter(dist, &verts);
             if diam.is_finite() && diam <= threshold {
                 simplices.push(Simplex { verts, diam });
@@ -57,40 +79,43 @@ pub fn rips_persistence_oracle_mod(
             .then(a.verts.len().cmp(&b.verts.len()))
             .then(a.verts.cmp(&b.verts))
     });
+    simplices
+}
 
-    let position: HashMap<Vec<usize>, usize> = simplices
+fn boundary_columns(
+    simplices: &[Simplex],
+    positions: &HashMap<Vec<usize>, usize>,
+    modulus: u64,
+) -> Vec<OracleColumn> {
+    simplices
         .iter()
-        .enumerate()
-        .map(|(i, s)| (s.verts.clone(), i))
-        .collect();
-
-    // Signed boundary columns: removing the vertex at position k carries
-    // the coefficient (-1)^k, stored as a nonzero residue mod p.
-    let m = simplices.len();
-    let mut columns: Vec<Vec<(usize, u64)>> = Vec::with_capacity(m);
-    for s in &simplices {
-        let mut col: Vec<(usize, u64)> = Vec::new();
-        if s.verts.len() > 1 {
-            for k in 0..s.verts.len() {
-                let mut face = s.verts.clone();
-                face.remove(k);
-                let coeff = if k % 2 == 0 { 1 } else { p - 1 };
-                col.push((position[&face], coeff));
+        .map(|simplex| {
+            let mut column = Vec::new();
+            if simplex.verts.len() > 1 {
+                for removed in 0..simplex.verts.len() {
+                    let mut face = simplex.verts.clone();
+                    face.remove(removed);
+                    let coefficient = if removed % 2 == 0 { 1 } else { modulus - 1 };
+                    column.push((positions[&face], coefficient));
+                }
             }
-        }
-        col.sort_unstable_by_key(|&(row, _)| row);
-        columns.push(col);
-    }
+            column.sort_unstable_by_key(|&(row, _)| row);
+            column
+        })
+        .collect()
+}
 
+fn reduce_columns(mut columns: Vec<OracleColumn>, modulus: u64) -> OracleReduction {
+    let m = columns.len();
     let mut pivot_of_row: Vec<Option<usize>> = vec![None; m];
     for j in 0..m {
         while let Some(&(low, c)) = columns[j].last() {
             match pivot_of_row[low] {
                 Some(k) => {
                     let pivot_coeff = columns[k].last().unwrap().1;
-                    // Eliminate the pivot: add -(c / pivot_coeff) * column k.
-                    let factor = (p - c * mod_inverse(pivot_coeff, p) % p) % p;
-                    let sum = add_scaled_mod_p(&columns[j], &columns[k], factor, p);
+                    let factor =
+                        (modulus - c * mod_inverse(pivot_coeff, modulus) % modulus) % modulus;
+                    let sum = add_scaled_mod_p(&columns[j], &columns[k], factor, modulus);
                     columns[j] = sum;
                 }
                 None => {
@@ -100,9 +125,20 @@ pub fn rips_persistence_oracle_mod(
             }
         }
     }
+    OracleReduction {
+        columns,
+        pivots: pivot_of_row,
+    }
+}
 
+fn oracle_diagram(
+    simplices: &[Simplex],
+    columns: &[OracleColumn],
+    pivot_of_row: &[Option<usize>],
+    max_dim: usize,
+) -> Diagram {
     let mut diagram = Diagram::default();
-    for j in 0..m {
+    for j in 0..simplices.len() {
         if let Some(&(low, _)) = columns[j].last() {
             let birth = simplices[low].diam;
             let death = simplices[j].diam;

@@ -278,50 +278,63 @@ pub(crate) fn compute_sparse(
     h0_params.max_dim = 0;
     h0_params.factorization = GraphFactorization::Off;
     let mut diagram = solver::compute(matrix, &h0_params)?;
-
     let cyclic: Vec<&[usize]> = decomposition
         .blocks
         .iter()
         .filter(|block| block_is_cyclic(block, &decomposition.edges))
         .map(Vec::as_slice)
         .collect();
-    let solve = |block: &[usize], threads: usize| -> Result<Vec<Bar>> {
-        let local = block_matrix(block, &decomposition.edges)?;
-        let mut block_params = params.clone();
-        block_params.collapse_edges = false;
-        block_params.factorization = GraphFactorization::Off;
-        block_params.threshold = Some(threshold);
-        block_params.threads = threads;
-        let block_diagram = solver::compute(&local, &block_params)?;
-        Ok(block_diagram
-            .bars
-            .into_iter()
-            .filter(|bar| bar.dim > 0)
-            .collect())
-    };
-
-    let parts: Vec<Vec<Bar>> = if params.threads > 1 && cyclic.len() > 1 {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(params.threads)
-            .build()
-            .map_err(|error| Error::Io(format!("thread pool: {error}")))?;
-        pool.install(|| {
-            cyclic
-                .par_iter()
-                .map(|block| solve(block, 1))
-                .collect::<Result<Vec<_>>>()
-        })?
-    } else {
-        cyclic
-            .iter()
-            .map(|block| solve(block, params.threads))
-            .collect::<Result<Vec<_>>>()?
-    };
+    let parts = solve_cyclic_blocks(&cyclic, &decomposition.edges, params, threshold)?;
     for bars in parts {
         diagram.bars.extend(bars);
     }
     diagram.canonicalize();
     Ok(diagram)
+}
+
+fn solve_cyclic_blocks(
+    blocks: &[&[usize]],
+    edges: &[TerminalEdge],
+    params: &RipsParams,
+    threshold: f64,
+) -> Result<Vec<Vec<Bar>>> {
+    if params.threads > 1 && blocks.len() > 1 {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(params.threads)
+            .build()
+            .map_err(|error| Error::Io(format!("thread pool: {error}")))?;
+        return pool.install(|| {
+            blocks
+                .par_iter()
+                .map(|block| solve_block(block, edges, params, threshold, 1))
+                .collect::<Result<Vec<_>>>()
+        });
+    }
+    blocks
+        .iter()
+        .map(|block| solve_block(block, edges, params, threshold, params.threads))
+        .collect()
+}
+
+fn solve_block(
+    block: &[usize],
+    edges: &[TerminalEdge],
+    params: &RipsParams,
+    threshold: f64,
+    threads: usize,
+) -> Result<Vec<Bar>> {
+    let local = block_matrix(block, edges)?;
+    let mut block_params = params.clone();
+    block_params.collapse_edges = false;
+    block_params.factorization = GraphFactorization::Off;
+    block_params.threshold = Some(threshold);
+    block_params.threads = threads;
+    let block_diagram = solver::compute(&local, &block_params)?;
+    Ok(block_diagram
+        .bars
+        .into_iter()
+        .filter(|bar| bar.dim > 0)
+        .collect())
 }
 
 fn checked_threshold(threshold: Option<f64>) -> Result<f64> {
@@ -399,69 +412,117 @@ fn decompose(matrix: &SparseDistanceMatrix, threshold: f64) -> Decomposition {
 }
 
 fn edge_blocks(adjacency: &[Vec<(usize, usize)>], edges: &[TerminalEdge]) -> Vec<Vec<usize>> {
-    let n = adjacency.len();
-    let unseen = usize::MAX;
-    let mut discovered = vec![unseen; n];
-    let mut low = vec![0usize; n];
-    let mut next = vec![0usize; n];
-    let mut parent_edge = vec![unseen; n];
-    let mut time = 0usize;
-    let mut path = Vec::new();
-    let mut edge_stack = Vec::new();
-    let mut blocks = Vec::new();
+    BlockSearch::new(adjacency, edges).run()
+}
 
-    for root in 0..n {
-        if discovered[root] != unseen || adjacency[root].is_empty() {
-            continue;
+struct BlockSearch<'a> {
+    adjacency: &'a [Vec<(usize, usize)>],
+    edges: &'a [TerminalEdge],
+    discovered: Vec<usize>,
+    low: Vec<usize>,
+    next: Vec<usize>,
+    parent_edge: Vec<usize>,
+    time: usize,
+    path: Vec<usize>,
+    edge_stack: Vec<usize>,
+    blocks: Vec<Vec<usize>>,
+}
+
+impl<'a> BlockSearch<'a> {
+    fn new(adjacency: &'a [Vec<(usize, usize)>], edges: &'a [TerminalEdge]) -> Self {
+        let count = adjacency.len();
+        Self {
+            adjacency,
+            edges,
+            discovered: vec![usize::MAX; count],
+            low: vec![0; count],
+            next: vec![0; count],
+            parent_edge: vec![usize::MAX; count],
+            time: 0,
+            path: Vec::new(),
+            edge_stack: Vec::new(),
+            blocks: Vec::new(),
         }
-        discovered[root] = time;
-        low[root] = time;
-        time += 1;
-        path.push(root);
-        while let Some(&vertex) = path.last() {
-            if next[vertex] < adjacency[vertex].len() {
-                let (neighbor, edge) = adjacency[vertex][next[vertex]];
-                next[vertex] += 1;
-                if discovered[neighbor] == unseen {
-                    parent_edge[neighbor] = edge;
-                    edge_stack.push(edge);
-                    discovered[neighbor] = time;
-                    low[neighbor] = time;
-                    time += 1;
-                    path.push(neighbor);
-                } else if edge != parent_edge[vertex] && discovered[neighbor] < discovered[vertex] {
-                    low[vertex] = low[vertex].min(discovered[neighbor]);
-                    edge_stack.push(edge);
-                }
-                continue;
-            }
+    }
 
-            path.pop();
-            let edge = parent_edge[vertex];
-            if edge == unseen {
-                debug_assert!(edge_stack.is_empty());
-                continue;
+    fn run(mut self) -> Vec<Vec<usize>> {
+        for root in 0..self.adjacency.len() {
+            if self.discovered[root] == usize::MAX && !self.adjacency[root].is_empty() {
+                self.start_root(root);
+                self.walk_root();
             }
-            let parent = if edges[edge].u == vertex {
-                edges[edge].v
+        }
+        self.blocks
+    }
+
+    fn start_root(&mut self, root: usize) {
+        self.discovered[root] = self.time;
+        self.low[root] = self.time;
+        self.time += 1;
+        self.path.push(root);
+    }
+
+    fn walk_root(&mut self) {
+        while let Some(&vertex) = self.path.last() {
+            if let Some((neighbor, edge)) = self.next_neighbor(vertex) {
+                self.visit_edge(vertex, neighbor, edge);
             } else {
-                edges[edge].u
-            };
-            low[parent] = low[parent].min(low[vertex]);
-            if low[vertex] >= discovered[parent] {
-                let mut block = Vec::new();
-                loop {
-                    let item = edge_stack.pop().expect("tree edge is on the block stack");
-                    block.push(item);
-                    if item == edge {
-                        break;
-                    }
-                }
-                blocks.push(block);
+                self.finish_vertex(vertex);
             }
         }
     }
-    blocks
+
+    fn next_neighbor(&mut self, vertex: usize) -> Option<(usize, usize)> {
+        let neighbor = self.adjacency[vertex].get(self.next[vertex]).copied();
+        self.next[vertex] += usize::from(neighbor.is_some());
+        neighbor
+    }
+
+    fn visit_edge(&mut self, vertex: usize, neighbor: usize, edge: usize) {
+        if self.discovered[neighbor] == usize::MAX {
+            self.parent_edge[neighbor] = edge;
+            self.edge_stack.push(edge);
+            self.discovered[neighbor] = self.time;
+            self.low[neighbor] = self.time;
+            self.time += 1;
+            self.path.push(neighbor);
+        } else if edge != self.parent_edge[vertex]
+            && self.discovered[neighbor] < self.discovered[vertex]
+        {
+            self.low[vertex] = self.low[vertex].min(self.discovered[neighbor]);
+            self.edge_stack.push(edge);
+        }
+    }
+
+    fn finish_vertex(&mut self, vertex: usize) {
+        self.path.pop();
+        let edge = self.parent_edge[vertex];
+        if edge == usize::MAX {
+            debug_assert!(self.edge_stack.is_empty());
+            return;
+        }
+        let item = &self.edges[edge];
+        let parent = if item.u == vertex { item.v } else { item.u };
+        self.low[parent] = self.low[parent].min(self.low[vertex]);
+        if self.low[vertex] >= self.discovered[parent] {
+            let block = self.pop_block(edge);
+            self.blocks.push(block);
+        }
+    }
+
+    fn pop_block(&mut self, terminal_edge: usize) -> Vec<usize> {
+        let mut block = Vec::new();
+        loop {
+            let edge = self
+                .edge_stack
+                .pop()
+                .expect("tree edge is on the block stack");
+            block.push(edge);
+            if edge == terminal_edge {
+                return block;
+            }
+        }
+    }
 }
 
 fn block_is_cyclic(block: &[usize], edges: &[TerminalEdge]) -> bool {
@@ -586,66 +647,95 @@ mod tests {
     #[test]
     fn random_graphs_match_whole_reduction_and_keep_cliques_in_one_block() {
         let mut state = 0x82af_137c_d095_4e61u64;
-        let mut next = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
         for case in 0..80 {
-            let n = 5 + next() as usize % 10;
-            let mut triplets = Vec::new();
-            for u in 0..n {
-                for v in u + 1..n {
-                    if next() % 5 < 2 {
-                        triplets.push((u, v, (next() % 4) as f64));
-                    }
-                }
-            }
-            let matrix = SparseDistanceMatrix::from_triplets(n, &triplets).unwrap();
+            let matrix = random_graph(&mut state);
             for threshold in [1.0, 3.0] {
-                let decomposition = decompose(&matrix, threshold);
-                let mut owner = vec![usize::MAX; decomposition.edges.len()];
-                for (block, edge_ids) in decomposition.blocks.iter().enumerate() {
-                    for &edge in edge_ids {
-                        assert_eq!(owner[edge], usize::MAX, "case {case}: repeated edge");
-                        owner[edge] = block;
-                    }
-                }
-                assert!(owner.iter().all(|&block| block != usize::MAX));
-                for a in 0..n {
-                    for b in a + 1..n {
-                        for c in b + 1..n {
-                            let edge = |u: usize, v: usize| {
-                                decomposition
-                                    .edges
-                                    .iter()
-                                    .position(|item| item.u == u && item.v == v)
-                            };
-                            if let (Some(ab), Some(ac), Some(bc)) =
-                                (edge(a, b), edge(a, c), edge(b, c))
-                            {
-                                assert_eq!(owner[ab], owner[ac], "case {case}: triangle");
-                                assert_eq!(owner[ab], owner[bc], "case {case}: triangle");
-                            }
-                        }
-                    }
-                }
+                check_random_decomposition(&matrix, case, threshold);
+                check_random_persistence(&matrix, case, threshold);
+            }
+        }
+    }
 
-                for modulus in [2, 3] {
-                    let mut whole = RipsParams::new(2)
-                        .with_modulus(modulus)
-                        .with_threshold(threshold);
-                    whole.factorization = GraphFactorization::Off;
-                    let mut split = whole.clone();
-                    split.factorization = GraphFactorization::Force;
-                    assert_eq!(
-                        rips_persistence_sparse(&matrix, &whole).unwrap().bars,
-                        rips_persistence_sparse(&matrix, &split).unwrap().bars,
-                        "case {case}, threshold {threshold}, modulus {modulus}"
-                    );
+    fn random_graph(state: &mut u64) -> SparseDistanceMatrix {
+        let n = 5 + next_random(state) as usize % 10;
+        let mut triplets = Vec::new();
+        for u in 0..n {
+            for v in u + 1..n {
+                if next_random(state) % 5 < 2 {
+                    triplets.push((u, v, (next_random(state) % 4) as f64));
                 }
             }
+        }
+        SparseDistanceMatrix::from_triplets(n, &triplets).unwrap()
+    }
+
+    fn next_random(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    fn check_random_decomposition(matrix: &SparseDistanceMatrix, case: usize, threshold: f64) {
+        let decomposition = decompose(matrix, threshold);
+        let mut owner = vec![usize::MAX; decomposition.edges.len()];
+        for (block, edge_ids) in decomposition.blocks.iter().enumerate() {
+            for &edge in edge_ids {
+                assert_eq!(owner[edge], usize::MAX, "case {case}: repeated edge");
+                owner[edge] = block;
+            }
+        }
+        assert!(owner.iter().all(|&block| block != usize::MAX));
+        check_triangle_owners(matrix.len(), &decomposition, &owner, case);
+    }
+
+    fn check_triangle_owners(
+        vertices: usize,
+        decomposition: &Decomposition,
+        owner: &[usize],
+        case: usize,
+    ) {
+        for a in 0..vertices {
+            for b in a + 1..vertices {
+                for c in b + 1..vertices {
+                    check_triangle_owner(decomposition, owner, [a, b, c], case);
+                }
+            }
+        }
+    }
+
+    fn check_triangle_owner(
+        decomposition: &Decomposition,
+        owner: &[usize],
+        vertices: [usize; 3],
+        case: usize,
+    ) {
+        let edge = |u: usize, v: usize| {
+            decomposition
+                .edges
+                .iter()
+                .position(|item| item.u == u && item.v == v)
+        };
+        let [a, b, c] = vertices;
+        if let (Some(ab), Some(ac), Some(bc)) = (edge(a, b), edge(a, c), edge(b, c)) {
+            assert_eq!(owner[ab], owner[ac], "case {case}: triangle");
+            assert_eq!(owner[ab], owner[bc], "case {case}: triangle");
+        }
+    }
+
+    fn check_random_persistence(matrix: &SparseDistanceMatrix, case: usize, threshold: f64) {
+        for modulus in [2, 3] {
+            let mut whole = RipsParams::new(2)
+                .with_modulus(modulus)
+                .with_threshold(threshold);
+            whole.factorization = GraphFactorization::Off;
+            let mut split = whole.clone();
+            split.factorization = GraphFactorization::Force;
+            assert_eq!(
+                rips_persistence_sparse(matrix, &whole).unwrap().bars,
+                rips_persistence_sparse(matrix, &split).unwrap().bars,
+                "case {case}, threshold {threshold}, modulus {modulus}"
+            );
         }
     }
 }

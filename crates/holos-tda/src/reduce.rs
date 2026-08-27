@@ -48,6 +48,44 @@ pub(crate) struct RawH1Class {
     pub(crate) terms: Vec<RawH1Term>,
 }
 
+struct Dim0Walk {
+    union_find: UnionFind,
+    cycles: Vec<(Simplex, [usize; 2])>,
+    columns: Vec<Simplex>,
+}
+
+struct SerialReduction<'a> {
+    pivots: Pivots,
+    entries: Vec<Entry>,
+    offsets: Vec<usize>,
+    coboundary: BinaryHeap<HeapEntry>,
+    reduction: BinaryHeap<HeapEntry>,
+    cofacets: Vec<Entry>,
+    vertices: Vec<usize>,
+    cofacet_vertices: Vec<usize>,
+    pairs: PairScratch,
+    essential_terms: Vec<Entry>,
+    classes: Option<&'a mut Vec<RawH1Class>>,
+}
+
+impl<'a> SerialReduction<'a> {
+    fn new(column_count: usize, classes: Option<&'a mut Vec<RawH1Class>>) -> Self {
+        Self {
+            pivots: FxHashMap::with_capacity_and_hasher(column_count, FxBuildHasher),
+            entries: Vec::new(),
+            offsets: vec![0],
+            coboundary: BinaryHeap::new(),
+            reduction: BinaryHeap::new(),
+            cofacets: Vec::new(),
+            vertices: Vec::new(),
+            cofacet_vertices: Vec::new(),
+            pairs: PairScratch::default(),
+            essential_terms: Vec::new(),
+            classes,
+        }
+    }
+}
+
 /// Vertex and distance buffers for the apparent-pair kernels. One per
 /// worker: the kernels write here and nowhere else, so two workers never
 /// share a buffer.
@@ -372,43 +410,44 @@ impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
     /// because its result depends on the order. On one thread the test runs
     /// inside the walk. With workers it runs after the walk, on the pool.
     fn dim0_pairs(&self, edges: &[Simplex], diagram: &mut Diagram) -> Vec<Simplex> {
-        let mut sorted: Vec<u128> = edges.iter().map(|&e| edge_key(e)).collect();
-        // Unique (diameter, index) keys, so the unstable sort is deterministic
-        // and the parallel and serial orders agree.
+        let sorted = self.sorted_edge_keys(edges);
+        let cycle_bound = edges.len().saturating_sub(self.n.saturating_sub(1));
+        if let Some(adjacency) = &self.adjacency {
+            return self.dim0_pairs_by_rows(&sorted, adjacency, diagram);
+        }
+        let defer = self.workers(Region::Prefilter, cycle_bound) > 1;
+        let mut walk = self.walk_dim0_edges(&sorted, defer, diagram);
+        self.emit_essential_h0(&mut walk.union_find, diagram);
+        if defer {
+            walk.columns = self.dim0_columns(walk.cycles);
+        }
+        walk.columns.reverse();
+        walk.columns
+    }
+
+    fn sorted_edge_keys(&self, edges: &[Simplex]) -> Vec<u128> {
+        let mut sorted: Vec<_> = edges.iter().map(|&edge| edge_key(edge)).collect();
         match &self.pool {
             Some(pool) if self.workers(Region::Sort, sorted.len()) > 1 => {
                 pool.install(|| sorted.par_sort_unstable())
             }
             _ => sorted.sort_unstable(),
         }
-        // A deferred test decodes its edge a second time. Only workers pay
-        // that back, so the test runs inside the walk, on the vertices the
-        // walk already holds, whenever the deferred test would run serially.
-        // The walk has not counted the cycle edges yet. A spanning forest
-        // holds at most n-1 edges, so it finds at least `edges - (n - 1)`
-        // of them, and that bound sizes the deferred test.
-        let cycle_bound = edges.len().saturating_sub(self.n.saturating_sub(1));
-        if let Some(adjacency) = &self.adjacency {
-            return self.dim0_pairs_by_rows(&sorted, adjacency, diagram);
-        }
-        let defer = self.workers(Region::Prefilter, cycle_bound) > 1;
+        sorted
+    }
+
+    fn walk_dim0_edges(&self, sorted: &[u128], defer: bool, diagram: &mut Diagram) -> Dim0Walk {
         let mut uf = UnionFind::new(self.n);
         let mut cycles: Vec<(Simplex, [usize; 2])> = Vec::new();
         let mut columns = Vec::new();
         let mut verts = Vec::new();
         let mut pairs = PairScratch::default();
-        for &key in &sorted {
+        for &key in sorted {
             let e = edge_from_key(key);
             self.bt.unrank(e.index, 1, self.n, &mut verts);
             let (ru, rv) = (uf.find(verts[0]), uf.find(verts[1]));
             if ru != rv {
-                if e.diameter > 0.0 {
-                    diagram.bars.push(Bar {
-                        dim: 0,
-                        birth: 0.0,
-                        death: e.diameter,
-                    });
-                }
+                emit_dim0_pair(e, diagram);
                 uf.link(ru, rv);
             } else if self.max_dim > 0 {
                 if defer {
@@ -420,8 +459,16 @@ impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
                 }
             }
         }
-        for v in 0..self.n {
-            if uf.find(v) == v {
+        Dim0Walk {
+            union_find: uf,
+            cycles,
+            columns,
+        }
+    }
+
+    fn emit_essential_h0(&self, union_find: &mut UnionFind, diagram: &mut Diagram) {
+        for vertex in 0..self.n {
+            if union_find.find(vertex) == vertex {
                 diagram.bars.push(Bar {
                     dim: 0,
                     birth: 0.0,
@@ -429,11 +476,6 @@ impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
                 });
             }
         }
-        if defer {
-            columns = self.dim0_columns(cycles);
-        }
-        columns.reverse();
-        columns
     }
 
     /// The dim-0 walk with the apparent test on activation rows. The walk
@@ -473,92 +515,126 @@ impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
         let mut keep: Vec<u8> = Vec::new();
         let mut start = 0;
         while start < sorted.len() {
-            let mut end = (start + block).min(sorted.len());
-            while end < sorted.len() && sorted[end] >> 64 == sorted[end - 1] >> 64 {
-                end += 1;
-            }
-            ends.clear();
-            if workers > 1 {
-                // Decode the block's edges in parallel; the row writes stay
-                // serial, since two edges may share a word.
-                ends.resize(end - start, [0, 0]);
-                let chunk = ((end - start) / (workers * 4)).clamp(64, 4096);
-                self.install(|| {
-                    ends.par_chunks_mut(chunk)
-                        .zip(sorted[start..end].par_chunks(chunk))
-                        .for_each_init(Vec::new, |verts, (slots, part)| {
-                            for (slot, &key) in slots.iter_mut().zip(part) {
-                                self.bt.unrank(edge_from_key(key).index, 1, self.n, verts);
-                                *slot = [verts[0], verts[1]];
-                            }
-                        });
-                });
-            } else {
-                for &key in &sorted[start..end] {
-                    self.bt
-                        .unrank(edge_from_key(key).index, 1, self.n, &mut verts);
-                    ends.push([verts[0], verts[1]]);
-                }
-            }
+            let end = row_block_end(sorted, start, block);
+            self.decode_dim0_ends(&sorted[start..end], workers, &mut ends, &mut verts);
             for uv in &ends {
                 rows.set(uv[0], uv[1]);
             }
             cycles.clear();
-            for (&key, uv) in sorted[start..end].iter().zip(&ends) {
-                let e = edge_from_key(key);
-                let (ru, rv) = (uf.find(uv[0]), uf.find(uv[1]));
-                if ru != rv {
-                    if e.diameter > 0.0 {
-                        diagram.bars.push(Bar {
-                            dim: 0,
-                            birth: 0.0,
-                            death: e.diameter,
-                        });
-                    }
-                    uf.link(ru, rv);
-                } else if self.max_dim > 0 {
-                    if workers > 1 {
-                        cycles.push((e, *uv));
-                    } else if !rows.pairs_edge(adjacency, uv[0], uv[1], e.diameter) {
-                        columns.push(e);
-                    }
-                }
-            }
-            if !cycles.is_empty() {
-                keep.clear();
-                keep.resize(cycles.len(), 0);
-                let chunk = (cycles.len() / (workers * 4)).clamp(64, 4096);
-                let rows = &rows;
-                self.install(|| {
-                    keep.par_chunks_mut(chunk)
-                        .zip(cycles.par_chunks(chunk))
-                        .for_each(|(slots, part)| {
-                            for (slot, (e, uv)) in slots.iter_mut().zip(part) {
-                                *slot =
-                                    u8::from(!rows.pairs_edge(adjacency, uv[0], uv[1], e.diameter));
-                            }
-                        });
-                });
-                columns.extend(
-                    cycles
-                        .iter()
-                        .zip(&keep)
-                        .filter_map(|((e, _), &k)| (k != 0).then_some(*e)),
-                );
-            }
+            self.walk_dim0_row_block(
+                &sorted[start..end],
+                &ends,
+                workers,
+                adjacency,
+                &rows,
+                &mut uf,
+                diagram,
+                &mut cycles,
+                &mut columns,
+            );
+            self.filter_row_cycles(adjacency, &rows, workers, &cycles, &mut keep, &mut columns);
             start = end;
         }
-        for v in 0..self.n {
-            if uf.find(v) == v {
-                diagram.bars.push(Bar {
-                    dim: 0,
-                    birth: 0.0,
-                    death: f64::INFINITY,
-                });
-            }
-        }
+        self.emit_essential_h0(&mut uf, diagram);
         columns.reverse();
         columns
+    }
+
+    fn decode_dim0_ends(
+        &self,
+        keys: &[u128],
+        workers: usize,
+        ends: &mut Vec<[usize; 2]>,
+        vertices: &mut Vec<usize>,
+    ) {
+        ends.clear();
+        if workers > 1 {
+            ends.resize(keys.len(), [0, 0]);
+            let chunk = (keys.len() / (workers * 4)).clamp(64, 4096);
+            self.install(|| {
+                ends.par_chunks_mut(chunk)
+                    .zip(keys.par_chunks(chunk))
+                    .for_each_init(Vec::new, |vertices, (slots, part)| {
+                        for (slot, &key) in slots.iter_mut().zip(part) {
+                            self.bt
+                                .unrank(edge_from_key(key).index, 1, self.n, vertices);
+                            *slot = [vertices[0], vertices[1]];
+                        }
+                    });
+            });
+        } else {
+            for &key in keys {
+                self.bt
+                    .unrank(edge_from_key(key).index, 1, self.n, vertices);
+                ends.push([vertices[0], vertices[1]]);
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk_dim0_row_block(
+        &self,
+        keys: &[u128],
+        ends: &[[usize; 2]],
+        workers: usize,
+        adjacency: &crate::adjacency::Adjacency,
+        rows: &crate::adjacency::Rows,
+        union_find: &mut UnionFind,
+        diagram: &mut Diagram,
+        cycles: &mut Vec<(Simplex, [usize; 2])>,
+        columns: &mut Vec<Simplex>,
+    ) {
+        for (&key, vertices) in keys.iter().zip(ends) {
+            let edge = edge_from_key(key);
+            let roots = (union_find.find(vertices[0]), union_find.find(vertices[1]));
+            if roots.0 != roots.1 {
+                emit_dim0_pair(edge, diagram);
+                union_find.link(roots.0, roots.1);
+            } else if self.max_dim > 0 {
+                if workers > 1 {
+                    cycles.push((edge, *vertices));
+                } else if !rows.pairs_edge(adjacency, vertices[0], vertices[1], edge.diameter) {
+                    columns.push(edge);
+                }
+            }
+        }
+    }
+
+    fn filter_row_cycles(
+        &self,
+        adjacency: &crate::adjacency::Adjacency,
+        rows: &crate::adjacency::Rows,
+        workers: usize,
+        cycles: &[(Simplex, [usize; 2])],
+        keep: &mut Vec<u8>,
+        columns: &mut Vec<Simplex>,
+    ) {
+        if cycles.is_empty() {
+            return;
+        }
+        keep.clear();
+        keep.resize(cycles.len(), 0);
+        let chunk = (cycles.len() / (workers * 4)).clamp(64, 4096);
+        self.install(|| {
+            keep.par_chunks_mut(chunk)
+                .zip(cycles.par_chunks(chunk))
+                .for_each(|(slots, part)| {
+                    for (slot, (edge, vertices)) in slots.iter_mut().zip(part) {
+                        *slot = u8::from(!rows.pairs_edge(
+                            adjacency,
+                            vertices[0],
+                            vertices[1],
+                            edge.diameter,
+                        ));
+                    }
+                });
+        });
+        columns.extend(
+            cycles
+                .iter()
+                .zip(keep)
+                .filter_map(|((edge, _), keep)| (*keep != 0).then_some(*edge)),
+        );
     }
 
     /// Drop the cycle edges that a zero-apparent cofacet already pairs. The
@@ -743,119 +819,161 @@ impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
         dim: usize,
         prev_pivots: &Pivots,
         diagram: &mut Diagram,
-        mut classes: Option<&mut Vec<RawH1Class>>,
+        classes: Option<&mut Vec<RawH1Class>>,
     ) -> Pivots {
-        let mut pivot_map: Pivots =
-            FxHashMap::with_capacity_and_hasher(columns.len(), FxBuildHasher);
-        let mut v_entries: Vec<Entry> = Vec::new();
-        let mut v_offsets: Vec<usize> = vec![0];
-        let mut working_cob: BinaryHeap<HeapEntry> = BinaryHeap::new();
-        let mut working_red: BinaryHeap<HeapEntry> = BinaryHeap::new();
-        let mut cofacet_buf: Vec<Entry> = Vec::new();
-        let mut verts: Vec<usize> = Vec::new();
-        let mut cofacet_verts: Vec<usize> = Vec::new();
-        let mut pairs = PairScratch::default();
-        let mut essential_terms = Vec::new();
-
+        let mut state = SerialReduction::new(columns.len(), classes);
         for (col_pos, &column) in columns.iter().enumerate() {
-            working_cob.clear();
-            working_red.clear();
-            let mut pivot = self.init_coboundary(
+            self.reduce_serial_column(
+                columns,
                 column,
+                col_pos,
                 dim,
-                |index| pivot_map.contains_key(&index),
-                &mut working_cob,
-                &mut cofacet_buf,
-                &mut verts,
-                &mut cofacet_verts,
-                &mut pairs,
+                prev_pivots,
+                diagram,
+                &mut state,
             );
-            // A pivot beside an empty working column is the emergent
-            // shortcut. The gate proved two facts to take it: no column
-            // holds the pivot, and the pivot has no zero-apparent facet.
-            // This reducer writes `pivot_map` only when a column ends, so
-            // both still hold and the pair needs neither test again. A
-            // parallel worker shares the map and repeats them.
-            if let Some(p) = pivot {
-                if working_cob.is_empty() {
-                    debug_assert!(working_red.is_empty());
-                    self.emit_pair(column, self.ops.simplex(p), dim, diagram);
-                    if let Some(classes) = classes.as_deref_mut() {
-                        self.record_h1_class(column, Some(self.ops.simplex(p)), &[], classes);
-                    }
-                    pivot_map.insert(self.ops.index(p), (self.ops.coeff(p), col_pos));
-                    v_offsets.push(v_entries.len());
-                    continue;
-                }
-            }
-            loop {
-                match pivot {
-                    Some(p) => {
-                        let p_index = self.ops.index(p);
-                        if let Some(&(other_coeff, other_pos)) = pivot_map.get(&p_index) {
-                            let (lo, hi) = (v_offsets[other_pos], v_offsets[other_pos + 1]);
-                            self.fold_reducer(
-                                p,
-                                other_coeff,
-                                columns[other_pos],
-                                &v_entries[lo..hi],
-                                dim,
-                                &mut working_red,
-                                &mut working_cob,
-                                &mut verts,
-                            );
-                            pivot = self.get_pivot(&mut working_cob);
-                        } else if let Some(apparent) = self.reduce_apparent_facet(
-                            p,
-                            dim,
-                            &mut working_red,
-                            &mut working_cob,
-                            &mut verts,
-                            &mut pairs,
-                        ) {
-                            pivot = apparent;
-                        } else {
-                            self.emit_pair(column, self.ops.simplex(p), dim, diagram);
-                            pivot_map.insert(p_index, (self.ops.coeff(p), col_pos));
-                            let start = v_entries.len();
-                            self.drain_into(&mut working_red, &mut v_entries);
-                            if let Some(classes) = classes.as_deref_mut() {
-                                self.record_h1_class(
-                                    column,
-                                    Some(self.ops.simplex(p)),
-                                    &v_entries[start..],
-                                    classes,
-                                );
-                            }
-                            break;
-                        }
-                    }
-                    None => {
-                        // With clearing disabled, columns that were pivots of
-                        // the previous dimension reduce to zero here. They are
-                        // deaths, not essential classes.
-                        let is_prior_death =
-                            !self.params.use_clearing && prev_pivots.contains_key(&column.index);
-                        if !is_prior_death {
-                            let bar = Bar {
-                                dim,
-                                birth: column.diameter,
-                                death: f64::INFINITY,
-                            };
-                            diagram.bars.push(bar);
-                            if let Some(classes) = classes.as_deref_mut() {
-                                essential_terms.clear();
-                                self.drain_into(&mut working_red, &mut essential_terms);
-                                self.record_h1_class(column, None, &essential_terms, classes);
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-            v_offsets.push(v_entries.len());
         }
-        pivot_map
+        state.pivots
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reduce_serial_column(
+        &self,
+        columns: &[Simplex],
+        column: Simplex,
+        col_pos: usize,
+        dim: usize,
+        prev_pivots: &Pivots,
+        diagram: &mut Diagram,
+        state: &mut SerialReduction<'_>,
+    ) {
+        state.coboundary.clear();
+        state.reduction.clear();
+        let mut pivot = self.init_coboundary(
+            column,
+            dim,
+            |index| state.pivots.contains_key(&index),
+            &mut state.coboundary,
+            &mut state.cofacets,
+            &mut state.vertices,
+            &mut state.cofacet_vertices,
+            &mut state.pairs,
+        );
+        if self.record_emergent(column, pivot, col_pos, dim, diagram, state) {
+            return;
+        }
+        while let Some(entry) = pivot {
+            let index = self.ops.index(entry);
+            if let Some(&(coefficient, position)) = state.pivots.get(&index) {
+                let span = state.offsets[position]..state.offsets[position + 1];
+                self.fold_reducer(
+                    entry,
+                    coefficient,
+                    columns[position],
+                    &state.entries[span],
+                    dim,
+                    &mut state.reduction,
+                    &mut state.coboundary,
+                    &mut state.vertices,
+                );
+                pivot = self.get_pivot(&mut state.coboundary);
+                continue;
+            }
+            if let Some(apparent) = self.reduce_apparent_facet(
+                entry,
+                dim,
+                &mut state.reduction,
+                &mut state.coboundary,
+                &mut state.vertices,
+                &mut state.pairs,
+            ) {
+                pivot = apparent;
+                continue;
+            }
+            self.record_paired_column(column, entry, col_pos, dim, diagram, state);
+            state.offsets.push(state.entries.len());
+            return;
+        }
+        self.record_zero_column(column, dim, prev_pivots, diagram, state);
+        state.offsets.push(state.entries.len());
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_emergent(
+        &self,
+        column: Simplex,
+        pivot: Option<Entry>,
+        col_pos: usize,
+        dim: usize,
+        diagram: &mut Diagram,
+        state: &mut SerialReduction<'_>,
+    ) -> bool {
+        let Some(entry) = pivot else {
+            return false;
+        };
+        if !state.coboundary.is_empty() {
+            return false;
+        }
+        debug_assert!(state.reduction.is_empty());
+        self.emit_pair(column, self.ops.simplex(entry), dim, diagram);
+        if let Some(classes) = state.classes.as_deref_mut() {
+            self.record_h1_class(column, Some(self.ops.simplex(entry)), &[], classes);
+        }
+        state
+            .pivots
+            .insert(self.ops.index(entry), (self.ops.coeff(entry), col_pos));
+        state.offsets.push(state.entries.len());
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_paired_column(
+        &self,
+        column: Simplex,
+        pivot: Entry,
+        col_pos: usize,
+        dim: usize,
+        diagram: &mut Diagram,
+        state: &mut SerialReduction<'_>,
+    ) {
+        self.emit_pair(column, self.ops.simplex(pivot), dim, diagram);
+        state
+            .pivots
+            .insert(self.ops.index(pivot), (self.ops.coeff(pivot), col_pos));
+        let start = state.entries.len();
+        self.drain_into(&mut state.reduction, &mut state.entries);
+        if let Some(classes) = state.classes.as_deref_mut() {
+            self.record_h1_class(
+                column,
+                Some(self.ops.simplex(pivot)),
+                &state.entries[start..],
+                classes,
+            );
+        }
+    }
+
+    fn record_zero_column(
+        &self,
+        column: Simplex,
+        dim: usize,
+        prev_pivots: &Pivots,
+        diagram: &mut Diagram,
+        state: &mut SerialReduction<'_>,
+    ) {
+        let is_prior_death = !self.params.use_clearing && prev_pivots.contains_key(&column.index);
+        if is_prior_death {
+            return;
+        }
+        diagram.bars.push(Bar {
+            dim,
+            birth: column.diameter,
+            death: f64::INFINITY,
+        });
+        if let Some(classes) = state.classes.as_deref_mut() {
+            state.essential_terms.clear();
+            self.drain_into(&mut state.reduction, &mut state.essential_terms);
+            self.record_h1_class(column, None, &state.essential_terms, classes);
+        }
     }
 
     fn record_h1_class(
@@ -1473,6 +1591,24 @@ fn edge_from_key(key: u128) -> Simplex {
     Simplex {
         diameter: f64::from_bits((key >> 64) as u64),
         index: !(key as u64),
+    }
+}
+
+fn row_block_end(sorted: &[u128], start: usize, block: usize) -> usize {
+    let mut end = (start + block).min(sorted.len());
+    while end < sorted.len() && sorted[end] >> 64 == sorted[end - 1] >> 64 {
+        end += 1;
+    }
+    end
+}
+
+fn emit_dim0_pair(edge: Simplex, diagram: &mut Diagram) {
+    if edge.diameter > 0.0 {
+        diagram.bars.push(Bar {
+            dim: 0,
+            birth: 0.0,
+            death: edge.diameter,
+        });
     }
 }
 
