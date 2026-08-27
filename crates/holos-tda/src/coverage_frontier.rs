@@ -221,12 +221,12 @@ fn build_frontier(
     else {
         return Ok(None);
     };
-    let smallest_relevant_limit = match maximum.status {
-        SearchStatus::Optimal => insert_result(&mut entries, &component, maximum)?,
-        SearchStatus::Infeasible => {
+    let smallest_relevant_limit = match accept_maximum(&mut entries, &component, maximum)? {
+        MaximumResult::Feasible(limit) => limit,
+        MaximumResult::Infeasible => {
             return Ok(Some(CoverageComponentFrontier { component, entries }));
         }
-        SearchStatus::Incomplete => return Ok(None),
+        MaximumResult::Incomplete => return Ok(None),
     };
     for local_limit in 0..smallest_relevant_limit {
         let Some(result) = search_component(
@@ -241,15 +241,46 @@ fn build_frontier(
         else {
             return Ok(None);
         };
-        match result.status {
-            SearchStatus::Optimal => {
-                insert_result(&mut entries, &component, result)?;
-            }
-            SearchStatus::Infeasible => {}
-            SearchStatus::Incomplete => return Ok(None),
+        if !accept_frontier_result(&mut entries, &component, result)? {
+            return Ok(None);
         }
     }
     Ok(Some(CoverageComponentFrontier { component, entries }))
+}
+
+enum MaximumResult {
+    Feasible(usize),
+    Infeasible,
+    Incomplete,
+}
+
+fn accept_maximum(
+    entries: &mut Vec<CoverageFrontierEntry>,
+    component: &CoverageComponent,
+    result: SearchResult,
+) -> Result<MaximumResult> {
+    match result.status {
+        SearchStatus::Optimal => Ok(MaximumResult::Feasible(insert_result(
+            entries, component, result,
+        )?)),
+        SearchStatus::Infeasible => Ok(MaximumResult::Infeasible),
+        SearchStatus::Incomplete => Ok(MaximumResult::Incomplete),
+    }
+}
+
+fn accept_frontier_result(
+    entries: &mut Vec<CoverageFrontierEntry>,
+    component: &CoverageComponent,
+    result: SearchResult,
+) -> Result<bool> {
+    match result.status {
+        SearchStatus::Optimal => {
+            insert_result(entries, component, result)?;
+            Ok(true)
+        }
+        SearchStatus::Infeasible => Ok(true),
+        SearchStatus::Incomplete => Ok(false),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
