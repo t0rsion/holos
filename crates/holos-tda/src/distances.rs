@@ -291,107 +291,125 @@ pub struct SparseDistanceMatrix {
     max_distance: f64,
 }
 
+fn sparse_degrees(n: usize, triplets: &[(usize, usize, f64)]) -> Result<Vec<usize>> {
+    if n > u32::MAX as usize {
+        return Err(Error::InvalidInput(format!(
+            "sparse matrix holds at most {} points, got {n}",
+            u32::MAX
+        )));
+    }
+    let mut degree = vec![0usize; n];
+    for (idx, &(i, j, d)) in triplets.iter().enumerate() {
+        if i >= n || j >= n {
+            return Err(Error::InvalidInput(format!(
+                "triplet {idx}: vertex out of range ({i}, {j}) for n = {n}"
+            )));
+        }
+        if i == j {
+            return Err(Error::InvalidInput(format!(
+                "triplet {idx}: self-distance for vertex {i}"
+            )));
+        }
+        if !d.is_finite() || d < 0.0 {
+            return Err(Error::InvalidDistance(format!(
+                "triplet {idx}: distance must be finite and non-negative, got {d}"
+            )));
+        }
+        degree[i] += 1;
+        degree[j] += 1;
+    }
+    Ok(degree)
+}
+
+fn sparse_offsets(degree: &[usize]) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(degree.len() + 1);
+    let mut total = 0;
+    for &value in degree {
+        offsets.push(total);
+        total += value;
+    }
+    offsets.push(total);
+    offsets
+}
+
+fn sparse_entries(offsets: &[usize], triplets: &[(usize, usize, f64)]) -> (Vec<u32>, Vec<f64>) {
+    let mut indices = vec![0u32; *offsets.last().unwrap_or(&0)];
+    let mut values = vec![0.0f64; indices.len()];
+    let mut cursor = offsets[..offsets.len() - 1].to_vec();
+    for &(i, j, d) in triplets {
+        let d = if d == 0.0 { 0.0 } else { d };
+        indices[cursor[i]] = j as u32;
+        values[cursor[i]] = d;
+        cursor[i] += 1;
+        indices[cursor[j]] = i as u32;
+        values[cursor[j]] = d;
+        cursor[j] += 1;
+    }
+    (indices, values)
+}
+
+fn check_neighbor_distances(vertex: usize, list: &[(u32, f64)]) -> Result<()> {
+    for pair in list.windows(2) {
+        if pair[0].0 == pair[1].0 && pair[0].1 != pair[1].1 {
+            return Err(Error::InvalidInput(format!(
+                "conflicting distances for pair ({vertex}, {}): {} vs {}",
+                pair[0].0, pair[0].1, pair[1].1
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn compact_sparse_entries(
+    offsets: &mut [usize],
+    degree: &[usize],
+    indices: &mut Vec<u32>,
+    values: &mut Vec<f64>,
+) -> Result<()> {
+    let mut list: Vec<(u32, f64)> = Vec::with_capacity(degree.iter().copied().max().unwrap_or(0));
+    let mut write = 0;
+    for vertex in 0..degree.len() {
+        let start = offsets[vertex];
+        let end = offsets[vertex + 1];
+        offsets[vertex] = write;
+        if indices[start..end].is_sorted_by(|a, b| a < b) {
+            indices.copy_within(start..end, write);
+            values.copy_within(start..end, write);
+            write += end - start;
+            continue;
+        }
+        list.clear();
+        list.extend(
+            indices[start..end]
+                .iter()
+                .zip(&values[start..end])
+                .map(|(&neighbor, &distance)| (neighbor, distance)),
+        );
+        list.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        check_neighbor_distances(vertex, &list)?;
+        list.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+        for &(neighbor, distance) in &list {
+            indices[write] = neighbor;
+            values[write] = distance;
+            write += 1;
+        }
+    }
+    offsets[degree.len()] = write;
+    indices.truncate(write);
+    values.truncate(write);
+    Ok(())
+}
+
 impl SparseDistanceMatrix {
     /// Build from `(i, j, d)` triplets over `n` points. A repeated unordered
     /// pair must carry an identical distance. Entries must be finite and
     /// non-negative. An omitted pair is absent. `n` must be at or below
     /// `u32::MAX`.
     pub fn from_triplets(n: usize, triplets: &[(usize, usize, f64)]) -> Result<Self> {
-        if n > u32::MAX as usize {
-            return Err(Error::InvalidInput(format!(
-                "sparse matrix holds at most {} points, got {n}",
-                u32::MAX
-            )));
-        }
-        // A repeated pair is counted twice, so the offsets are an upper
-        // bound and the dedup below closes the gaps.
-        let mut degree = vec![0usize; n];
-        for (idx, &(i, j, d)) in triplets.iter().enumerate() {
-            if i >= n || j >= n {
-                return Err(Error::InvalidInput(format!(
-                    "triplet {idx}: vertex out of range ({i}, {j}) for n = {n}"
-                )));
-            }
-            if i == j {
-                return Err(Error::InvalidInput(format!(
-                    "triplet {idx}: self-distance for vertex {i}"
-                )));
-            }
-            if !d.is_finite() || d < 0.0 {
-                return Err(Error::InvalidDistance(format!(
-                    "triplet {idx}: distance must be finite and non-negative, got {d}"
-                )));
-            }
-            degree[i] += 1;
-            degree[j] += 1;
-        }
-        let mut offsets = vec![0usize; n + 1];
-        let mut total = 0usize;
-        for (v, &deg) in degree.iter().enumerate() {
-            offsets[v] = total;
-            total += deg;
-        }
-        offsets[n] = total;
-
-        let mut indices = vec![0u32; total];
-        let mut values = vec![0.0f64; total];
-        let mut cursor = offsets[..n].to_vec();
-        for &(i, j, d) in triplets {
-            let d = if d == 0.0 { 0.0 } else { d };
-            indices[cursor[i]] = j as u32;
-            values[cursor[i]] = d;
-            cursor[i] += 1;
-            indices[cursor[j]] = i as u32;
-            values[cursor[j]] = d;
-            cursor[j] += 1;
-        }
-
-        // Sort and dedup one list at a time. The write position never
-        // passes the read position, because a list only shrinks, so the
-        // block compacts in place. A list that already ascends with no
-        // repeat skips the buffer: triplets in row-major order, which is
-        // what the sparse reader and the collapse write, land that way.
-        let widest = degree.iter().copied().max().unwrap_or(0);
-        let mut list: Vec<(u32, f64)> = Vec::with_capacity(widest);
-        let mut write = 0usize;
-        for v in 0..n {
-            let (start, end) = (offsets[v], offsets[v + 1]);
-            offsets[v] = write;
-            if indices[start..end].is_sorted_by(|a, b| a < b) {
-                if start != write {
-                    indices.copy_within(start..end, write);
-                    values.copy_within(start..end, write);
-                }
-                write += end - start;
-                continue;
-            }
-            list.clear();
-            list.extend(
-                indices[start..end]
-                    .iter()
-                    .zip(&values[start..end])
-                    .map(|(&w, &d)| (w, d)),
-            );
-            list.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-            for w in list.windows(2) {
-                if w[0].0 == w[1].0 && w[0].1 != w[1].1 {
-                    return Err(Error::InvalidInput(format!(
-                        "conflicting distances for pair ({v}, {}): {} vs {}",
-                        w[0].0, w[0].1, w[1].1
-                    )));
-                }
-            }
-            list.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
-            for &(w, d) in &list {
-                indices[write] = w;
-                values[write] = d;
-                write += 1;
-            }
-        }
-        offsets[n] = write;
-        indices.truncate(write);
-        values.truncate(write);
-
+        let degree = sparse_degrees(n, triplets)?;
+        let mut offsets = sparse_offsets(&degree);
+        let (mut indices, mut values) = sparse_entries(&offsets, triplets);
+        compact_sparse_entries(&mut offsets, &degree, &mut indices, &mut values)?;
         let max_distance = triplets.iter().fold(0.0f64, |m, &(_, _, d)| m.max(d));
         Ok(Self {
             n,
@@ -428,6 +446,66 @@ impl SparseDistanceMatrix {
     #[inline]
     fn degree(&self, v: usize) -> usize {
         self.offsets[v + 1] - self.offsets[v]
+    }
+
+    fn seek_neighbor<const BOUNDED: bool>(
+        &self,
+        cursor: &mut (usize, usize),
+        vertex: u32,
+        bound: f64,
+    ) -> NeighborSeek {
+        loop {
+            if cursor.1 == cursor.0 {
+                return NeighborSeek::Exhausted;
+            }
+            counters::note_candidate();
+            let at = cursor.1 - 1;
+            let candidate = self.indices[at];
+            if candidate > vertex {
+                cursor.1 = at;
+                continue;
+            }
+            if candidate < vertex {
+                return NeighborSeek::Missing;
+            }
+            cursor.1 = at;
+            let distance = self.values[at];
+            if BOUNDED && distance > bound {
+                return NeighborSeek::Missing;
+            }
+            return NeighborSeek::Present(distance);
+        }
+    }
+
+    fn next_common_neighbor<const BOUNDED: bool>(
+        &self,
+        cursor: &mut [(usize, usize)],
+        floor: usize,
+        simplex_diameter: f64,
+        bound: f64,
+    ) -> Option<(u32, f64)> {
+        'candidate: loop {
+            if cursor[0].1 == floor {
+                return None;
+            }
+            cursor[0].1 -= 1;
+            counters::note_candidate();
+            let at = cursor[0].1;
+            let vertex = self.indices[at];
+            let distance = self.values[at];
+            if BOUNDED && distance > bound {
+                continue;
+            }
+            let mut diameter = simplex_diameter.max(distance);
+            for slot in &mut cursor[1..] {
+                match self.seek_neighbor::<BOUNDED>(slot, vertex, bound) {
+                    NeighborSeek::Exhausted => return None,
+                    NeighborSeek::Missing => continue 'candidate,
+                    NeighborSeek::Present(value) => diameter = diameter.max(value),
+                }
+            }
+            return Some((vertex, diameter));
+        }
     }
 
     /// Distance between `i` and `j`; +inf when the pair is not listed.
@@ -901,7 +979,6 @@ impl Distances for SparseDistanceMatrix {
         );
         let width = verts.len();
         let indices = &self.indices[..];
-        let values = &self.values[..];
         // Where each neighbor list starts, and one past the entry it has
         // reached walking downward. The first simplex vertex drives the
         // merge; the other lists follow it.
@@ -933,48 +1010,9 @@ impl Distances for SparseDistanceMatrix {
         let mut idx_below = simplex.index;
         let mut idx_above = 0u64;
         let mut k = dim + 1;
-        'candidate: loop {
-            if cursor[0].1 == floor {
-                return None;
-            }
-            cursor[0].1 -= 1;
-            counters::note_candidate();
-            let at = cursor[0].1;
-            let w = indices[at];
-            let d0 = values[at];
-            if BOUNDED && d0 > bound {
-                continue 'candidate;
-            }
-            // The fold takes the vertices in ascending position, as the
-            // dense default does, so the diameter matches bit for bit.
-            let mut diameter = simplex.diameter.max(d0);
-            for slot in cursor[1..].iter_mut() {
-                let lo = slot.0;
-                loop {
-                    if slot.1 == lo {
-                        // This list holds nothing at or below `w`, and
-                        // every later candidate is smaller.
-                        return None;
-                    }
-                    counters::note_candidate();
-                    let at = slot.1 - 1;
-                    let x = indices[at];
-                    if x > w {
-                        slot.1 = at;
-                        continue;
-                    }
-                    if x < w {
-                        continue 'candidate;
-                    }
-                    slot.1 = at;
-                    if BOUNDED && values[at] > bound {
-                        continue 'candidate;
-                    }
-                    diameter = diameter.max(values[at]);
-                    break;
-                }
-            }
-
+        while let Some((w, diameter)) =
+            self.next_common_neighbor::<BOUNDED>(cursor, floor, simplex.diameter, bound)
+        {
             let w = w as usize;
             while k >= 1 && verts[k - 1] > w {
                 idx_below -= bt.get(verts[k - 1], k);
@@ -994,7 +1032,14 @@ impl Distances for SparseDistanceMatrix {
                 return Some(t);
             }
         }
+        None
     }
+}
+
+enum NeighborSeek {
+    Exhausted,
+    Missing,
+    Present(f64),
 }
 
 /// The sparse cofacet enumerator of 0.5.0, kept verbatim as the reference
