@@ -166,26 +166,8 @@ impl ZigzagModule {
         maps: Vec<ZigzagMap>,
         limits: ZigzagLimits,
     ) -> Result<Self> {
-        if !is_prime(modulus as u64) || u64::from(modulus) >= MODULUS_LIMIT {
-            return Err(Error::InvalidInput(
-                "zigzag modulus must be a supported prime".into(),
-            ));
-        }
-        if dimensions.is_empty() || dimensions.len() > limits.max_nodes {
-            return Err(Error::InvalidInput(format!(
-                "zigzag node count must be in 1..={}",
-                limits.max_nodes
-            )));
-        }
-        if maps.len() + 1 != dimensions.len() {
-            return Err(Error::InvalidInput(
-                "zigzag requires one map between each adjacent node".into(),
-            ));
-        }
-        let total_dimension = dimensions.iter().try_fold(0usize, |sum, value| {
-            sum.checked_add(*value)
-                .ok_or_else(|| Error::InvalidInput("zigzag total dimension overflows".into()))
-        })?;
+        validate_module_shape(modulus, &dimensions, &maps, limits)?;
+        let total_dimension = total_dimension(&dimensions)?;
         if total_dimension > limits.max_total_dimension {
             return Err(Error::InvalidInput(format!(
                 "zigzag total dimension exceeds the limit {}",
@@ -194,31 +176,9 @@ impl ZigzagModule {
         }
         let mut terms = 0usize;
         for (position, map) in maps.iter().enumerate() {
-            let (source, target) = map_shape(&dimensions, position, map.direction);
-            if map.columns.len() != source {
-                return Err(Error::InvalidInput(format!(
-                    "zigzag map {position} has {} columns but its source dimension is {source}",
-                    map.columns.len()
-                )));
-            }
-            for column in &map.columns {
-                let mut previous = None;
-                for term in column {
-                    if term.target >= target
-                        || term.coefficient == 0
-                        || term.coefficient >= modulus
-                        || previous.is_some_and(|value| value >= term.target)
-                    {
-                        return Err(Error::InvalidInput(format!(
-                            "zigzag map {position} has a noncanonical term"
-                        )));
-                    }
-                    previous = Some(term.target);
-                    terms = terms.checked_add(1).ok_or_else(|| {
-                        Error::InvalidInput("zigzag map term count overflows".into())
-                    })?;
-                }
-            }
+            terms = terms
+                .checked_add(validate_map(position, map, &dimensions, modulus)?)
+                .ok_or_else(|| Error::InvalidInput("zigzag map term count overflows".into()))?;
         }
         if terms > limits.max_map_terms {
             return Err(Error::InvalidInput(format!(
@@ -258,66 +218,9 @@ impl ZigzagModule {
 
     /// Decompose this type-A representation into interval summands.
     pub fn decompose(&self) -> Result<ZigzagBarcode> {
-        let count = self.dimensions.len();
-        let mut generalized_ranks = vec![0usize; count * count];
-        let mut work = 0usize;
-        for start in (0..count).rev() {
-            for end in start..count {
-                let ambient = self.dimensions[start..=end].iter().sum::<usize>();
-                let arrow_work = (start..end).try_fold(0usize, |sum, position| {
-                    let (source, target) =
-                        map_shape(&self.dimensions, position, self.maps[position].direction);
-                    sum.checked_add(source)
-                        .and_then(|value| value.checked_add(target))
-                        .ok_or_else(|| Error::InvalidInput("zigzag rank work overflows".into()))
-                })?;
-                work = work
-                    .checked_add(ambient)
-                    .and_then(|value| value.checked_add(arrow_work))
-                    .ok_or_else(|| Error::InvalidInput("zigzag rank work overflows".into()))?;
-                if work > self.limits.max_rank_work {
-                    return Err(Error::InvalidInput(format!(
-                        "zigzag generalized-rank work exceeds the limit {}",
-                        self.limits.max_rank_work
-                    )));
-                }
-                generalized_ranks[start * count + end] = generalized_rank(self, start, end)?;
-            }
-        }
-        let mut intervals = Vec::new();
-        for start in 0..count {
-            for end in start..count {
-                let rank = |left: usize, right: usize| -> i128 {
-                    generalized_ranks[left * count + right] as i128
-                };
-                let mut multiplicity = rank(start, end);
-                if start > 0 {
-                    multiplicity -= rank(start - 1, end);
-                }
-                if end + 1 < count {
-                    multiplicity -= rank(start, end + 1);
-                }
-                if start > 0 && end + 1 < count {
-                    multiplicity += rank(start - 1, end + 1);
-                }
-                if multiplicity < 0 {
-                    return Err(Error::InvalidInput(
-                        "zigzag generalized ranks violate interval decomposability".into(),
-                    ));
-                }
-                if multiplicity > 0 {
-                    let multiplicity = usize::try_from(multiplicity).map_err(|_| {
-                        Error::InvalidInput("zigzag interval multiplicity overflows".into())
-                    })?;
-                    intervals.push(ZigzagInterval {
-                        id: interval_id(self.id, start, end),
-                        start,
-                        end,
-                        multiplicity,
-                    });
-                }
-            }
-        }
+        let generalized_ranks = self.compute_generalized_ranks()?;
+        let intervals =
+            interval_multiplicities(self.id, &generalized_ranks, self.dimensions.len())?;
         Ok(ZigzagBarcode {
             module: self.id,
             dimensions: self.dimensions.clone(),
@@ -325,6 +228,172 @@ impl ZigzagModule {
             intervals,
         })
     }
+
+    fn compute_generalized_ranks(&self) -> Result<Vec<usize>> {
+        let count = self.dimensions.len();
+        let mut ranks = vec![0usize; count * count];
+        let mut work = 0usize;
+        for start in (0..count).rev() {
+            for end in start..count {
+                work = work
+                    .checked_add(self.rank_work(start, end)?)
+                    .ok_or_else(rank_work_overflow)?;
+                if work > self.limits.max_rank_work {
+                    return Err(Error::InvalidInput(format!(
+                        "zigzag generalized-rank work exceeds the limit {}",
+                        self.limits.max_rank_work
+                    )));
+                }
+                ranks[start * count + end] = generalized_rank(self, start, end)?;
+            }
+        }
+        Ok(ranks)
+    }
+
+    fn rank_work(&self, start: usize, end: usize) -> Result<usize> {
+        let ambient = self.dimensions[start..=end].iter().sum::<usize>();
+        let arrows = (start..end).try_fold(0usize, |sum, position| {
+            let (source, target) =
+                map_shape(&self.dimensions, position, self.maps[position].direction);
+            sum.checked_add(source)
+                .and_then(|value| value.checked_add(target))
+                .ok_or_else(rank_work_overflow)
+        })?;
+        ambient.checked_add(arrows).ok_or_else(rank_work_overflow)
+    }
+}
+
+fn validate_module_shape(
+    modulus: u32,
+    dimensions: &[usize],
+    maps: &[ZigzagMap],
+    limits: ZigzagLimits,
+) -> Result<()> {
+    if !is_prime(modulus as u64) || u64::from(modulus) >= MODULUS_LIMIT {
+        return Err(Error::InvalidInput(
+            "zigzag modulus must be a supported prime".into(),
+        ));
+    }
+    if dimensions.is_empty() || dimensions.len() > limits.max_nodes {
+        return Err(Error::InvalidInput(format!(
+            "zigzag node count must be in 1..={}",
+            limits.max_nodes
+        )));
+    }
+    if maps.len() + 1 != dimensions.len() {
+        return Err(Error::InvalidInput(
+            "zigzag requires one map between each adjacent node".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn total_dimension(dimensions: &[usize]) -> Result<usize> {
+    dimensions.iter().try_fold(0usize, |sum, value| {
+        sum.checked_add(*value)
+            .ok_or_else(|| Error::InvalidInput("zigzag total dimension overflows".into()))
+    })
+}
+
+fn validate_map(
+    position: usize,
+    map: &ZigzagMap,
+    dimensions: &[usize],
+    modulus: u32,
+) -> Result<usize> {
+    let (source, target) = map_shape(dimensions, position, map.direction);
+    if map.columns.len() != source {
+        return Err(Error::InvalidInput(format!(
+            "zigzag map {position} has {} columns but its source dimension is {source}",
+            map.columns.len()
+        )));
+    }
+    let mut terms = 0usize;
+    for column in &map.columns {
+        validate_column(position, column, target, modulus)?;
+        terms = terms
+            .checked_add(column.len())
+            .ok_or_else(|| Error::InvalidInput("zigzag map term count overflows".into()))?;
+    }
+    Ok(terms)
+}
+
+fn validate_column(
+    position: usize,
+    column: &[ZigzagTerm],
+    target: usize,
+    modulus: u32,
+) -> Result<()> {
+    let mut previous = None;
+    for term in column {
+        if term.target >= target
+            || term.coefficient == 0
+            || term.coefficient >= modulus
+            || previous.is_some_and(|value| value >= term.target)
+        {
+            return Err(Error::InvalidInput(format!(
+                "zigzag map {position} has a noncanonical term"
+            )));
+        }
+        previous = Some(term.target);
+    }
+    Ok(())
+}
+
+fn rank_work_overflow() -> Error {
+    Error::InvalidInput("zigzag rank work overflows".into())
+}
+
+fn interval_multiplicities(
+    module: ZigzagModuleId,
+    ranks: &[usize],
+    count: usize,
+) -> Result<Vec<ZigzagInterval>> {
+    let mut intervals = Vec::new();
+    for start in 0..count {
+        for end in start..count {
+            if let Some(interval) = interval_multiplicity(module, ranks, count, start, end)? {
+                intervals.push(interval);
+            }
+        }
+    }
+    Ok(intervals)
+}
+
+fn interval_multiplicity(
+    module: ZigzagModuleId,
+    ranks: &[usize],
+    count: usize,
+    start: usize,
+    end: usize,
+) -> Result<Option<ZigzagInterval>> {
+    let rank = |left: usize, right: usize| -> i128 { ranks[left * count + right] as i128 };
+    let mut multiplicity = rank(start, end);
+    if start > 0 {
+        multiplicity -= rank(start - 1, end);
+    }
+    if end + 1 < count {
+        multiplicity -= rank(start, end + 1);
+    }
+    if start > 0 && end + 1 < count {
+        multiplicity += rank(start - 1, end + 1);
+    }
+    if multiplicity < 0 {
+        return Err(Error::InvalidInput(
+            "zigzag generalized ranks violate interval decomposability".into(),
+        ));
+    }
+    if multiplicity == 0 {
+        return Ok(None);
+    }
+    let multiplicity = usize::try_from(multiplicity)
+        .map_err(|_| Error::InvalidInput("zigzag interval multiplicity overflows".into()))?;
+    Ok(Some(ZigzagInterval {
+        id: interval_id(module, start, end),
+        start,
+        end,
+        multiplicity,
+    }))
 }
 
 fn map_shape(dimensions: &[usize], position: usize, direction: ZigzagDirection) -> (usize, usize) {
@@ -339,61 +408,124 @@ fn generalized_rank(module: &ZigzagModule, start: usize, end: usize) -> Result<u
         return Ok(module.dimensions[start]);
     }
     let modulus = module.modulus as u64;
+    let offsets = node_offsets(&module.dimensions, start, end);
+    let ambient = offsets.last().copied().unwrap_or(0) + module.dimensions[end];
+    let (mut relations, equations) = compatibility_system(module, start, end, &offsets);
+    let relation_rank = rank(relations.clone(), modulus);
+    let limit = nullspace(equations, ambient, modulus);
+    relations.extend(first_node_images(limit, module.dimensions[start]));
+    Ok(rank(relations, modulus) - relation_rank)
+}
+
+fn node_offsets(dimensions: &[usize], start: usize, end: usize) -> Vec<usize> {
     let mut offsets = vec![0usize; end - start + 1];
     for position in 1..offsets.len() {
-        offsets[position] = offsets[position - 1] + module.dimensions[start + position - 1];
+        offsets[position] = offsets[position - 1] + dimensions[start + position - 1];
     }
-    let ambient = offsets.last().copied().unwrap_or(0) + module.dimensions[end];
+    offsets
+}
+
+fn compatibility_system(
+    module: &ZigzagModule,
+    start: usize,
+    end: usize,
+    offsets: &[usize],
+) -> (Vec<Vector>, Vec<Vector>) {
     let mut relations = Vec::new();
     let mut equations = Vec::new();
     for position in start..end {
         let map = &module.maps[position];
         let left_offset = offsets[position - start];
         let right_offset = offsets[position + 1 - start];
-        let (source_offset, target_offset, target_dimension) = match map.direction {
-            ZigzagDirection::Forward => {
-                (left_offset, right_offset, module.dimensions[position + 1])
-            }
-            ZigzagDirection::Backward => (right_offset, left_offset, module.dimensions[position]),
-        };
-        for (column, terms) in map.columns.iter().enumerate() {
+        let shape = oriented_offsets(module, position, left_offset, right_offset);
+        relations.extend(map_relations(map, shape.0, shape.1, module.modulus));
+        equations.extend(map_equations(
+            map,
+            shape.0,
+            shape.1,
+            shape.2,
+            module.modulus,
+        ));
+    }
+    (relations, equations)
+}
+
+fn oriented_offsets(
+    module: &ZigzagModule,
+    position: usize,
+    left_offset: usize,
+    right_offset: usize,
+) -> (usize, usize, usize) {
+    match module.maps[position].direction {
+        ZigzagDirection::Forward => (left_offset, right_offset, module.dimensions[position + 1]),
+        ZigzagDirection::Backward => (right_offset, left_offset, module.dimensions[position]),
+    }
+}
+
+fn map_relations(
+    map: &ZigzagMap,
+    source_offset: usize,
+    target_offset: usize,
+    modulus: u32,
+) -> Vec<Vector> {
+    map.columns
+        .iter()
+        .enumerate()
+        .map(|(column, terms)| {
             let mut relation = Vector::default();
             relation.insert(source_offset + column, 1);
             for term in terms {
                 relation.insert(
                     target_offset + term.target,
-                    (modulus - u64::from(term.coefficient)) as u32,
+                    (u64::from(modulus) - u64::from(term.coefficient)) as u32,
                 );
             }
-            relations.push(relation);
-        }
-        for target in 0..target_dimension {
-            let mut equation = Vector::default();
-            equation.insert(target_offset + target, 1);
-            for (column, terms) in map.columns.iter().enumerate() {
-                if let Ok(term_position) = terms.binary_search_by_key(&target, |term| term.target) {
-                    let coefficient = terms[term_position].coefficient;
-                    equation.insert(
-                        source_offset + column,
-                        (modulus - u64::from(coefficient)) as u32,
-                    );
-                }
-            }
-            equations.push(equation);
+            relation
+        })
+        .collect()
+}
+
+fn map_equations(
+    map: &ZigzagMap,
+    source_offset: usize,
+    target_offset: usize,
+    target_dimension: usize,
+    modulus: u32,
+) -> Vec<Vector> {
+    (0..target_dimension)
+        .map(|target| map_equation(map, source_offset, target_offset, target, modulus))
+        .collect()
+}
+
+fn map_equation(
+    map: &ZigzagMap,
+    source_offset: usize,
+    target_offset: usize,
+    target: usize,
+    modulus: u32,
+) -> Vector {
+    let mut equation = Vector::default();
+    equation.insert(target_offset + target, 1);
+    for (column, terms) in map.columns.iter().enumerate() {
+        if let Ok(term_position) = terms.binary_search_by_key(&target, |term| term.target) {
+            let coefficient = terms[term_position].coefficient;
+            equation.insert(
+                source_offset + column,
+                (u64::from(modulus) - u64::from(coefficient)) as u32,
+            );
         }
     }
-    let relation_rank = rank(relations.clone(), modulus);
-    let limit = nullspace(equations, ambient, modulus);
-    let first_dimension = module.dimensions[start];
-    let images = limit.into_iter().filter_map(|section| {
+    equation
+}
+
+fn first_node_images(limit: Vec<Vector>, first_dimension: usize) -> impl Iterator<Item = Vector> {
+    limit.into_iter().filter_map(move |section| {
         let mut image = Vector::default();
         for (&position, &coefficient) in section.0.range(..first_dimension) {
             image.insert(position, coefficient);
         }
         (!image.is_zero()).then_some(image)
-    });
-    relations.extend(images);
-    Ok(rank(relations, modulus) - relation_rank)
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

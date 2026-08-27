@@ -238,11 +238,7 @@ impl KineticFiltration {
         end: f64,
         limits: KineticLimits,
     ) -> Result<Self> {
-        if !start.is_finite() || !end.is_finite() || start >= end {
-            return Err(Error::InvalidInput(
-                "kinetic times must be finite with start below end".into(),
-            ));
-        }
+        validate_time_interval(start, end)?;
         if edges.len() > limits.max_edges {
             return Err(Error::InvalidInput(format!(
                 "kinetic edge count exceeds the limit {}",
@@ -250,27 +246,7 @@ impl KineticFiltration {
             )));
         }
         for edge in &mut edges {
-            if edge.u == edge.v || edge.u >= vertex_count || edge.v >= vertex_count {
-                return Err(Error::InvalidInput(
-                    "kinetic edge endpoints are invalid".into(),
-                ));
-            }
-            if edge.u > edge.v {
-                std::mem::swap(&mut edge.u, &mut edge.v);
-            }
-            if !edge.intercept.is_finite() || !edge.velocity.is_finite() {
-                return Err(Error::InvalidInput(
-                    "kinetic coefficients must be finite".into(),
-                ));
-            }
-            for time in [start, end] {
-                let value = edge.intercept + edge.velocity * time;
-                if !value.is_finite() || value < 0.0 {
-                    return Err(Error::InvalidInput(
-                        "kinetic edge weight must stay finite and non-negative".into(),
-                    ));
-                }
-            }
+            validate_kinetic_edge(edge, vertex_count, start, end)?;
         }
         edges.sort_by_key(KineticEdge::key);
         if edges.windows(2).any(|pair| pair[0].key() == pair[1].key()) {
@@ -339,38 +315,51 @@ impl KineticFiltration {
         let start = rational(self.start);
         let end = rational(self.end);
         let mut output = Vec::with_capacity(event_times.len() * 2 + 3);
-        output.push(KineticGraphState {
-            kind: KineticGraphStateKind::Start,
-            graph: self.active_graph_at(&start, &scale)?,
-        });
+        output.push(self.graph_state(KineticGraphStateKind::Start, &start, &scale)?);
+        self.push_critical_cells(&events, &event_times, &start, &end, &scale, &mut output)?;
+        output.push(self.graph_state(KineticGraphStateKind::End, &end, &scale)?);
+        Ok(output)
+    }
+
+    fn push_critical_cells(
+        &self,
+        events: &BTreeMap<BigRational, Vec<KineticEventKind>>,
+        event_times: &[BigRational],
+        start: &BigRational,
+        end: &BigRational,
+        scale: &BigRational,
+        output: &mut Vec<KineticGraphState>,
+    ) -> Result<()> {
         for position in 0..=event_times.len() {
-            let left = if position == 0 {
-                &start
-            } else {
-                &event_times[position - 1]
-            };
-            let right = event_times.get(position).unwrap_or(&end);
+            let left = previous_time(event_times, position, start);
+            let right = event_times.get(position).unwrap_or(end);
             let sample = midpoint(left, right);
-            output.push(KineticGraphState {
-                kind: KineticGraphStateKind::OpenCell {
-                    sample: sample.to_f64().ok_or_else(|| {
-                        Error::InvalidInput("kinetic graph sample does not fit f64".into())
-                    })?,
+            let sample_value = rational_to_f64(&sample, "kinetic graph sample")?;
+            output.push(self.graph_state(
+                KineticGraphStateKind::OpenCell {
+                    sample: sample_value,
                 },
-                graph: self.active_graph_at(&sample, &scale)?,
-            });
+                &sample,
+                scale,
+            )?);
             if let Some(time) = event_times.get(position) {
-                output.push(KineticGraphState {
-                    kind: KineticGraphStateKind::Event(public_event(time, events[time].clone())?),
-                    graph: self.active_graph_at(time, &scale)?,
-                });
+                let kind = KineticGraphStateKind::Event(public_event(time, events[time].clone())?);
+                output.push(self.graph_state(kind, time, scale)?);
             }
         }
-        output.push(KineticGraphState {
-            kind: KineticGraphStateKind::End,
-            graph: self.active_graph_at(&end, &scale)?,
-        });
-        Ok(output)
+        Ok(())
+    }
+
+    fn graph_state(
+        &self,
+        kind: KineticGraphStateKind,
+        time: &BigRational,
+        scale: &BigRational,
+    ) -> Result<KineticGraphState> {
+        Ok(KineticGraphState {
+            kind,
+            graph: self.active_graph_at(time, scale)?,
+        })
     }
 
     fn threshold_events(
@@ -455,30 +444,49 @@ impl KineticFiltration {
         let times: Vec<_> = exact.events.keys().cloned().collect();
         let mut output = Vec::with_capacity(times.len());
         for (position, time) in times.iter().enumerate() {
-            let left_boundary = if position == 0 {
-                &start
-            } else {
-                &times[position - 1]
-            };
+            let left_boundary = previous_time(&times, position, &start);
             let right_boundary = times.get(position + 1).unwrap_or(&end);
-            let before_time = midpoint(left_boundary, time);
-            let after_time = midpoint(time, right_boundary);
-            let before_graph = self.active_graph_at(&before_time, &scale_rational)?;
-            let after_graph = self.active_graph_at(&after_time, &scale_rational)?;
-            let before = cohomology_space(&before_graph, dimension, scale, modulus, limits)?;
-            let after = cohomology_space(&after_graph, dimension, scale, modulus, limits)?;
-            let relation =
-                cohomology_relation(&before_graph, &before, &after_graph, &after, limits)?;
-            output.push(KineticCohomologyEvent {
-                event: public_event(time, exact.events[time].clone())?,
-                before_space: before.id(),
-                after_space: after.id(),
-                before_rank: before.rank(),
-                after_rank: after.rank(),
-                relation,
-            });
+            output.push(self.cohomology_event_at(
+                time,
+                left_boundary,
+                right_boundary,
+                &exact.events[time],
+                dimension,
+                scale,
+                &scale_rational,
+                modulus,
+                limits,
+            )?);
         }
         Ok(output)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cohomology_event_at(
+        &self,
+        time: &BigRational,
+        left_boundary: &BigRational,
+        right_boundary: &BigRational,
+        kinds: &[KineticEventKind],
+        dimension: usize,
+        scale: f64,
+        scale_rational: &BigRational,
+        modulus: u32,
+        limits: CohomologyLimits,
+    ) -> Result<KineticCohomologyEvent> {
+        let before_graph = self.active_graph_at(&midpoint(left_boundary, time), scale_rational)?;
+        let after_graph = self.active_graph_at(&midpoint(time, right_boundary), scale_rational)?;
+        let before = cohomology_space(&before_graph, dimension, scale, modulus, limits)?;
+        let after = cohomology_space(&after_graph, dimension, scale, modulus, limits)?;
+        let relation = cohomology_relation(&before_graph, &before, &after_graph, &after, limits)?;
+        Ok(KineticCohomologyEvent {
+            event: public_event(time, kinds.to_vec())?,
+            before_space: before.id(),
+            after_space: after.id(),
+            before_rank: before.rank(),
+            after_rank: after.rank(),
+            relation,
+        })
     }
 
     /// Build and decompose the exact fixed-scale cohomology zigzag.
@@ -506,85 +514,17 @@ impl KineticFiltration {
         let event_times = exact.events.keys().cloned().collect::<Vec<_>>();
         let start = rational(self.start);
         let end = rational(self.end);
-        let mut graphs = Vec::with_capacity(event_times.len() * 2 + 1);
-        let mut kinds = Vec::with_capacity(event_times.len() * 2 + 1);
-        for position in 0..=event_times.len() {
-            let left = if position == 0 {
-                &start
-            } else {
-                &event_times[position - 1]
-            };
-            let right = event_times.get(position).unwrap_or(&end);
-            let sample = midpoint(left, right);
-            graphs.push(self.active_graph_at(&sample, &scale_rational)?);
-            kinds.push(KineticZigzagNodeKind::OpenCell {
-                sample: sample.to_f64().ok_or_else(|| {
-                    Error::InvalidInput("kinetic zigzag sample does not fit f64".into())
-                })?,
-            });
-            if let Some(time) = event_times.get(position) {
-                graphs.push(self.active_graph_at(time, &scale_rational)?);
-                kinds.push(KineticZigzagNodeKind::Event(public_event(
-                    time,
-                    exact.events[time].clone(),
-                )?));
-            }
-        }
+        let (graphs, kinds) =
+            self.zigzag_graphs(&event_times, &exact.events, &start, &end, &scale_rational)?;
         let spaces = graphs
             .iter()
             .map(|graph| cohomology_space(graph, dimension, scale, modulus, cohomology_limits))
             .collect::<Result<Vec<_>>>()?;
-        let mut arrows = Vec::with_capacity(graphs.len().saturating_sub(1));
-        let mut maps = Vec::with_capacity(graphs.len().saturating_sub(1));
-        for position in 0..event_times.len() {
-            let left = 2 * position;
-            let event = left + 1;
-            let right = left + 2;
-            let left_restriction = cohomology_restriction(
-                &graphs[event],
-                &spaces[event],
-                &graphs[left],
-                &spaces[left],
-            )?;
-            maps.push(zigzag_map(
-                ZigzagDirection::Backward,
-                &left_restriction,
-                &spaces[left],
-            )?);
-            arrows.push(KineticZigzagArrow {
-                direction: ZigzagDirection::Backward,
-                restriction: left_restriction,
-            });
-            let right_restriction = cohomology_restriction(
-                &graphs[event],
-                &spaces[event],
-                &graphs[right],
-                &spaces[right],
-            )?;
-            maps.push(zigzag_map(
-                ZigzagDirection::Forward,
-                &right_restriction,
-                &spaces[right],
-            )?);
-            arrows.push(KineticZigzagArrow {
-                direction: ZigzagDirection::Forward,
-                restriction: right_restriction,
-            });
-        }
+        let (arrows, maps) = zigzag_arrows(&graphs, &spaces, event_times.len())?;
         let dimensions = spaces.iter().map(CohomologySpace::rank).collect::<Vec<_>>();
         let module = ZigzagModule::new(modulus, dimensions, maps, zigzag_limits)?;
         let barcode = module.decompose()?;
-        let nodes = kinds
-            .into_iter()
-            .zip(spaces)
-            .zip(graphs)
-            .map(|((kind, space), graph)| KineticZigzagNode {
-                kind,
-                space: space.id(),
-                rank: space.rank(),
-                active_edges: graph.num_edges(),
-            })
-            .collect();
+        let nodes = zigzag_nodes(kinds, spaces, graphs);
         Ok(KineticZigzag {
             dimension,
             scale,
@@ -596,19 +536,37 @@ impl KineticFiltration {
         })
     }
 
-    fn exact_events(&self, threshold: Option<&BigRational>) -> Result<ExactSchedule> {
-        let pair_tests = self
-            .edges
-            .len()
-            .checked_mul(self.edges.len().saturating_sub(1))
-            .map(|value| value / 2)
-            .ok_or_else(|| Error::InvalidInput("kinetic pair count overflows".into()))?;
-        if pair_tests > self.limits.max_pair_tests {
-            return Err(Error::InvalidInput(format!(
-                "kinetic pair count exceeds the limit {}",
-                self.limits.max_pair_tests
-            )));
+    fn zigzag_graphs(
+        &self,
+        event_times: &[BigRational],
+        events: &BTreeMap<BigRational, Vec<KineticEventKind>>,
+        start: &BigRational,
+        end: &BigRational,
+        scale: &BigRational,
+    ) -> Result<(Vec<SparseDistanceMatrix>, Vec<KineticZigzagNodeKind>)> {
+        let mut graphs = Vec::with_capacity(event_times.len() * 2 + 1);
+        let mut kinds = Vec::with_capacity(event_times.len() * 2 + 1);
+        for position in 0..=event_times.len() {
+            let left = previous_time(event_times, position, start);
+            let right = event_times.get(position).unwrap_or(end);
+            let sample = midpoint(left, right);
+            graphs.push(self.active_graph_at(&sample, scale)?);
+            kinds.push(KineticZigzagNodeKind::OpenCell {
+                sample: rational_to_f64(&sample, "kinetic zigzag sample")?,
+            });
+            if let Some(time) = event_times.get(position) {
+                graphs.push(self.active_graph_at(time, scale)?);
+                kinds.push(KineticZigzagNodeKind::Event(public_event(
+                    time,
+                    events[time].clone(),
+                )?));
+            }
         }
+        Ok((graphs, kinds))
+    }
+
+    fn exact_events(&self, threshold: Option<&BigRational>) -> Result<ExactSchedule> {
+        self.check_pair_limit()?;
         let start = rational(self.start);
         let end = rational(self.end);
         let coefficients: Vec<_> = self
@@ -617,42 +575,9 @@ impl KineticFiltration {
             .map(|edge| (rational(edge.intercept), rational(edge.velocity)))
             .collect();
         let mut events: BTreeMap<BigRational, Vec<KineticEventKind>> = BTreeMap::new();
-        let mut persistent_ties = 0usize;
-        for left in 0..self.edges.len() {
-            for right in left + 1..self.edges.len() {
-                let numerator = &coefficients[right].0 - &coefficients[left].0;
-                let denominator = &coefficients[left].1 - &coefficients[right].1;
-                if denominator == BigRational::from_integer(0.into()) {
-                    if numerator == BigRational::from_integer(0.into()) {
-                        persistent_ties += 1;
-                    }
-                    continue;
-                }
-                let time = numerator / denominator;
-                if start < time && time < end {
-                    events
-                        .entry(time)
-                        .or_default()
-                        .push(KineticEventKind::EdgeOrderSwap {
-                            first: self.edges[left].key(),
-                            second: self.edges[right].key(),
-                        });
-                }
-            }
-        }
+        let persistent_ties = self.add_order_events(&coefficients, &start, &end, &mut events);
         if let Some(threshold) = threshold {
-            for (edge, (intercept, velocity)) in self.edges.iter().zip(&coefficients) {
-                if velocity == &BigRational::from_integer(0.into()) {
-                    continue;
-                }
-                let time = (threshold - intercept) / velocity;
-                if start < time && time < end {
-                    events
-                        .entry(time)
-                        .or_default()
-                        .push(KineticEventKind::ThresholdCrossing { edge: edge.key() });
-                }
-            }
+            self.add_threshold_events(threshold, &coefficients, &start, &end, &mut events);
         }
         if events.len() > self.limits.max_events {
             return Err(Error::InvalidInput(format!(
@@ -670,6 +595,89 @@ impl KineticFiltration {
         })
     }
 
+    fn check_pair_limit(&self) -> Result<()> {
+        let pair_tests = self
+            .edges
+            .len()
+            .checked_mul(self.edges.len().saturating_sub(1))
+            .map(|value| value / 2)
+            .ok_or_else(|| Error::InvalidInput("kinetic pair count overflows".into()))?;
+        if pair_tests > self.limits.max_pair_tests {
+            return Err(Error::InvalidInput(format!(
+                "kinetic pair count exceeds the limit {}",
+                self.limits.max_pair_tests
+            )));
+        }
+        Ok(())
+    }
+
+    fn add_order_events(
+        &self,
+        coefficients: &[(BigRational, BigRational)],
+        start: &BigRational,
+        end: &BigRational,
+        events: &mut BTreeMap<BigRational, Vec<KineticEventKind>>,
+    ) -> usize {
+        let mut persistent_ties = 0;
+        for left in 0..self.edges.len() {
+            for right in left + 1..self.edges.len() {
+                persistent_ties +=
+                    self.add_order_event(left, right, coefficients, start, end, events);
+            }
+        }
+        persistent_ties
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_order_event(
+        &self,
+        left: usize,
+        right: usize,
+        coefficients: &[(BigRational, BigRational)],
+        start: &BigRational,
+        end: &BigRational,
+        events: &mut BTreeMap<BigRational, Vec<KineticEventKind>>,
+    ) -> usize {
+        let numerator = &coefficients[right].0 - &coefficients[left].0;
+        let denominator = &coefficients[left].1 - &coefficients[right].1;
+        if denominator == BigRational::from_integer(0.into()) {
+            return usize::from(numerator == BigRational::from_integer(0.into()));
+        }
+        let time = numerator / denominator;
+        if start < &time && &time < end {
+            events
+                .entry(time)
+                .or_default()
+                .push(KineticEventKind::EdgeOrderSwap {
+                    first: self.edges[left].key(),
+                    second: self.edges[right].key(),
+                });
+        }
+        0
+    }
+
+    fn add_threshold_events(
+        &self,
+        threshold: &BigRational,
+        coefficients: &[(BigRational, BigRational)],
+        start: &BigRational,
+        end: &BigRational,
+        events: &mut BTreeMap<BigRational, Vec<KineticEventKind>>,
+    ) {
+        for (edge, (intercept, velocity)) in self.edges.iter().zip(coefficients) {
+            if velocity == &BigRational::from_integer(0.into()) {
+                continue;
+            }
+            let time = (threshold - intercept) / velocity;
+            if start < &time && &time < end {
+                events
+                    .entry(time)
+                    .or_default()
+                    .push(KineticEventKind::ThresholdCrossing { edge: edge.key() });
+            }
+        }
+    }
+
     fn active_graph_at(
         &self,
         time: &BigRational,
@@ -683,6 +691,137 @@ impl KineticFiltration {
             .collect();
         SparseDistanceMatrix::from_triplets(self.vertex_count, &triplets)
     }
+}
+
+fn validate_time_interval(start: f64, end: f64) -> Result<()> {
+    if !start.is_finite() || !end.is_finite() || start >= end {
+        return Err(Error::InvalidInput(
+            "kinetic times must be finite with start below end".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_kinetic_edge(
+    edge: &mut KineticEdge,
+    vertex_count: usize,
+    start: f64,
+    end: f64,
+) -> Result<()> {
+    if edge.u == edge.v || edge.u >= vertex_count || edge.v >= vertex_count {
+        return Err(Error::InvalidInput(
+            "kinetic edge endpoints are invalid".into(),
+        ));
+    }
+    if edge.u > edge.v {
+        std::mem::swap(&mut edge.u, &mut edge.v);
+    }
+    if !edge.intercept.is_finite() || !edge.velocity.is_finite() {
+        return Err(Error::InvalidInput(
+            "kinetic coefficients must be finite".into(),
+        ));
+    }
+    for time in [start, end] {
+        let value = edge.intercept + edge.velocity * time;
+        if !value.is_finite() || value < 0.0 {
+            return Err(Error::InvalidInput(
+                "kinetic edge weight must stay finite and non-negative".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn previous_time<'a>(
+    event_times: &'a [BigRational],
+    position: usize,
+    start: &'a BigRational,
+) -> &'a BigRational {
+    position
+        .checked_sub(1)
+        .and_then(|previous| event_times.get(previous))
+        .unwrap_or(start)
+}
+
+fn rational_to_f64(value: &BigRational, subject: &str) -> Result<f64> {
+    value
+        .to_f64()
+        .ok_or_else(|| Error::InvalidInput(format!("{subject} does not fit f64")))
+}
+
+fn zigzag_arrows(
+    graphs: &[SparseDistanceMatrix],
+    spaces: &[CohomologySpace],
+    event_count: usize,
+) -> Result<(Vec<KineticZigzagArrow>, Vec<ZigzagMap>)> {
+    let mut arrows = Vec::with_capacity(graphs.len().saturating_sub(1));
+    let mut maps = Vec::with_capacity(graphs.len().saturating_sub(1));
+    for position in 0..event_count {
+        let left = 2 * position;
+        let event = left + 1;
+        let right = left + 2;
+        push_zigzag_arrow(
+            ZigzagDirection::Backward,
+            event,
+            left,
+            graphs,
+            spaces,
+            &mut arrows,
+            &mut maps,
+        )?;
+        push_zigzag_arrow(
+            ZigzagDirection::Forward,
+            event,
+            right,
+            graphs,
+            spaces,
+            &mut arrows,
+            &mut maps,
+        )?;
+    }
+    Ok((arrows, maps))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_zigzag_arrow(
+    direction: ZigzagDirection,
+    event: usize,
+    adjacent: usize,
+    graphs: &[SparseDistanceMatrix],
+    spaces: &[CohomologySpace],
+    arrows: &mut Vec<KineticZigzagArrow>,
+    maps: &mut Vec<ZigzagMap>,
+) -> Result<()> {
+    let restriction = cohomology_restriction(
+        &graphs[event],
+        &spaces[event],
+        &graphs[adjacent],
+        &spaces[adjacent],
+    )?;
+    maps.push(zigzag_map(direction, &restriction, &spaces[adjacent])?);
+    arrows.push(KineticZigzagArrow {
+        direction,
+        restriction,
+    });
+    Ok(())
+}
+
+fn zigzag_nodes(
+    kinds: Vec<KineticZigzagNodeKind>,
+    spaces: Vec<CohomologySpace>,
+    graphs: Vec<SparseDistanceMatrix>,
+) -> Vec<KineticZigzagNode> {
+    kinds
+        .into_iter()
+        .zip(spaces)
+        .zip(graphs)
+        .map(|((kind, space), graph)| KineticZigzagNode {
+            kind,
+            space: space.id(),
+            rank: space.rank(),
+            active_edges: graph.num_edges(),
+        })
+        .collect()
 }
 
 fn zigzag_map(
