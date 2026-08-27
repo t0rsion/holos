@@ -74,6 +74,41 @@ fn iters(default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn random_distance(regime: usize, rng: &mut Rng) -> f64 {
+    match regime {
+        0 => rng.uniform(),
+        1 => (rng.uniform() * 4.0).ceil() / 4.0,
+        2 => [0.5, 1.0, 2.0, f64::INFINITY][rng.below(4)],
+        _ if rng.below(4) == 0 => 0.0,
+        _ => rng.uniform(),
+    }
+}
+
+fn random_matrix(n: usize, regime: usize, rng: &mut Rng) -> DistanceMatrix {
+    let count = n * (n - 1) / 2;
+    let data = (0..count).map(|_| random_distance(regime, rng)).collect();
+    DistanceMatrix::from_condensed(data).unwrap()
+}
+
+fn random_threshold(rng: &mut Rng) -> Option<f64> {
+    match rng.below(4) {
+        0 => None,
+        1 => Some(0.0),
+        2 => Some(rng.uniform() * 2.0),
+        _ => Some(f64::INFINITY),
+    }
+}
+
+fn random_params(max_dim: usize, threshold: Option<f64>, p: u32, rng: &mut Rng) -> RipsParams {
+    let mut params = RipsParams::new(max_dim).with_modulus(p);
+    params.threshold = threshold;
+    params.use_emergent_pairs = rng.below(2) == 0;
+    params.use_apparent_pairs = rng.below(2) == 0;
+    params.use_clearing = rng.below(2) == 0;
+    params.collapse_edges = rng.below(2) == 0;
+    params
+}
+
 /// Random matrices over mixed regimes: continuous, tie-heavy quantized,
 /// {0.5,1,2,inf} discrete, zero-distance duplicates. Every prime class,
 /// random toggles, random dims and thresholds.
@@ -85,38 +120,11 @@ fn fuzz_random_matrices_all_fields() {
     for it in 0..iters(20_000) {
         let n = 4 + rng.below(6); // 4..=9
         let regime = rng.below(4);
-        let m = n * (n - 1) / 2;
-        let mut data = Vec::with_capacity(m);
-        for _ in 0..m {
-            let d = match regime {
-                0 => rng.uniform(),
-                1 => (rng.uniform() * 4.0).ceil() / 4.0,
-                2 => [0.5, 1.0, 2.0, f64::INFINITY][rng.below(4)],
-                _ => {
-                    if rng.below(4) == 0 {
-                        0.0
-                    } else {
-                        rng.uniform()
-                    }
-                }
-            };
-            data.push(d);
-        }
-        let dist = DistanceMatrix::from_condensed(data).unwrap();
+        let dist = random_matrix(n, regime, &mut rng);
         let max_dim = 1 + rng.below(n - 1);
-        let threshold = match rng.below(4) {
-            0 => None,
-            1 => Some(0.0),
-            2 => Some(rng.uniform() * 2.0),
-            _ => Some(f64::INFINITY),
-        };
+        let threshold = random_threshold(&mut rng);
         let p = primes[rng.below(primes.len())];
-        let mut params = RipsParams::new(max_dim).with_modulus(p);
-        params.threshold = threshold;
-        params.use_emergent_pairs = rng.below(2) == 0;
-        params.use_apparent_pairs = rng.below(2) == 0;
-        params.use_clearing = rng.below(2) == 0;
-        params.collapse_edges = rng.below(2) == 0;
+        let params = random_params(max_dim, threshold, p, &mut rng);
         let solver = rips_persistence(&dist, &params).unwrap();
         let oracle = Diagram {
             bars: oracle_bars(&dist, max_dim, threshold, p),
