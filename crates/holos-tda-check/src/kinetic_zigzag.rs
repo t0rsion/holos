@@ -44,6 +44,69 @@ pub fn verify_kinetic_zigzag(
     bytes: &[u8],
     limits: ProofLimits,
 ) -> Result<VerifiedKineticZigzag, ProofError> {
+    let claim = decode_claim(bytes, limits)?;
+    let schedule = verify_schedule(&claim, limits)?;
+    let graphs = event_graphs(
+        &claim.trajectories,
+        claim.start,
+        claim.end,
+        claim.scale,
+        &schedule.events,
+    );
+    verify_shape(&claim, graphs.len())?;
+    let spaces = build_spaces(&claim, &graphs, limits)?;
+    verify_nodes(&claim, &graphs, &spaces)?;
+    let maps = build_maps(&spaces, schedule.events.len(), claim.modulus)?;
+    verify_arrows(&claim, &maps)?;
+    verify_decomposition(&claim, &spaces, &maps)?;
+    Ok(zigzag_summary(&claim, &spaces, &maps))
+}
+
+struct KineticClaim {
+    vertex_count: usize,
+    trajectories: Vec<AffineEdge>,
+    start: f64,
+    end: f64,
+    dimension: usize,
+    scale: f64,
+    modulus: u32,
+    persistent_ties: usize,
+    node_ranks: Vec<usize>,
+    node_edges: Vec<usize>,
+    arrow_ranks: Vec<usize>,
+    generalized_ranks: Vec<usize>,
+    intervals: Vec<Interval>,
+}
+
+struct KineticHeader {
+    start: f64,
+    end: f64,
+    dimension: usize,
+    scale: f64,
+    modulus: u32,
+    persistent_ties: usize,
+}
+
+struct KineticOutput {
+    node_ranks: Vec<usize>,
+    node_edges: Vec<usize>,
+    arrow_ranks: Vec<usize>,
+    generalized_ranks: Vec<usize>,
+    intervals: Vec<Interval>,
+}
+
+fn decode_claim(bytes: &[u8], limits: ProofLimits) -> Result<KineticClaim, ProofError> {
+    let expected = expected_digest(bytes, limits)?;
+    let mut reader = Reader::new(bytes);
+    decode_prefix(&mut reader)?;
+    let vertex_count = reader.bounded_usize("zigzag vertex count", limits.max_vertices)?;
+    let trajectories = decode_trajectories(&mut reader, limits)?;
+    let claim = decode_claim_body(&mut reader, vertex_count, trajectories, limits)?;
+    decode_trailer(&mut reader, expected)?;
+    Ok(claim)
+}
+
+fn expected_digest(bytes: &[u8], limits: ProofLimits) -> Result<[u8; 32], ProofError> {
     if bytes.len() > limits.max_bytes || bytes.len() < 32 {
         return Err(ProofError::new(
             "kinetic zigzag exceeds its byte limit or is truncated",
@@ -53,134 +116,295 @@ pub fn verify_kinetic_zigzag(
     let mut hash = Sha256::new();
     hash.update(b"holos-kinetic-zigzag-v1");
     hash.update(&bytes[..payload_len]);
-    let expected: [u8; 32] = hash.finalize().into();
+    let expected = hash.finalize().into();
     if bytes[payload_len..] != expected {
         return Err(ProofError::new(
             "kinetic zigzag digest differs from its content",
         ));
     }
-    let mut reader = Reader::new(bytes);
-    if reader.take(8)? != MAGIC || reader.u16()? != VERSION || reader.u8()? != F64_BITS_CODEC {
-        return Err(ProofError::new("unsupported kinetic zigzag artifact"));
+    Ok(expected)
+}
+
+fn decode_prefix(reader: &mut Reader<'_>) -> Result<(), ProofError> {
+    let magic = reader.take(8)?;
+    let version = reader.u16()?;
+    let codec = reader.u8()?;
+    if magic != MAGIC || version != VERSION || codec != F64_BITS_CODEC {
+        Err(ProofError::new("unsupported kinetic zigzag artifact"))
+    } else {
+        Ok(())
     }
-    let vertex_count = reader.bounded_usize("zigzag vertex count", limits.max_vertices)?;
-    let edge_count = reader.bounded_usize("zigzag edge count", limits.max_edges)?;
-    if edge_count > reader.remaining() / 32 {
+}
+
+fn decode_trajectories(
+    reader: &mut Reader<'_>,
+    limits: ProofLimits,
+) -> Result<Vec<AffineEdge>, ProofError> {
+    let count = reader.bounded_usize("zigzag edge count", limits.max_edges)?;
+    if count > reader.remaining() / 32 {
         return Err(ProofError::new(
             "kinetic zigzag edge count exceeds the remaining bytes",
         ));
     }
-    let mut trajectories = Vec::with_capacity(edge_count);
-    for _ in 0..edge_count {
-        trajectories.push(AffineEdge {
-            edge: Edge {
-                u: reader.usize()?,
-                v: reader.usize()?,
-            },
-            intercept: f64::from_bits(reader.u64()?),
-            velocity: f64::from_bits(reader.u64()?),
-        });
-    }
+    (0..count).map(|_| decode_trajectory(reader)).collect()
+}
+
+fn decode_trajectory(reader: &mut Reader<'_>) -> Result<AffineEdge, ProofError> {
+    Ok(AffineEdge {
+        edge: Edge {
+            u: reader.usize()?,
+            v: reader.usize()?,
+        },
+        intercept: f64::from_bits(reader.u64()?),
+        velocity: f64::from_bits(reader.u64()?),
+    })
+}
+
+fn decode_claim_body(
+    reader: &mut Reader<'_>,
+    vertex_count: usize,
+    trajectories: Vec<AffineEdge>,
+    limits: ProofLimits,
+) -> Result<KineticClaim, ProofError> {
+    let header = decode_kinetic_header(reader, vertex_count, &trajectories, limits)?;
+    let output = decode_kinetic_output(reader, limits)?;
+    Ok(KineticClaim {
+        vertex_count,
+        trajectories,
+        start: header.start,
+        end: header.end,
+        dimension: header.dimension,
+        scale: header.scale,
+        modulus: header.modulus,
+        persistent_ties: header.persistent_ties,
+        node_ranks: output.node_ranks,
+        node_edges: output.node_edges,
+        arrow_ranks: output.arrow_ranks,
+        generalized_ranks: output.generalized_ranks,
+        intervals: output.intervals,
+    })
+}
+
+fn decode_kinetic_header(
+    reader: &mut Reader<'_>,
+    vertex_count: usize,
+    trajectories: &[AffineEdge],
+    limits: ProofLimits,
+) -> Result<KineticHeader, ProofError> {
     let start = f64::from_bits(reader.u64()?);
     let end = f64::from_bits(reader.u64()?);
     let dimension = reader.bounded_usize("zigzag dimension", limits.max_dimension)?;
     let scale = f64::from_bits(reader.u64()?);
     let modulus = reader.u32()?;
     let persistent_ties = reader.usize()?;
-    validate_input(vertex_count, &trajectories, start, end, scale, modulus)?;
-    let node_ranks = read_usizes(&mut reader, "zigzag node rank", limits.max_snapshots)?;
-    if node_ranks.is_empty() || node_ranks.len() > FORMAT_MAX_NODES {
-        return Err(ProofError::new(
+    validate_input(vertex_count, trajectories, start, end, scale, modulus)?;
+    Ok(KineticHeader {
+        start,
+        end,
+        dimension,
+        scale,
+        modulus,
+        persistent_ties,
+    })
+}
+
+fn decode_kinetic_output(
+    reader: &mut Reader<'_>,
+    limits: ProofLimits,
+) -> Result<KineticOutput, ProofError> {
+    let node_ranks = decode_node_ranks(reader, limits)?;
+    let node_edges = read_usizes(reader, "zigzag node edge count", limits.max_snapshots)?;
+    let arrow_ranks = read_usizes(reader, "zigzag arrow rank", limits.max_references)?;
+    let maximum_ranks = square_count(node_ranks.len())?;
+    let generalized_ranks = read_usizes(reader, "zigzag generalized rank", maximum_ranks)?;
+    let intervals = decode_intervals(reader, node_ranks.len())?;
+    Ok(KineticOutput {
+        node_ranks,
+        node_edges,
+        arrow_ranks,
+        generalized_ranks,
+        intervals,
+    })
+}
+
+fn decode_node_ranks(
+    reader: &mut Reader<'_>,
+    limits: ProofLimits,
+) -> Result<Vec<usize>, ProofError> {
+    let ranks = read_usizes(reader, "zigzag node rank", limits.max_snapshots)?;
+    if ranks.is_empty() || ranks.len() > FORMAT_MAX_NODES {
+        Err(ProofError::new(
             "kinetic zigzag node count exceeds the format limit",
-        ));
+        ))
+    } else {
+        Ok(ranks)
     }
-    let node_edges = read_usizes(&mut reader, "zigzag node edge count", limits.max_snapshots)?;
-    let arrow_ranks = read_usizes(&mut reader, "zigzag arrow rank", limits.max_references)?;
-    let maximum_ranks = node_ranks
-        .len()
-        .checked_mul(node_ranks.len())
-        .ok_or_else(|| ProofError::new("kinetic zigzag rank count overflows"))?;
-    let generalized_ranks = read_usizes(&mut reader, "zigzag generalized rank", maximum_ranks)?;
-    let maximum_intervals = node_ranks
-        .len()
-        .checked_mul(node_ranks.len().saturating_add(1))
+}
+
+fn square_count(count: usize) -> Result<usize, ProofError> {
+    count
+        .checked_mul(count)
+        .ok_or_else(|| ProofError::new("kinetic zigzag rank count overflows"))
+}
+
+fn decode_intervals(
+    reader: &mut Reader<'_>,
+    node_count: usize,
+) -> Result<Vec<Interval>, ProofError> {
+    let maximum = node_count
+        .checked_mul(node_count.saturating_add(1))
         .map(|value| value / 2)
         .ok_or_else(|| ProofError::new("kinetic zigzag interval count overflows"))?;
-    let interval_count = reader.bounded_usize("zigzag interval count", maximum_intervals)?;
-    let mut intervals = Vec::with_capacity(interval_count);
-    for _ in 0..interval_count {
-        intervals.push((reader.usize()?, reader.usize()?, reader.usize()?));
-    }
-    if reader.array32()? != expected || reader.remaining() != 0 {
-        return Err(ProofError::new(
-            "kinetic zigzag has a wrong digest or trailing bytes",
-        ));
-    }
+    let count = reader.bounded_usize("zigzag interval count", maximum)?;
+    (0..count)
+        .map(|_| Ok((reader.usize()?, reader.usize()?, reader.usize()?)))
+        .collect()
+}
 
-    let schedule = exact_schedule(&trajectories, start, end, scale, limits)?;
-    if schedule.persistent_ties != persistent_ties {
-        return Err(ProofError::new(
+fn decode_trailer(reader: &mut Reader<'_>, expected: [u8; 32]) -> Result<(), ProofError> {
+    if reader.array32()? != expected || reader.remaining() != 0 {
+        Err(ProofError::new(
+            "kinetic zigzag has a wrong digest or trailing bytes",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_schedule(claim: &KineticClaim, limits: ProofLimits) -> Result<ExactSchedule, ProofError> {
+    let schedule = exact_schedule(
+        &claim.trajectories,
+        claim.start,
+        claim.end,
+        claim.scale,
+        limits,
+    )?;
+    if schedule.persistent_ties != claim.persistent_ties {
+        Err(ProofError::new(
             "kinetic zigzag persistent-tie count is wrong",
-        ));
+        ))
+    } else {
+        Ok(schedule)
     }
-    let graphs = event_graphs(&trajectories, start, end, scale, &schedule.events);
-    if graphs.len() != node_ranks.len()
-        || node_edges.len() != graphs.len()
-        || arrow_ranks.len() + 1 != graphs.len()
-        || generalized_ranks.len() != maximum_ranks
+}
+
+fn verify_shape(claim: &KineticClaim, graph_count: usize) -> Result<(), ProofError> {
+    let maximum_ranks = square_count(claim.node_ranks.len())?;
+    if graph_count != claim.node_ranks.len()
+        || claim.node_edges.len() != graph_count
+        || claim.arrow_ranks.len() + 1 != graph_count
+        || claim.generalized_ranks.len() != maximum_ranks
     {
-        return Err(ProofError::new("kinetic zigzag claim shape is wrong"));
+        Err(ProofError::new("kinetic zigzag claim shape is wrong"))
+    } else {
+        Ok(())
     }
-    let spaces = graphs
+}
+
+fn build_spaces(
+    claim: &KineticClaim,
+    graphs: &[Vec<Edge>],
+    limits: ProofLimits,
+) -> Result<Vec<Space>, ProofError> {
+    graphs
         .iter()
-        .map(|graph| Space::build(vertex_count, dimension, graph, modulus, limits))
-        .collect::<Result<Vec<_>, _>>()?;
-    let checked_node_ranks = spaces.iter().map(Space::rank).collect::<Vec<_>>();
-    let checked_node_edges = graphs.iter().map(Vec::len).collect::<Vec<_>>();
-    if node_ranks != checked_node_ranks || node_edges != checked_node_edges {
-        return Err(ProofError::new(
+        .map(|graph| {
+            Space::build(
+                claim.vertex_count,
+                claim.dimension,
+                graph,
+                claim.modulus,
+                limits,
+            )
+        })
+        .collect()
+}
+
+fn verify_nodes(
+    claim: &KineticClaim,
+    graphs: &[Vec<Edge>],
+    spaces: &[Space],
+) -> Result<(), ProofError> {
+    let ranks = spaces.iter().map(Space::rank).collect::<Vec<_>>();
+    let edges = graphs.iter().map(Vec::len).collect::<Vec<_>>();
+    if claim.node_ranks != ranks || claim.node_edges != edges {
+        Err(ProofError::new(
             "kinetic zigzag node ranks or active-edge counts are wrong",
-        ));
+        ))
+    } else {
+        Ok(())
     }
-    let mut maps = Vec::with_capacity(arrow_ranks.len());
-    let mut checked_arrow_ranks = Vec::with_capacity(arrow_ranks.len());
-    for event in 0..schedule.events.len() {
-        let left = 2 * event;
-        let middle = left + 1;
-        let right = left + 2;
-        let (left_columns, left_rank) = spaces[middle].restriction_to(&spaces[left], modulus)?;
-        maps.push(Map {
-            forward: false,
-            columns: left_columns,
-        });
-        checked_arrow_ranks.push(left_rank);
-        let (right_columns, right_rank) = spaces[middle].restriction_to(&spaces[right], modulus)?;
-        maps.push(Map {
-            forward: true,
-            columns: right_columns,
-        });
-        checked_arrow_ranks.push(right_rank);
+}
+
+fn build_maps(spaces: &[Space], event_count: usize, modulus: u32) -> Result<Vec<Map>, ProofError> {
+    let mut maps = Vec::with_capacity(event_count * 2);
+    for event in 0..event_count {
+        append_event_maps(&mut maps, spaces, event, modulus)?;
     }
-    if arrow_ranks != checked_arrow_ranks {
-        return Err(ProofError::new(
+    Ok(maps)
+}
+
+fn append_event_maps(
+    maps: &mut Vec<Map>,
+    spaces: &[Space],
+    event: usize,
+    modulus: u32,
+) -> Result<(), ProofError> {
+    let left = 2 * event;
+    let middle = left + 1;
+    let right = left + 2;
+    let (left_columns, left_rank) = spaces[middle].restriction_to(&spaces[left], modulus)?;
+    maps.push(Map {
+        forward: false,
+        columns: left_columns,
+        rank: left_rank,
+    });
+    let (right_columns, right_rank) = spaces[middle].restriction_to(&spaces[right], modulus)?;
+    maps.push(Map {
+        forward: true,
+        columns: right_columns,
+        rank: right_rank,
+    });
+    Ok(())
+}
+
+fn verify_arrows(claim: &KineticClaim, maps: &[Map]) -> Result<(), ProofError> {
+    let ranks = maps.iter().map(|map| map.rank).collect::<Vec<_>>();
+    if claim.arrow_ranks != ranks {
+        Err(ProofError::new(
             "kinetic zigzag restriction ranks are wrong",
-        ));
+        ))
+    } else {
+        Ok(())
     }
-    let (checked_ranks, checked_intervals) = decompose(&checked_node_ranks, &maps, modulus)?;
-    if generalized_ranks != checked_ranks || intervals != checked_intervals {
-        return Err(ProofError::new(
+}
+
+fn verify_decomposition(
+    claim: &KineticClaim,
+    spaces: &[Space],
+    maps: &[Map],
+) -> Result<(), ProofError> {
+    let ranks = spaces.iter().map(Space::rank).collect::<Vec<_>>();
+    let (checked_ranks, checked_intervals) = decompose(&ranks, maps, claim.modulus)?;
+    if claim.generalized_ranks != checked_ranks || claim.intervals != checked_intervals {
+        Err(ProofError::new(
             "kinetic zigzag interval decomposition is wrong",
-        ));
+        ))
+    } else {
+        Ok(())
     }
-    Ok(VerifiedKineticZigzag {
-        dimension,
-        modulus,
-        edges: trajectories.len(),
+}
+
+fn zigzag_summary(claim: &KineticClaim, spaces: &[Space], maps: &[Map]) -> VerifiedKineticZigzag {
+    VerifiedKineticZigzag {
+        dimension: claim.dimension,
+        modulus: claim.modulus,
+        edges: claim.trajectories.len(),
         nodes: spaces.len(),
         arrows: maps.len(),
-        intervals: intervals.len(),
-        interval_copies: intervals.iter().map(|item| item.2).sum(),
-    })
+        intervals: claim.intervals.len(),
+        interval_copies: claim.intervals.iter().map(|item| item.2).sum(),
+    }
 }
 
 #[derive(Clone)]
@@ -198,37 +422,64 @@ fn validate_input(
     scale: f64,
     modulus: u32,
 ) -> Result<(), ProofError> {
-    if !start.is_finite() || !end.is_finite() || start >= end || !scale.is_finite() || scale < 0.0 {
-        return Err(ProofError::new("kinetic zigzag interval is invalid"));
-    }
-    if !is_prime(modulus as u64) || u64::from(modulus) >= MODULUS_LIMIT {
-        return Err(ProofError::new(
-            "kinetic zigzag modulus is not a supported prime",
-        ));
-    }
+    validate_interval(start, end, scale)?;
+    validate_modulus(modulus)?;
     let mut previous = None;
     for trajectory in edges {
-        if trajectory.edge.u >= trajectory.edge.v
-            || trajectory.edge.v >= vertex_count
-            || !trajectory.intercept.is_finite()
-            || !trajectory.velocity.is_finite()
-            || previous.is_some_and(|edge| edge >= trajectory.edge)
-        {
-            return Err(ProofError::new(
-                "kinetic zigzag edge trajectory is not canonical",
-            ));
-        }
-        for time in [start, end] {
-            let weight = trajectory.intercept + trajectory.velocity * time;
-            if !weight.is_finite() || weight < 0.0 {
-                return Err(ProofError::new(
-                    "kinetic zigzag edge weight leaves its valid range",
-                ));
-            }
-        }
+        validate_trajectory(trajectory, previous, vertex_count, start, end)?;
         previous = Some(trajectory.edge);
     }
     Ok(())
+}
+
+fn validate_interval(start: f64, end: f64, scale: f64) -> Result<(), ProofError> {
+    if !start.is_finite() || !end.is_finite() || start >= end || !scale.is_finite() || scale < 0.0 {
+        Err(ProofError::new("kinetic zigzag interval is invalid"))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_modulus(modulus: u32) -> Result<(), ProofError> {
+    if !is_prime(modulus as u64) || u64::from(modulus) >= MODULUS_LIMIT {
+        Err(ProofError::new(
+            "kinetic zigzag modulus is not a supported prime",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_trajectory(
+    trajectory: &AffineEdge,
+    previous: Option<Edge>,
+    vertex_count: usize,
+    start: f64,
+    end: f64,
+) -> Result<(), ProofError> {
+    if trajectory.edge.u >= trajectory.edge.v
+        || trajectory.edge.v >= vertex_count
+        || !trajectory.intercept.is_finite()
+        || !trajectory.velocity.is_finite()
+        || previous.is_some_and(|edge| edge >= trajectory.edge)
+    {
+        return Err(ProofError::new(
+            "kinetic zigzag edge trajectory is not canonical",
+        ));
+    }
+    validate_trajectory_weight(trajectory, start)?;
+    validate_trajectory_weight(trajectory, end)
+}
+
+fn validate_trajectory_weight(trajectory: &AffineEdge, time: f64) -> Result<(), ProofError> {
+    let weight = trajectory.intercept + trajectory.velocity * time;
+    if !weight.is_finite() || weight < 0.0 {
+        Err(ProofError::new(
+            "kinetic zigzag edge weight leaves its valid range",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 struct ExactSchedule {
@@ -243,16 +494,7 @@ fn exact_schedule(
     scale: f64,
     limits: ProofLimits,
 ) -> Result<ExactSchedule, ProofError> {
-    let pairs = edges
-        .len()
-        .checked_mul(edges.len().saturating_sub(1))
-        .map(|value| value / 2)
-        .ok_or_else(|| ProofError::new("kinetic zigzag pair count overflows"))?;
-    if pairs > limits.max_references {
-        return Err(ProofError::new(
-            "kinetic zigzag pair count exceeds its limit",
-        ));
-    }
+    validate_pair_count(edges.len(), limits)?;
     let start = rational(start);
     let end = rational(end);
     let scale = rational(scale);
@@ -260,32 +502,8 @@ fn exact_schedule(
         .iter()
         .map(|edge| (rational(edge.intercept), rational(edge.velocity)))
         .collect::<Vec<_>>();
-    let mut events = BTreeSet::new();
-    let mut persistent_ties = 0usize;
-    for left in 0..edges.len() {
-        for right in left + 1..edges.len() {
-            let numerator = &coefficients[right].0 - &coefficients[left].0;
-            let denominator = &coefficients[left].1 - &coefficients[right].1;
-            if denominator == BigRational::from_integer(0.into()) {
-                if numerator == BigRational::from_integer(0.into()) {
-                    persistent_ties += 1;
-                }
-            } else {
-                let time = numerator / denominator;
-                if start < time && time < end {
-                    events.insert(time);
-                }
-            }
-        }
-    }
-    for (intercept, velocity) in &coefficients {
-        if velocity != &BigRational::from_integer(0.into()) {
-            let time = (&scale - intercept) / velocity;
-            if start < time && time < end {
-                events.insert(time);
-            }
-        }
-    }
+    let (mut events, persistent_ties) = pair_events(&coefficients, &start, &end);
+    threshold_events(&mut events, &coefficients, &start, &end, &scale);
     if events.len() > limits.max_snapshots {
         return Err(ProofError::new(
             "kinetic zigzag event count exceeds its limit",
@@ -295,6 +513,63 @@ fn exact_schedule(
         events: events.into_iter().collect(),
         persistent_ties,
     })
+}
+
+fn validate_pair_count(count: usize, limits: ProofLimits) -> Result<(), ProofError> {
+    let pairs = count
+        .checked_mul(count.saturating_sub(1))
+        .map(|value| value / 2)
+        .ok_or_else(|| ProofError::new("kinetic zigzag pair count overflows"))?;
+    if pairs > limits.max_references {
+        Err(ProofError::new(
+            "kinetic zigzag pair count exceeds its limit",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn pair_events(
+    coefficients: &[(BigRational, BigRational)],
+    start: &BigRational,
+    end: &BigRational,
+) -> (BTreeSet<BigRational>, usize) {
+    let mut events = BTreeSet::new();
+    let mut persistent_ties = 0usize;
+    for left in 0..coefficients.len() {
+        for right in left + 1..coefficients.len() {
+            let numerator = &coefficients[right].0 - &coefficients[left].0;
+            let denominator = &coefficients[left].1 - &coefficients[right].1;
+            if denominator == BigRational::from_integer(0.into()) {
+                if numerator == BigRational::from_integer(0.into()) {
+                    persistent_ties += 1;
+                }
+            } else {
+                let time = numerator / denominator;
+                if start < &time && &time < end {
+                    events.insert(time);
+                }
+            }
+        }
+    }
+    (events, persistent_ties)
+}
+
+fn threshold_events(
+    events: &mut BTreeSet<BigRational>,
+    coefficients: &[(BigRational, BigRational)],
+    start: &BigRational,
+    end: &BigRational,
+    scale: &BigRational,
+) {
+    for (intercept, velocity) in coefficients {
+        if velocity != &BigRational::from_integer(0.into()) {
+            let time = (scale - intercept) / velocity;
+            if start < &time && &time < end {
+                events.insert(time);
+            }
+        }
+    }
 }
 
 fn event_graphs(
@@ -342,6 +617,7 @@ fn midpoint(left: &BigRational, right: &BigRational) -> BigRational {
 struct Map {
     forward: bool,
     columns: Vec<Vec<MapTerm>>,
+    rank: usize,
 }
 
 type Interval = (usize, usize, usize);
@@ -351,49 +627,65 @@ fn decompose(
     maps: &[Map],
     modulus: u32,
 ) -> Result<(Vec<usize>, Vec<Interval>), ProofError> {
+    let ranks = compute_generalized_ranks(dimensions, maps, modulus)?;
+    let intervals = interval_decomposition(&ranks, dimensions.len())?;
+    Ok((ranks, intervals))
+}
+
+fn compute_generalized_ranks(
+    dimensions: &[usize],
+    maps: &[Map],
+    modulus: u32,
+) -> Result<Vec<usize>, ProofError> {
     let count = dimensions.len();
     let mut ranks = vec![0usize; count * count];
     let mut work = 0usize;
     for start in (0..count).rev() {
         for end in start..count {
-            let ambient = dimensions[start..=end]
-                .iter()
-                .try_fold(0usize, |sum, dimension| sum.checked_add(*dimension));
-            let arrow_work = (start..end).try_fold(0usize, |sum, position| {
-                let source = maps[position].columns.len();
-                let target = if maps[position].forward {
-                    dimensions[position + 1]
-                } else {
-                    dimensions[position]
-                };
-                sum.checked_add(source)?.checked_add(target)
-            });
-            work = ambient
-                .and_then(|value| arrow_work.and_then(|arrows| value.checked_add(arrows)))
-                .and_then(|value| work.checked_add(value))
-                .ok_or_else(|| ProofError::new("kinetic zigzag rank work overflows"))?;
-            if work > FORMAT_MAX_RANK_WORK {
-                return Err(ProofError::new(
-                    "kinetic zigzag rank work exceeds the format limit",
-                ));
-            }
+            work = add_rank_work(work, dimensions, maps, start, end)?;
             ranks[start * count + end] = generalized_rank(dimensions, maps, modulus, start, end);
         }
     }
+    Ok(ranks)
+}
+
+fn add_rank_work(
+    work: usize,
+    dimensions: &[usize],
+    maps: &[Map],
+    start: usize,
+    end: usize,
+) -> Result<usize, ProofError> {
+    let ambient = dimensions[start..=end]
+        .iter()
+        .try_fold(0usize, |sum, dimension| sum.checked_add(*dimension));
+    let arrows = (start..end).try_fold(0usize, |sum, position| {
+        let source = maps[position].columns.len();
+        let target = if maps[position].forward {
+            dimensions[position + 1]
+        } else {
+            dimensions[position]
+        };
+        sum.checked_add(source)?.checked_add(target)
+    });
+    let next = ambient
+        .and_then(|value| arrows.and_then(|arrow_work| value.checked_add(arrow_work)))
+        .and_then(|value| work.checked_add(value))
+        .ok_or_else(|| ProofError::new("kinetic zigzag rank work overflows"))?;
+    if next > FORMAT_MAX_RANK_WORK {
+        Err(ProofError::new(
+            "kinetic zigzag rank work exceeds the format limit",
+        ))
+    } else {
+        Ok(next)
+    }
+}
+
+fn interval_decomposition(ranks: &[usize], count: usize) -> Result<Vec<Interval>, ProofError> {
     let mut intervals = Vec::new();
     for start in 0..count {
         for end in start..count {
-            let rank = |left: usize, right: usize| ranks[left * count + right] as i128;
-            let mut multiplicity = rank(start, end);
-            if start > 0 {
-                multiplicity -= rank(start - 1, end);
-            }
-            if end + 1 < count {
-                multiplicity -= rank(start, end + 1);
-            }
-            if start > 0 && end + 1 < count {
-                multiplicity += rank(start - 1, end + 1);
-            }
+            let multiplicity = interval_multiplicity(ranks, count, start, end);
             if multiplicity < 0 {
                 return Err(ProofError::new(
                     "kinetic zigzag generalized ranks are not interval decomposable",
@@ -404,7 +696,22 @@ fn decompose(
             }
         }
     }
-    Ok((ranks, intervals))
+    Ok(intervals)
+}
+
+fn interval_multiplicity(ranks: &[usize], count: usize, start: usize, end: usize) -> i128 {
+    let rank = |left: usize, right: usize| ranks[left * count + right] as i128;
+    let mut multiplicity = rank(start, end);
+    if start > 0 {
+        multiplicity -= rank(start - 1, end);
+    }
+    if end + 1 < count {
+        multiplicity -= rank(start, end + 1);
+    }
+    if start > 0 && end + 1 < count {
+        multiplicity += rank(start - 1, end + 1);
+    }
+    multiplicity
 }
 
 fn generalized_rank(
@@ -426,51 +733,104 @@ fn generalized_rank(
     let mut relations = Vec::new();
     let mut equations = Vec::new();
     for position in start..end {
-        let map = &maps[position];
-        let left = offsets[position - start];
-        let right = offsets[position + 1 - start];
-        let (source, target, target_dimension) = if map.forward {
-            (left, right, dimensions[position + 1])
-        } else {
-            (right, left, dimensions[position])
-        };
-        for (column, terms) in map.columns.iter().enumerate() {
-            let mut relation = Vector::default();
-            relation.insert(source + column, 1);
-            for term in terms {
-                relation.insert(
-                    target + term.target,
-                    (modulus - u64::from(term.coefficient)) as u32,
-                );
-            }
-            relations.push(relation);
-        }
-        for target_position in 0..target_dimension {
-            let mut equation = Vector::default();
-            equation.insert(target + target_position, 1);
-            for (column, terms) in map.columns.iter().enumerate() {
-                if let Ok(term) = terms.binary_search_by_key(&target_position, |item| item.target) {
-                    equation.insert(
-                        source + column,
-                        (modulus - u64::from(terms[term].coefficient)) as u32,
-                    );
-                }
-            }
-            equations.push(equation);
-        }
+        append_map_constraints(
+            &mut relations,
+            &mut equations,
+            dimensions,
+            maps,
+            &offsets,
+            start,
+            position,
+            modulus,
+        );
     }
     let relation_rank = rref(relations.clone(), modulus).len();
     let limit = nullspace(equations, ambient, modulus);
+    append_limit_images(&mut relations, limit, dimensions[start]);
+    rref(relations, modulus).len() - relation_rank
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_map_constraints(
+    relations: &mut Vec<Vector>,
+    equations: &mut Vec<Vector>,
+    dimensions: &[usize],
+    maps: &[Map],
+    offsets: &[usize],
+    start: usize,
+    position: usize,
+    modulus: u64,
+) {
+    let map = &maps[position];
+    let left = offsets[position - start];
+    let right = offsets[position + 1 - start];
+    let (source, target, target_dimension) = if map.forward {
+        (left, right, dimensions[position + 1])
+    } else {
+        (right, left, dimensions[position])
+    };
+    for (column, terms) in map.columns.iter().enumerate() {
+        relations.push(map_relation(source, target, column, terms, modulus));
+    }
+    for target_position in 0..target_dimension {
+        equations.push(map_equation(
+            source,
+            target,
+            target_position,
+            &map.columns,
+            modulus,
+        ));
+    }
+}
+
+fn map_relation(
+    source: usize,
+    target: usize,
+    column: usize,
+    terms: &[MapTerm],
+    modulus: u64,
+) -> Vector {
+    let mut relation = Vector::default();
+    relation.insert(source + column, 1);
+    for term in terms {
+        relation.insert(
+            target + term.target,
+            (modulus - u64::from(term.coefficient)) as u32,
+        );
+    }
+    relation
+}
+
+fn map_equation(
+    source: usize,
+    target: usize,
+    target_position: usize,
+    columns: &[Vec<MapTerm>],
+    modulus: u64,
+) -> Vector {
+    let mut equation = Vector::default();
+    equation.insert(target + target_position, 1);
+    for (column, terms) in columns.iter().enumerate() {
+        if let Ok(term) = terms.binary_search_by_key(&target_position, |item| item.target) {
+            equation.insert(
+                source + column,
+                (modulus - u64::from(terms[term].coefficient)) as u32,
+            );
+        }
+    }
+    equation
+}
+
+fn append_limit_images(relations: &mut Vec<Vector>, limit: Vec<Vector>, dimension: usize) {
     for section in limit {
         let mut image = Vector::default();
-        for (&position, &coefficient) in section.0.range(..dimensions[start]) {
+        for (&position, &coefficient) in section.0.range(..dimension) {
             image.insert(position, coefficient);
         }
         if !image.is_zero() {
             relations.push(image);
         }
     }
-    rref(relations, modulus).len() - relation_rank
 }
 
 #[derive(Clone, Default)]
