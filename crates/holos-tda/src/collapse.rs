@@ -696,10 +696,26 @@ fn test_edge(
     terminal: f64,
     s: &mut Scratch,
 ) -> Option<Vec<(f64, usize)>> {
-    // C by sorted merge of the two adjacency lists. Tombstones read as
-    // +inf and drop out through the finiteness checks. Neither list holds
-    // its own vertex, so u and v never enter the intersection.
-    s.cands.clear();
+    collect_candidates(adj, u, v, a, terminal, &mut s.cands);
+    if s.cands.is_empty() {
+        return None;
+    }
+    order_candidates(&s.cands, &mut s.by_b);
+    if s.by_b[0].0 > a {
+        return None;
+    }
+    witness_segments(adj, &s.cands, &s.by_b, &mut s.apex_row)
+}
+
+fn collect_candidates(
+    adj: &[Vec<AdjEntry>],
+    u: usize,
+    v: usize,
+    edge_value: f64,
+    terminal: f64,
+    candidates: &mut Vec<(usize, f64)>,
+) {
+    candidates.clear();
     let (lu, lv) = (&adj[u], &adj[v]);
     let (mut i, mut j) = (0, 0);
     while i < lu.len() && j < lv.len() {
@@ -710,9 +726,9 @@ fn test_edge(
             std::cmp::Ordering::Greater => j += 1,
             std::cmp::Ordering::Equal => {
                 if du.is_finite() && dv.is_finite() {
-                    let b = a.max(du).max(dv);
+                    let b = edge_value.max(du).max(dv);
                     if b <= terminal {
-                        s.cands.push((x, b));
+                        candidates.push((x, b));
                     }
                 }
                 i += 1;
@@ -720,58 +736,58 @@ fn test_edge(
             }
         }
     }
-    let cands = &s.cands;
-    let k = cands.len();
-    if k == 0 {
-        return None;
-    }
+}
 
-    s.by_b.clear();
-    s.by_b
-        .extend(cands.iter().enumerate().map(|(p, &(_, b))| (b, p as u32)));
-    s.by_b
-        .sort_unstable_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
-    // The critical values are the distinct b values plus `a` itself. At
-    // t = a the candidate set is `{x : b(x) = a}`; when the smallest b
-    // exceeds `a` that set is empty and no witness exists at the birth.
-    if s.by_b[0].0 > a {
-        return None;
-    }
+fn order_candidates(candidates: &[(usize, f64)], by_birth: &mut Vec<(f64, u32)>) {
+    by_birth.clear();
+    by_birth.extend(
+        candidates
+            .iter()
+            .enumerate()
+            .map(|(position, &(_, birth))| (birth, position as u32)),
+    );
+    by_birth.sort_unstable_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+}
 
+fn witness_segments(
+    adj: &[Vec<AdjEntry>],
+    candidates: &[(usize, f64)],
+    by_birth: &[(f64, u32)],
+    apex_row: &mut Vec<f64>,
+) -> Option<Vec<(f64, usize)>> {
     let mut segments: Vec<(f64, usize)> = Vec::new();
-    let mut apex: Option<usize> = None;
     let mut run = 0usize;
-    while run < k {
-        let t = s.by_b[run].0;
+    let mut have_apex = false;
+    while run < candidates.len() {
+        let t = by_birth[run].0;
         let mut run_end = run;
-        while run_end < k && s.by_b[run_end].0 == t {
+        while run_end < candidates.len() && by_birth[run_end].0 == t {
             run_end += 1;
         }
-        let kept = apex.is_some_and(|_| {
-            s.by_b[run..run_end]
+        let kept = have_apex
+            && by_birth[run..run_end]
                 .iter()
-                .all(|&(_, p)| s.apex_row[p as usize] <= t)
-        });
+                .all(|&(_, position)| apex_row[position as usize] <= t);
         if !kept {
-            let mut found = None;
-            for p in 0..k {
-                if cands[p].1 > t {
-                    continue;
-                }
-                if dominates(adj, cands, &s.by_b[..run_end], p, t) {
-                    found = Some(p);
-                    break;
-                }
-            }
-            // No candidate dominates at this level, so the edge stays.
-            let p = found?;
-            fill_row(adj, cands, p, &mut s.apex_row);
-            segments.push((t, cands[p].0));
-            apex = Some(p);
+            let position = first_dominating_candidate(adj, candidates, &by_birth[..run_end], t)?;
+            fill_row(adj, candidates, position, apex_row);
+            segments.push((t, candidates[position].0));
+            have_apex = true;
         }
         run = run_end;
     }
     Some(segments)
+}
+
+fn first_dominating_candidate(
+    adj: &[Vec<AdjEntry>],
+    candidates: &[(usize, f64)],
+    members: &[(f64, u32)],
+    level: f64,
+) -> Option<usize> {
+    (0..candidates.len()).find(|&position| {
+        candidates[position].1 <= level && dominates(adj, candidates, members, position, level)
+    })
 }
 
 /// Run `mark` on the schedule index of every live edge of the subgraph
@@ -789,69 +805,99 @@ fn for_each_induced_edge(
     mut mark: impl FnMut(usize),
 ) -> bool {
     let (lu, lv) = (&adj[u], &adj[v]);
-    if let Some(limit) = limit {
-        // The whole point of fine marking is to beat a plain retest, so
-        // its own cost must stay near-constant. Long adjacency lists mean
-        // a dense neighborhood where a retest is cheap per edge anyway:
-        // bail before walking anything.
-        if lu.len().min(lv.len()) > 2 * limit {
-            return false;
-        }
+    if limit.is_some_and(|limit| lu.len().min(lv.len()) > 2 * limit) {
+        return false;
     }
-    s.marks.clear();
+    collect_closed_common(lu, lv, u, v, &mut s.marks);
+    if limit.is_some_and(|limit| s.marks.len() > limit) {
+        return false;
+    }
+    for (position, &vertex) in s.marks.iter().enumerate() {
+        mark_induced_edges(adj, &s.marks, position, vertex, &mut mark);
+    }
+    true
+}
+
+fn collect_closed_common(
+    left: &[AdjEntry],
+    right: &[AdjEntry],
+    u: usize,
+    v: usize,
+    vertices: &mut Vec<usize>,
+) {
+    vertices.clear();
     let (mut i, mut j) = (0, 0);
-    while i < lu.len() && j < lv.len() {
-        let (x, du, _) = lu[i];
-        let (y, dv, _) = lv[j];
+    while i < left.len() && j < right.len() {
+        let (x, du, _) = left[i];
+        let (y, dv, _) = right[j];
         match x.cmp(&y) {
             std::cmp::Ordering::Less => i += 1,
             std::cmp::Ordering::Greater => j += 1,
             std::cmp::Ordering::Equal => {
                 if du.is_finite() && dv.is_finite() {
-                    s.marks.push(x);
+                    vertices.push(x);
                 }
                 i += 1;
                 j += 1;
             }
         }
     }
-    s.marks.push(u);
-    s.marks.push(v);
-    if limit.is_some_and(|limit| s.marks.len() > limit) {
-        return false;
+    vertices.push(u);
+    vertices.push(v);
+    vertices.sort_unstable();
+}
+
+fn mark_induced_edges(
+    adj: &[Vec<AdjEntry>],
+    vertices: &[usize],
+    position: usize,
+    vertex: usize,
+    mark: &mut impl FnMut(usize),
+) {
+    let list = &adj[vertex];
+    if vertices.len() * 16 < list.len() {
+        mark_induced_edges_by_probe(list, &vertices[position + 1..], mark);
+    } else {
+        mark_induced_edges_by_merge(list, vertices, vertex, mark);
     }
-    s.marks.sort_unstable();
-    for (a, &p) in s.marks.iter().enumerate() {
-        let list = &adj[p];
-        // A long list gets probed per pair; a short one merges.
-        if s.marks.len() * 16 < list.len() {
-            for &q in &s.marks[a + 1..] {
-                if let Ok(pos) = list.binary_search_by(|probe| probe.0.cmp(&q)) {
-                    let (_, d, idx) = list[pos];
-                    if d.is_finite() {
-                        mark(idx);
-                    }
-                }
-            }
-        } else {
-            let (mut i, mut q) = (0, 0);
-            while i < list.len() && q < s.marks.len() {
-                let (x, d, idx) = list[i];
-                match x.cmp(&s.marks[q]) {
-                    std::cmp::Ordering::Less => i += 1,
-                    std::cmp::Ordering::Greater => q += 1,
-                    std::cmp::Ordering::Equal => {
-                        if x > p && d.is_finite() {
-                            mark(idx);
-                        }
-                        i += 1;
-                        q += 1;
-                    }
-                }
+}
+
+fn mark_induced_edges_by_probe(
+    list: &[AdjEntry],
+    vertices: &[usize],
+    mark: &mut impl FnMut(usize),
+) {
+    for &other in vertices {
+        if let Ok(position) = list.binary_search_by(|probe| probe.0.cmp(&other)) {
+            let (_, distance, index) = list[position];
+            if distance.is_finite() {
+                mark(index);
             }
         }
     }
-    true
+}
+
+fn mark_induced_edges_by_merge(
+    list: &[AdjEntry],
+    vertices: &[usize],
+    vertex: usize,
+    mark: &mut impl FnMut(usize),
+) {
+    let (mut i, mut q) = (0, 0);
+    while i < list.len() && q < vertices.len() {
+        let (neighbor, distance, index) = list[i];
+        match neighbor.cmp(&vertices[q]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => q += 1,
+            std::cmp::Ordering::Equal => {
+                if neighbor > vertex && distance.is_finite() {
+                    mark(index);
+                }
+                i += 1;
+                q += 1;
+            }
+        }
+    }
 }
 
 /// Mark every live edge whose test could change after `{u, v}` goes away.
