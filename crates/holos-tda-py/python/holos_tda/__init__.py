@@ -21,6 +21,8 @@ __all__ = [
     "affine_events",
     "cohomology_relation",
     "cohomology_space",
+    "compile_collapse_portfolio",
+    "compile_explicit_persistence",
     "compile_points_atlas",
     "compile_relative_interface",
     "compile_sparse_atlas",
@@ -44,10 +46,63 @@ __all__ = [
     "synthesize_affine_coverage",
     "synthesize_affine_cohomology",
     "synthesize_coverage",
+    "synthesize_geometric_coverage",
     "synthesize_cohomology",
     "verify_intervention",
     "verify_program_trace",
 ]
+
+
+def compile_collapse_portfolio(n, triplets, max_dim=1, threshold=None,
+                               threads=4, score="columns",
+                               adaptive_objective="h1",
+                               adaptive_work_limit=None):
+    """Select the exact minimum over three checked collapse schedules.
+
+    The declared portfolio contains serial, rounds, and adaptive schedules.
+    The result proves the minimum score within this finite set. It does not
+    claim a globally minimum collapse sequence.
+    """
+    artifact, selected, entries = _core.compile_collapse_portfolio(
+        int(n),
+        [(int(u), int(v), float(value)) for u, v, value in triplets],
+        int(max_dim), threshold, int(threads), str(score),
+        str(adaptive_objective), adaptive_work_limit,
+    )
+    return {
+        "artifact": bytes(artifact),
+        "selected": selected,
+        "entries": [
+            {
+                "schedule": schedule,
+                "simplex_counts": simplex_counts,
+                "surviving_edges": surviving_edges,
+            }
+            for schedule, simplex_counts, surviving_edges in entries
+        ],
+    }
+
+
+def compile_explicit_persistence(simplices, max_dim=1, modulus=2):
+    """Certify persistence for an explicit scalar filtered complex.
+
+    Each simplex is ``(vertices, grade)``. List every nonempty face exactly
+    once. The artifact records checked ``D V = R`` factorizations through
+    boundary dimension ``max_dim + 1``.
+    """
+    artifact, bars, simplex_counts, column_counts = (
+        _core.compile_explicit_persistence(
+            [([int(vertex) for vertex in vertices], float(grade))
+             for vertices, grade in simplices],
+            int(max_dim), int(modulus),
+        )
+    )
+    return {
+        "artifact": bytes(artifact),
+        "bars": bars,
+        "simplex_counts": simplex_counts,
+        "column_counts": column_counts,
+    }
 
 
 def compile_relative_interface(n, triplets, protected=(), max_dim=1,
@@ -299,7 +354,7 @@ def _coverage_candidates(candidates):
     return output
 
 
-def _coverage_result(values):
+def _coverage_result(values, geometry_checked=False):
     return {
         "artifact": bytes(values[0]),
         "status": values[1],
@@ -313,7 +368,8 @@ def _coverage_result(values):
         "selected_failure_checks": values[9],
         "minimum_witness_triangles": values[10],
         "states": values[11],
-        "physical_claim_is_conditional": True,
+        "geometry_checked": geometry_checked,
+        "physical_claim_is_conditional": not geometry_checked,
     }
 
 
@@ -341,6 +397,34 @@ def synthesize_coverage(n, states, fence, candidates, broadcast_radius,
         int(oracle_limit), int(node_limit),
     )
     return _coverage_result(values)
+
+
+def synthesize_geometric_coverage(
+        n, states, coordinates, fence, candidates, broadcast_radius,
+        sensing_radius, max_activations, base=(), failable=(),
+        failure_budget=0, modulus=2, oracle_limit=2_000_000,
+        node_limit=2_000_000):
+    """Certify finite coverage and bind every state to planar coordinates.
+
+    ``coordinates`` contains one ``(x, y)`` sequence per state. The checker
+    proves that the fence is a simple polygon, every sensor lies inside it,
+    and each state is the complete Euclidean broadcast-radius graph.
+    """
+    values = _core.synthesize_geometric_coverage(
+        int(n),
+        [[(int(u), int(v), float(value)) for u, v, value in state]
+         for state in states],
+        [[(float(x), float(y)) for x, y in state]
+         for state in coordinates],
+        [int(vertex) for vertex in fence],
+        [int(vertex) for vertex in base],
+        [int(vertex) for vertex in failable],
+        _coverage_candidates(candidates),
+        float(broadcast_radius), float(sensing_radius),
+        int(failure_budget), int(max_activations), int(modulus),
+        int(oracle_limit), int(node_limit),
+    )
+    return _coverage_result(values, geometry_checked=True)
 
 
 def synthesize_affine_coverage(n, edges, start, end, fence, candidates,

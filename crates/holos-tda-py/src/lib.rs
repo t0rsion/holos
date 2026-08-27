@@ -7,22 +7,29 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-use holos_tda::collapse::{AdaptiveCollapseParams, CollapseObjective};
+use holos_tda::collapse::{
+    AdaptiveCollapseParams, CollapseObjective, CollapsePortfolioArtifact,
+    CollapsePortfolioCandidate, CollapsePortfolioDecodeLimits, CollapsePortfolioLimits,
+    CollapsePortfolioObjective, collapse_sparse_portfolio,
+};
 use holos_tda::{
     AtlasArtifact, AtlasDecodeLimits, AtlasEvaluation, CertificateLimits,
     CohomologyInterventionArtifact, CohomologyInterventionCandidate, CohomologyInterventionLimits,
     CohomologyInterventionScenario, CohomologyLimits, CorrespondenceMode, CoverageAction,
-    CoverageFence, CoverageLimits, CoverageSpecification, CoverageState, CoverageSynthesisArtifact,
-    CoverageSynthesisLimits, DurableInterfaceStore, EndpointGradient, IndexDeltaProof, IndexEdit,
+    CoverageFence, CoverageGeometry, CoverageGeometryLimits, CoverageLimits, CoverageSpecification,
+    CoverageState, CoverageSynthesisArtifact, CoverageSynthesisLimits, DurableInterfaceStore,
+    EndpointGradient, ExplicitReductionCertificate, FilteredSimplex, FilteredSimplicialComplex,
+    GeometryBoundCoverageArtifact, GeometryBoundCoverageDecodeLimits, IndexDeltaProof, IndexEdit,
     IndexEvent, IndexEventKind, IndexParams, IndexSnapshotProof, IndexTransition, IndexUpdateMode,
     IndexWork, InterfaceMode, InterfacePolicy, InterventionArtifact, InterventionBudget,
     InterventionDecodeLimits, KineticEdge, KineticEventKind, KineticFiltration, KineticLimits,
     KineticZigzagArtifact, KineticZigzagArtifactLimits, KineticZigzagNodeKind, PersistenceAtlas,
-    PersistenceIndex, PersistenceProgram, PlanarCoverageModel, PointEndpointGradient,
+    PersistenceIndex, PersistenceProgram, PlanarCoverageModel, PlanarPoint, PointEndpointGradient,
     PointPersistenceAtlas, ProgramArtifact, ProgramDecodeLimits, ProgramEvent, ProgramEventKind,
     ProgramTraceArtifact, ProgramTraceDecodeLimits, ProgramUpdate, ProgramUpdateMode, ProgramWork,
-    ProofArtifact, RelativeInterfaceCertificate, TopologyEvent, TopologyEventKind, TopologyPatch,
-    UpdateMode, ZigzagDirection, cohomology_relation, cohomology_space, evaluate_planar_coverage,
+    ProofArtifact, RelativeInterfaceCertificate, ScalarGrade, TopologyEvent, TopologyEventKind,
+    TopologyPatch, UpdateMode, ZigzagDirection, cohomology_relation, cohomology_space,
+    evaluate_planar_coverage,
 };
 use holos_tda::{
     CollapseSchedule, DistanceMatrix, ExplainedDiagram, GraphFactorization, PointCloudGraph,
@@ -250,6 +257,8 @@ type CoverageRecord = (
     Option<usize>,
     usize,
 );
+type PortfolioRecord = (Vec<u8>, usize, Vec<(String, Vec<u64>, usize)>);
+type ExplicitRecord = (Vec<u8>, Bars, Vec<usize>, Vec<usize>);
 
 // The argument list mirrors the Python keyword signature one-to-one.
 #[allow(clippy::too_many_arguments)]
@@ -1842,6 +1851,136 @@ fn compile_relative_interface(
 }
 
 #[pyfunction]
+#[pyo3(signature = (n, triplets, max_dim=1, threshold=None, threads=4, score="columns", adaptive_objective="h1", adaptive_work_limit=None))]
+#[allow(clippy::too_many_arguments)]
+fn compile_collapse_portfolio(
+    py: Python<'_>,
+    n: usize,
+    triplets: Vec<(usize, usize, f64)>,
+    max_dim: usize,
+    threshold: Option<f64>,
+    threads: usize,
+    score: &str,
+    adaptive_objective: &str,
+    adaptive_work_limit: Option<u64>,
+) -> PyResult<PortfolioRecord> {
+    py.detach(|| {
+        let input = SparseDistanceMatrix::from_triplets(n, &triplets).map_err(to_err)?;
+        let adaptive_objective = parse_collapse_objective(adaptive_objective)?;
+        let candidates = [
+            CollapsePortfolioCandidate::Serial,
+            CollapsePortfolioCandidate::Rounds { threads },
+            CollapsePortfolioCandidate::Adaptive {
+                objective: adaptive_objective,
+                work_limit: adaptive_work_limit,
+            },
+        ];
+        let objective = match score {
+            "edges" => CollapsePortfolioObjective::Edges,
+            "columns" => CollapsePortfolioObjective::ReductionColumns {
+                max_homology_dimension: max_dim,
+            },
+            value => {
+                return Err(PyValueError::new_err(format!(
+                    "score must be edges or columns, not {value}"
+                )));
+            }
+        };
+        let limits = CollapsePortfolioLimits::default().with_max_homology_dimension(max_dim);
+        let portfolio =
+            collapse_sparse_portfolio(&input, threshold, &candidates, objective, limits)
+                .map_err(to_err)?;
+        let artifact =
+            CollapsePortfolioArtifact::from_portfolio(&portfolio, limits).map_err(to_err)?;
+        let bytes = artifact
+            .encode(limits, CollapsePortfolioDecodeLimits::default())
+            .map_err(to_err)?;
+        let entries = portfolio
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    collapse_candidate_name(entry.candidate()).to_owned(),
+                    entry.score().simplex_counts().to_vec(),
+                    entry.result().matrix.num_edges(),
+                )
+            })
+            .collect();
+        Ok((bytes, portfolio.selected_index(), entries))
+    })
+}
+
+fn collapse_candidate_name(candidate: CollapsePortfolioCandidate) -> &'static str {
+    match candidate {
+        CollapsePortfolioCandidate::Serial => "serial",
+        CollapsePortfolioCandidate::Rounds { .. } => "rounds",
+        CollapsePortfolioCandidate::Adaptive { .. } => "adaptive",
+        _ => "other",
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (simplices, max_dim=1, modulus=2))]
+fn compile_explicit_persistence(
+    py: Python<'_>,
+    simplices: Vec<(Vec<usize>, f64)>,
+    max_dim: usize,
+    modulus: u32,
+) -> PyResult<ExplicitRecord> {
+    py.detach(|| {
+        let complex = explicit_complex(simplices, max_dim)?;
+        let certificate = ExplicitReductionCertificate::build(
+            &complex,
+            max_dim,
+            modulus,
+            CertificateLimits::default(),
+        )
+        .map_err(display_err)?;
+        let bytes = certificate
+            .encode(CertificateLimits::default())
+            .map_err(display_err)?;
+        let simplex_counts = certificate
+            .complex()
+            .simplices()
+            .iter()
+            .map(Vec::len)
+            .collect();
+        let column_counts = certificate.columns().iter().map(Vec::len).collect();
+        Ok((
+            bytes,
+            to_bars(certificate.diagram().clone()),
+            simplex_counts,
+            column_counts,
+        ))
+    })
+}
+
+fn explicit_complex(
+    simplices: Vec<(Vec<usize>, f64)>,
+    max_dim: usize,
+) -> PyResult<FilteredSimplicialComplex<ScalarGrade>> {
+    let mut groups = vec![Vec::new(); max_dim.saturating_add(2)];
+    for (vertices, grade) in simplices {
+        if vertices.is_empty() {
+            return Err(PyValueError::new_err("an explicit simplex cannot be empty"));
+        }
+        let dimension = vertices.len() - 1;
+        if dimension >= groups.len() {
+            groups.resize_with(dimension + 1, Vec::new);
+        }
+        let grade = ScalarGrade::new(grade).map_err(display_err)?;
+        groups[dimension].push(FilteredSimplex::new(vertices, grade));
+    }
+    let mut labels = groups[0]
+        .iter()
+        .filter_map(|simplex| simplex.vertices().first().copied())
+        .collect::<Vec<_>>();
+    labels.sort_unstable();
+    labels.dedup();
+    FilteredSimplicialComplex::new(labels, groups).map_err(display_err)
+}
+
+#[pyfunction]
 #[pyo3(signature = (artifacts, store, separator=Vec::new(), protected=Vec::new()))]
 fn merge_relative_interfaces(
     py: Python<'_>,
@@ -2270,29 +2409,17 @@ fn synthesize_finite_coverage(
     node_limit: usize,
 ) -> PyResult<CoverageRecord> {
     py.detach(|| {
-        let model = PlanarCoverageModel::new(broadcast_radius, sensing_radius).map_err(to_err)?;
-        let fence = CoverageFence::new(fence).map_err(to_err)?;
-        let base = coverage_base(fence.vertices(), &base);
-        let states = states
-            .into_iter()
-            .enumerate()
-            .map(|(step, triplets)| {
-                let graph = SparseDistanceMatrix::from_triplets(n, &triplets)?;
-                CoverageState::new(0, step as u64, &graph, base.clone(), broadcast_radius)
-            })
-            .collect::<holos_tda::Result<Vec<_>>>()
-            .map_err(to_err)?;
-        let specification = CoverageSpecification::new(
+        let specification = finite_coverage_specification(
             n,
-            model,
-            modulus,
-            fence,
-            failable,
-            failure_budget,
             states,
-            CoverageLimits::default(),
-        )
-        .map_err(to_err)?;
+            fence,
+            base,
+            failable,
+            broadcast_radius,
+            sensing_radius,
+            failure_budget,
+            modulus,
+        )?;
         let actions = coverage_actions(candidates, &specification)?;
         build_coverage_record(
             specification,
@@ -2302,6 +2429,102 @@ fn synthesize_finite_coverage(
             node_limit,
         )
     })
+}
+
+#[pyfunction]
+#[pyo3(signature = (n, states, coordinates, fence, base, failable, candidates, broadcast_radius, sensing_radius, failure_budget, max_activations, modulus=2, oracle_limit=2_000_000, node_limit=2_000_000))]
+#[allow(clippy::too_many_arguments)]
+fn synthesize_geometric_coverage(
+    py: Python<'_>,
+    n: usize,
+    states: Vec<Vec<(usize, usize, f64)>>,
+    coordinates: Vec<Vec<(f64, f64)>>,
+    fence: Vec<usize>,
+    base: Vec<usize>,
+    failable: Vec<usize>,
+    candidates: Vec<CoverageCandidateInput>,
+    broadcast_radius: f64,
+    sensing_radius: f64,
+    failure_budget: usize,
+    max_activations: usize,
+    modulus: u32,
+    oracle_limit: usize,
+    node_limit: usize,
+) -> PyResult<CoverageRecord> {
+    py.detach(|| {
+        let specification = finite_coverage_specification(
+            n,
+            states,
+            fence,
+            base,
+            failable,
+            broadcast_radius,
+            sensing_radius,
+            failure_budget,
+            modulus,
+        )?;
+        let actions = coverage_actions(candidates, &specification)?;
+        let geometry = CoverageGeometry::new(
+            &specification,
+            coordinates
+                .into_iter()
+                .map(|state| {
+                    state
+                        .into_iter()
+                        .map(|(x, y)| PlanarPoint::new(x, y))
+                        .collect::<holos_tda::Result<Vec<_>>>()
+                })
+                .collect::<holos_tda::Result<Vec<_>>>()
+                .map_err(to_err)?,
+            CoverageGeometryLimits::default(),
+        )
+        .map_err(to_err)?;
+        build_geometric_coverage_record(
+            specification,
+            actions,
+            geometry,
+            max_activations,
+            oracle_limit,
+            node_limit,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finite_coverage_specification(
+    n: usize,
+    states: Vec<Vec<(usize, usize, f64)>>,
+    fence: Vec<usize>,
+    base: Vec<usize>,
+    failable: Vec<usize>,
+    broadcast_radius: f64,
+    sensing_radius: f64,
+    failure_budget: usize,
+    modulus: u32,
+) -> PyResult<CoverageSpecification> {
+    let model = PlanarCoverageModel::new(broadcast_radius, sensing_radius).map_err(to_err)?;
+    let fence = CoverageFence::new(fence).map_err(to_err)?;
+    let base = coverage_base(fence.vertices(), &base);
+    let states = states
+        .into_iter()
+        .enumerate()
+        .map(|(step, triplets)| {
+            let graph = SparseDistanceMatrix::from_triplets(n, &triplets)?;
+            CoverageState::new(0, step as u64, &graph, base.clone(), broadcast_radius)
+        })
+        .collect::<holos_tda::Result<Vec<_>>>()
+        .map_err(to_err)?;
+    CoverageSpecification::new(
+        n,
+        model,
+        modulus,
+        fence,
+        failable,
+        failure_budget,
+        states,
+        CoverageLimits::default(),
+    )
+    .map_err(to_err)
 }
 
 #[pyfunction]
@@ -2415,7 +2638,38 @@ fn build_coverage_record(
         CoverageSynthesisArtifact::build(specification, actions, max_activations, limits)
             .map_err(to_err)?;
     let bytes = artifact.encode(limits).map_err(to_err)?;
-    Ok((
+    Ok(coverage_record(&artifact, bytes))
+}
+
+fn build_geometric_coverage_record(
+    specification: CoverageSpecification,
+    actions: Vec<CoverageAction>,
+    geometry: CoverageGeometry,
+    max_activations: usize,
+    oracle_limit: usize,
+    node_limit: usize,
+) -> PyResult<CoverageRecord> {
+    let limits = CoverageSynthesisLimits::default()
+        .with_max_oracle_calls(oracle_limit)
+        .with_max_search_nodes(node_limit);
+    let artifact =
+        CoverageSynthesisArtifact::build(specification, actions, max_activations, limits)
+            .map_err(to_err)?;
+    let mut record = coverage_record(&artifact, Vec::new());
+    let geometry_limits = CoverageGeometryLimits::default();
+    record.0 = GeometryBoundCoverageArtifact::build(artifact, geometry, limits, geometry_limits)
+        .map_err(to_err)?
+        .encode(
+            limits,
+            geometry_limits,
+            GeometryBoundCoverageDecodeLimits::default(),
+        )
+        .map_err(to_err)?;
+    Ok(record)
+}
+
+fn coverage_record(artifact: &CoverageSynthesisArtifact, bytes: Vec<u8>) -> CoverageRecord {
+    (
         bytes,
         artifact.status().to_string(),
         artifact
@@ -2435,7 +2689,7 @@ fn build_coverage_record(
         artifact.selected_failure_checks(),
         artifact.minimum_witness_triangles(),
         artifact.specification().states().len(),
-    ))
+    )
 }
 
 #[pyfunction]
@@ -2806,7 +3060,18 @@ fn register_proofs(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 fn register_proof_builders(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    register_v07_proof_builders(m)?;
+    register_interface_proof_builders(m)
+}
+
+fn register_v07_proof_builders(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(compile_collapse_portfolio, m)?)?;
+    m.add_function(wrap_pyfunction!(compile_explicit_persistence, m)?)?;
     m.add_function(wrap_pyfunction!(compile_sparse_proof, m)?)?;
+    Ok(())
+}
+
+fn register_interface_proof_builders(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compile_relative_interface, m)?)?;
     m.add_function(wrap_pyfunction!(merge_relative_interfaces, m)?)?;
     Ok(())
@@ -2838,8 +3103,18 @@ fn register_applications(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 fn register_synthesis(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    register_coverage_synthesis(m)?;
+    register_cohomology_synthesis(m)
+}
+
+fn register_coverage_synthesis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(synthesize_finite_coverage, m)?)?;
+    m.add_function(wrap_pyfunction!(synthesize_geometric_coverage, m)?)?;
     m.add_function(wrap_pyfunction!(synthesize_affine_coverage, m)?)?;
+    Ok(())
+}
+
+fn register_cohomology_synthesis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(synthesize_fixed_cohomology, m)?)?;
     m.add_function(wrap_pyfunction!(synthesize_affine_cohomology, m)?)?;
     Ok(())

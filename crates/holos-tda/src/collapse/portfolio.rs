@@ -77,6 +77,20 @@ impl Default for CollapsePortfolioLimits {
     }
 }
 
+impl CollapsePortfolioLimits {
+    /// Set the largest homology dimension accepted by the score counter.
+    pub fn with_max_homology_dimension(mut self, maximum: usize) -> Self {
+        self.max_homology_dimension = maximum;
+        self
+    }
+
+    /// Set the largest nonvertex clique count visited for one candidate.
+    pub fn with_max_cliques_per_candidate(mut self, maximum: u64) -> Self {
+        self.max_cliques_per_candidate = maximum;
+        self
+    }
+}
+
 /// Exact surviving-simplex score for one candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollapsePortfolioScore {

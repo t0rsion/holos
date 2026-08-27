@@ -41,6 +41,27 @@ bars = holos_tda.rips_sparse(4, [(0, 1, 1.0), (1, 2, 1.0), (2, 3, 1.0), (0, 3, 1
 (h1,) = [b for b in bars if b[0] == 1]
 assert close(h1[1], 1.0) and h1[2] == math.inf
 
+# The exact collapse portfolio checks all three declared schedules and emits
+# a portable finite-choice proof.
+tetrahedron = [
+    (u, v, 1.0) for u in range(4) for v in range(u + 1, 4)
+]
+portfolio = holos_tda.compile_collapse_portfolio(
+    4, tetrahedron, max_dim=1, threads=2)
+assert portfolio["artifact"].startswith(b"HOLOSPOR")
+assert len(portfolio["entries"]) == 3
+assert portfolio["entries"][portfolio["selected"]]["simplex_counts"]
+
+# The explicit-complex boundary certifies a non-flag four-cycle directly.
+explicit_cycle = [([vertex], 0.0) for vertex in range(4)] + [
+    ([0, 1], 1.0), ([1, 2], 1.0), ([2, 3], 1.0), ([0, 3], 1.0),
+]
+explicit = holos_tda.compile_explicit_persistence(
+    explicit_cycle, max_dim=1, modulus=3)
+assert explicit["artifact"].startswith(b"HOLOSEXP")
+assert len([bar for bar in explicit["bars"]
+            if bar[0] == 1 and bar[2] == math.inf]) == 1
+
 # threads=2 yields the identical diagram through every entry point.
 sq = [[0, 0], [1, 0], [1, 1], [0, 1]]
 assert holos_tda.rips_points(sq, max_dim=1, threads=2) == holos_tda.rips_points(
@@ -256,6 +277,20 @@ assert coverage_plan["lower_bound_cost"] == 5
 assert coverage_plan["upper_bound_cost"] == 5
 assert coverage_plan["artifact"].startswith(b"HOLOSCOV")
 assert coverage_plan["selected_failure_checks"] == 2
+
+geometric_graph = [
+    (0, 1, 2.0), (1, 2, 2.0), (2, 3, 2.0), (0, 3, 2.0),
+    (0, 4, SQRT2), (1, 4, SQRT2), (2, 4, SQRT2), (3, 4, SQRT2),
+]
+geometric_plan = holos_tda.synthesize_geometric_coverage(
+    5, [geometric_graph],
+    [[(0, 0), (2, 0), (2, 2), (0, 2), (1, 1)]],
+    [0, 1, 2, 3], [(4, 1)], broadcast_radius=2.0,
+    sensing_radius=2.0, max_activations=1,
+)
+assert geometric_plan["artifact"].startswith(b"HOLOSGEO")
+assert geometric_plan["geometry_checked"]
+assert not geometric_plan["physical_claim_is_conditional"]
 
 affine_coverage_plan = holos_tda.synthesize_affine_coverage(
     5,
