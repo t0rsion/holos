@@ -564,51 +564,7 @@ impl PersistenceIndex {
                 0,
             );
         }
-        let mut replacements = BTreeMap::new();
-        for &edit in edits {
-            let edge = edit.edge();
-            if self.topology.binary_search(&edge).is_err() {
-                return Err(Error::InvalidInput(format!(
-                    "index edit edge ({}, {}) is outside the listed-edge envelope",
-                    edge.u, edge.v
-                )));
-            }
-            let value = match edit {
-                IndexEdit::SetWeight { value, .. } => value,
-                IndexEdit::Activate { value, .. } => {
-                    let threshold = self.params.threshold.ok_or_else(|| {
-                        Error::InvalidInput(
-                            "edge activation requires a finite index threshold".into(),
-                        )
-                    })?;
-                    if value > threshold {
-                        return Err(Error::InvalidInput(format!(
-                            "edge activation value {value} exceeds the threshold {threshold}"
-                        )));
-                    }
-                    value
-                }
-                IndexEdit::Deactivate { .. } => {
-                    let threshold = self.params.threshold.ok_or_else(|| {
-                        Error::InvalidInput(
-                            "edge deactivation requires a finite index threshold".into(),
-                        )
-                    })?;
-                    if threshold >= f64::MAX {
-                        return Err(Error::InvalidInput(
-                            "edge deactivation requires a threshold below f64::MAX".into(),
-                        ));
-                    }
-                    f64::MAX
-                }
-            };
-            if replacements.insert(edge, value).is_some() {
-                return Err(Error::InvalidInput(format!(
-                    "index edit repeats edge ({}, {})",
-                    edge.u, edge.v
-                )));
-            }
-        }
+        let replacements = self.edit_replacements(edits)?;
         let triplets: Vec<_> = self
             .topology
             .iter()
@@ -634,6 +590,27 @@ impl PersistenceIndex {
             })
             .collect();
         self.transition_fixed_envelope(&updated, changed, correspondence_mode, edits.len())
+    }
+
+    fn edit_replacements(&self, edits: &[IndexEdit]) -> Result<BTreeMap<EdgeKey, f64>> {
+        let mut replacements = BTreeMap::new();
+        for &edit in edits {
+            let edge = edit.edge();
+            if self.topology.binary_search(&edge).is_err() {
+                return Err(Error::InvalidInput(format!(
+                    "index edit edge ({}, {}) is outside the listed-edge envelope",
+                    edge.u, edge.v
+                )));
+            }
+            let value = edit_value(edit, self.params.threshold)?;
+            if replacements.insert(edge, value).is_some() {
+                return Err(Error::InvalidInput(format!(
+                    "index edit repeats edge ({}, {})",
+                    edge.u, edge.v
+                )));
+            }
+        }
+        Ok(replacements)
     }
 
     /// Apply one atomic active-topology patch.
@@ -800,19 +777,19 @@ impl PersistenceIndex {
         };
         let mut events = Vec::new();
         let threshold = self.params.threshold.unwrap_or(f64::INFINITY);
-        let root = update_node(
-            &self.root,
-            &self.graph,
+        let mut context = UpdateContext {
+            current: &self.graph,
             updated,
-            &self.topology,
-            &changed,
-            &self.params,
-            self.index_params.interface_policy,
-            self.limits,
+            topology: &self.topology,
+            changed: &changed,
+            params: &self.params,
+            interface_policy: self.index_params.interface_policy,
+            limits: self.limits,
             threshold,
-            &mut work,
-            &mut events,
-        )?;
+            work: &mut work,
+            events: &mut events,
+        };
+        let root = context.update_node(&self.root)?;
         let index = Self {
             params: self.params.clone(),
             index_params: self.index_params,
@@ -860,6 +837,34 @@ impl PersistenceIndex {
 struct Scope {
     vertices: Vec<usize>,
     edge_positions: Vec<usize>,
+}
+
+fn edit_value(edit: IndexEdit, threshold: Option<f64>) -> Result<f64> {
+    match edit {
+        IndexEdit::SetWeight { value, .. } => Ok(value),
+        IndexEdit::Activate { value, .. } => {
+            let threshold = threshold.ok_or_else(|| {
+                Error::InvalidInput("edge activation requires a finite index threshold".into())
+            })?;
+            if value > threshold {
+                return Err(Error::InvalidInput(format!(
+                    "edge activation value {value} exceeds the threshold {threshold}"
+                )));
+            }
+            Ok(value)
+        }
+        IndexEdit::Deactivate { .. } => {
+            let threshold = threshold.ok_or_else(|| {
+                Error::InvalidInput("edge deactivation requires a finite index threshold".into())
+            })?;
+            if threshold >= f64::MAX {
+                return Err(Error::InvalidInput(
+                    "edge deactivation requires a threshold below f64::MAX".into(),
+                ));
+            }
+            Ok(f64::MAX)
+        }
+    }
 }
 
 struct TreeSpec {
@@ -999,6 +1004,24 @@ fn validate_params(_params: &RipsParams, index: IndexParams) -> Result<()> {
 fn scope_components(scope: &Scope, separator: &[usize], topology: &[EdgeKey]) -> Vec<Vec<usize>> {
     let excluded: BTreeSet<_> = separator.iter().copied().collect();
     let members: BTreeSet<_> = scope.vertices.iter().copied().collect();
+    let adjacency = scope_adjacency(scope, topology, &members, &excluded);
+    let mut seen = BTreeSet::new();
+    let mut components = Vec::new();
+    for &root in adjacency.keys() {
+        if seen.insert(root) {
+            components.push(walk_component(root, &adjacency, &mut seen));
+        }
+    }
+    components.sort_unstable();
+    components
+}
+
+fn scope_adjacency(
+    scope: &Scope,
+    topology: &[EdgeKey],
+    members: &BTreeSet<usize>,
+    excluded: &BTreeSet<usize>,
+) -> BTreeMap<usize, Vec<usize>> {
     let mut adjacency = BTreeMap::<usize, Vec<usize>>::new();
     for &vertex in &scope.vertices {
         if !excluded.contains(&vertex) {
@@ -1016,27 +1039,26 @@ fn scope_components(scope: &Scope, separator: &[usize], topology: &[EdgeKey]) ->
             adjacency.get_mut(&edge.v).unwrap().push(edge.u);
         }
     }
-    let mut seen = BTreeSet::new();
-    let mut components = Vec::new();
-    for &root in adjacency.keys() {
-        if !seen.insert(root) {
-            continue;
-        }
-        let mut stack = vec![root];
-        let mut component = Vec::new();
-        while let Some(vertex) = stack.pop() {
-            component.push(vertex);
-            for &neighbor in &adjacency[&vertex] {
-                if seen.insert(neighbor) {
-                    stack.push(neighbor);
-                }
+    adjacency
+}
+
+fn walk_component(
+    root: usize,
+    adjacency: &BTreeMap<usize, Vec<usize>>,
+    seen: &mut BTreeSet<usize>,
+) -> Vec<usize> {
+    let mut stack = vec![root];
+    let mut component = Vec::new();
+    while let Some(vertex) = stack.pop() {
+        component.push(vertex);
+        for &neighbor in &adjacency[&vertex] {
+            if seen.insert(neighbor) {
+                stack.push(neighbor);
             }
         }
-        component.sort_unstable();
-        components.push(component);
     }
-    components.sort_unstable();
-    components
+    component.sort_unstable();
+    component
 }
 
 fn next_combination(positions: &mut [usize], universe: usize) -> bool {
@@ -1062,76 +1084,25 @@ fn compile_node(
     limits: CertificateLimits,
     protected_vertices: &[usize],
 ) -> Result<Arc<InterfaceNode>> {
-    let children = spec
-        .children
-        .iter()
-        .map(|child| {
-            let child_protected =
-                inherited_protection(protected_vertices, &spec.separator, &child.scope.vertices);
-            compile_node(
-                child,
-                graph,
-                topology,
-                params,
-                interface_policy,
-                limits,
-                &child_protected,
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let state = match interface_policy {
-        InterfacePolicy::Relative => {
-            let relative = if children.is_empty() {
-                let local = local_graph(&spec.scope, graph, topology)?;
-                RelativeInterfaceCertificate::build_labeled(
-                    &local,
-                    &spec.scope.vertices,
-                    params,
-                    protected_vertices,
-                    limits,
-                )
-            } else {
-                let relative_children = children
-                    .iter()
-                    .map(|child| {
-                        child.relative().ok_or_else(|| {
-                            crate::CertificateError::new(
-                                "a relative index parent requires relative child cores",
-                            )
-                        })
-                    })
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                RelativeInterfaceCertificate::compose_trusted(
-                    &relative_children,
-                    protected_vertices,
-                    limits,
-                )
-            }
-            .map_err(|error| Error::InvalidInput(error.to_string()))?;
-            InterfaceState::Relative(relative)
-        }
-        InterfacePolicy::Compose => {
-            if let Some(mode) = composition_mode(&spec.separator, &children, graph, params) {
-                InterfaceState::Composed {
-                    mode,
-                    diagram: compose_diagram(&children, mode)?,
-                }
-            } else {
-                let local = local_graph(&spec.scope, graph, topology)?;
-                InterfaceState::Materialized(
-                    GradedReductionCertificate::build(&local, params, limits)
-                        .map_err(|error| Error::InvalidInput(error.to_string()))?,
-                )
-            }
-        }
-        InterfacePolicy::Materialize => {
-            let local = local_graph(&spec.scope, graph, topology)?;
-            InterfaceState::Materialized(
-                GradedReductionCertificate::build(&local, params, limits)
-                    .map_err(|error| Error::InvalidInput(error.to_string()))?,
-            )
-        }
-    };
+    let children = compile_children(
+        spec,
+        graph,
+        topology,
+        params,
+        interface_policy,
+        limits,
+        protected_vertices,
+    )?;
+    let state = compile_state(
+        spec,
+        &children,
+        graph,
+        topology,
+        params,
+        interface_policy,
+        limits,
+        protected_vertices,
+    )?;
     let digest = node_digest(
         &spec.scope.vertices,
         &spec.scope.edge_positions,
@@ -1149,6 +1120,124 @@ fn compile_node(
         children,
         state,
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_children(
+    spec: &TreeSpec,
+    graph: &SparseDistanceMatrix,
+    topology: &[EdgeKey],
+    params: &RipsParams,
+    interface_policy: InterfacePolicy,
+    limits: CertificateLimits,
+    protected_vertices: &[usize],
+) -> Result<Vec<Arc<InterfaceNode>>> {
+    spec.children
+        .iter()
+        .map(|child| {
+            let child_protected =
+                inherited_protection(protected_vertices, &spec.separator, &child.scope.vertices);
+            compile_node(
+                child,
+                graph,
+                topology,
+                params,
+                interface_policy,
+                limits,
+                &child_protected,
+            )
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_state(
+    spec: &TreeSpec,
+    children: &[Arc<InterfaceNode>],
+    graph: &SparseDistanceMatrix,
+    topology: &[EdgeKey],
+    params: &RipsParams,
+    interface_policy: InterfacePolicy,
+    limits: CertificateLimits,
+    protected_vertices: &[usize],
+) -> Result<InterfaceState> {
+    match interface_policy {
+        InterfacePolicy::Relative => compile_relative_state(
+            spec,
+            children,
+            graph,
+            topology,
+            params,
+            limits,
+            protected_vertices,
+        ),
+        InterfacePolicy::Compose => {
+            if let Some(mode) = composition_mode(&spec.separator, children, graph, params) {
+                Ok(InterfaceState::Composed {
+                    mode,
+                    diagram: compose_diagram(children, mode)?,
+                })
+            } else {
+                compile_materialized_state(&spec.scope, graph, topology, params, limits)
+            }
+        }
+        InterfacePolicy::Materialize => {
+            compile_materialized_state(&spec.scope, graph, topology, params, limits)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_relative_state(
+    spec: &TreeSpec,
+    children: &[Arc<InterfaceNode>],
+    graph: &SparseDistanceMatrix,
+    topology: &[EdgeKey],
+    params: &RipsParams,
+    limits: CertificateLimits,
+    protected_vertices: &[usize],
+) -> Result<InterfaceState> {
+    let relative = if children.is_empty() {
+        let local = local_graph(&spec.scope, graph, topology)?;
+        RelativeInterfaceCertificate::build_labeled(
+            &local,
+            &spec.scope.vertices,
+            params,
+            protected_vertices,
+            limits,
+        )
+    } else {
+        let relative_children = children
+            .iter()
+            .map(|child| {
+                child.relative().ok_or_else(|| {
+                    crate::CertificateError::new(
+                        "a relative index parent requires relative child cores",
+                    )
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        RelativeInterfaceCertificate::compose_trusted(
+            &relative_children,
+            protected_vertices,
+            limits,
+        )
+    }
+    .map_err(|error| Error::InvalidInput(error.to_string()))?;
+    Ok(InterfaceState::Relative(relative))
+}
+
+fn compile_materialized_state(
+    scope: &Scope,
+    graph: &SparseDistanceMatrix,
+    topology: &[EdgeKey],
+    params: &RipsParams,
+    limits: CertificateLimits,
+) -> Result<InterfaceState> {
+    let local = local_graph(scope, graph, topology)?;
+    let reduction = GradedReductionCertificate::build(&local, params, limits)
+        .map_err(|error| Error::InvalidInput(error.to_string()))?;
+    Ok(InterfaceState::Materialized(reduction))
 }
 
 fn inherited_protection(
@@ -1229,200 +1318,230 @@ fn compose_diagram(children: &[Arc<InterfaceNode>], mode: InterfaceMode) -> Resu
     Ok(diagram)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn update_node(
-    node: &Arc<InterfaceNode>,
-    current: &SparseDistanceMatrix,
-    updated: &SparseDistanceMatrix,
-    topology: &[EdgeKey],
-    changed: &BTreeSet<usize>,
-    params: &RipsParams,
+struct UpdateContext<'a> {
+    current: &'a SparseDistanceMatrix,
+    updated: &'a SparseDistanceMatrix,
+    topology: &'a [EdgeKey],
+    changed: &'a BTreeSet<usize>,
+    params: &'a RipsParams,
     interface_policy: InterfacePolicy,
     limits: CertificateLimits,
     threshold: f64,
-    work: &mut IndexWork,
-    events: &mut Vec<IndexEvent>,
-) -> Result<Arc<InterfaceNode>> {
-    let first_changed = node
-        .edge_positions
-        .iter()
-        .find(|position| changed.contains(position))
-        .copied();
-    let Some(first_changed) = first_changed else {
-        work.nodes_shared += count_nodes(node);
-        return Ok(Arc::clone(node));
-    };
-    work.nodes_touched += 1;
-    let children = node
-        .children
-        .iter()
-        .map(|child| {
-            update_node(
-                child,
-                current,
-                updated,
-                topology,
-                changed,
-                params,
-                interface_policy,
-                limits,
-                threshold,
-                work,
-                events,
-            )
+    work: &'a mut IndexWork,
+    events: &'a mut Vec<IndexEvent>,
+}
+
+impl UpdateContext<'_> {
+    fn update_node(&mut self, node: &Arc<InterfaceNode>) -> Result<Arc<InterfaceNode>> {
+        let Some(first_changed) = self.first_changed(node) else {
+            self.work.nodes_shared += count_nodes(node);
+            return Ok(Arc::clone(node));
+        };
+        self.work.nodes_touched += 1;
+        let children = node
+            .children
+            .iter()
+            .map(|child| self.update_node(child))
+            .collect::<Result<Vec<_>>>()?;
+        let crossing = self.crosses_threshold(node);
+        let state = self.update_state(node, &children, first_changed, crossing)?;
+        let digest = node_digest(
+            &node.vertices,
+            &node.edge_positions,
+            &node.separator,
+            &node.protected_vertices,
+            &children,
+            &state,
+        );
+        Ok(Arc::new(InterfaceNode {
+            digest,
+            vertices: node.vertices.clone(),
+            edge_positions: node.edge_positions.clone(),
+            separator: node.separator.clone(),
+            protected_vertices: node.protected_vertices.clone(),
+            children,
+            state,
+        }))
+    }
+
+    fn first_changed(&self, node: &InterfaceNode) -> Option<usize> {
+        node.edge_positions
+            .iter()
+            .find(|position| self.changed.contains(position))
+            .copied()
+    }
+
+    fn crosses_threshold(&self, node: &InterfaceNode) -> bool {
+        node.edge_positions.iter().any(|&position| {
+            let edge = self.topology[position];
+            (self.current.get(edge.u, edge.v) <= self.threshold)
+                != (self.updated.get(edge.u, edge.v) <= self.threshold)
         })
-        .collect::<Result<Vec<_>>>()?;
-    let scope = Scope {
-        vertices: node.vertices.clone(),
-        edge_positions: node.edge_positions.clone(),
-    };
-    let threshold_crossing = node.edge_positions.iter().any(|&position| {
-        let edge = topology[position];
-        (current.get(edge.u, edge.v) <= threshold) != (updated.get(edge.u, edge.v) <= threshold)
-    });
-    let composition = (interface_policy == InterfacePolicy::Compose)
-        .then(|| composition_mode(&node.separator, &children, updated, params))
-        .flatten();
-    let state = if interface_policy == InterfacePolicy::Relative {
-        if threshold_crossing {
-            events.push(IndexEvent {
-                kind: IndexEventKind::ThresholdCrossing,
-                node: Some(node.digest),
-                edge: Some(topology[first_changed]),
-            });
+    }
+
+    fn update_state(
+        &mut self,
+        node: &InterfaceNode,
+        children: &[Arc<InterfaceNode>],
+        first_changed: usize,
+        crossing: bool,
+    ) -> Result<InterfaceState> {
+        if crossing {
+            self.push_event(IndexEventKind::ThresholdCrossing, node, first_changed);
         }
+        if self.interface_policy == InterfacePolicy::Relative {
+            return self.relative_state(node, children, first_changed);
+        }
+        if let Some(mode) = self.composition(node, children) {
+            return self.composed_state(node, children, first_changed, mode);
+        }
+        if crossing {
+            return self.rebuild_state(node, first_changed);
+        }
+        self.repair_state(node, first_changed)
+    }
+
+    fn composition(
+        &self,
+        node: &InterfaceNode,
+        children: &[Arc<InterfaceNode>],
+    ) -> Option<InterfaceMode> {
+        (self.interface_policy == InterfacePolicy::Compose)
+            .then(|| composition_mode(&node.separator, children, self.updated, self.params))
+            .flatten()
+    }
+
+    fn relative_state(
+        &mut self,
+        node: &InterfaceNode,
+        children: &[Arc<InterfaceNode>],
+        first_changed: usize,
+    ) -> Result<InterfaceState> {
         let (relative, kind) = if children.is_empty() {
-            let local = local_graph(&scope, updated, topology)?;
+            let scope = node_scope(node);
+            let local = local_graph(&scope, self.updated, self.topology)?;
             let relative = RelativeInterfaceCertificate::build_labeled(
                 &local,
                 &node.vertices,
-                params,
+                self.params,
                 &node.protected_vertices,
-                limits,
+                self.limits,
             )
             .map_err(|error| Error::InvalidInput(error.to_string()))?;
-            work.relative_nodes_rebuilt += 1;
+            self.work.relative_nodes_rebuilt += 1;
             (relative, IndexEventKind::RelativeCoreRebuilt)
         } else {
-            let relative_children = children
-                .iter()
-                .map(|child| {
-                    child.relative().ok_or_else(|| {
-                        Error::InvalidInput(
-                            "a relative index parent requires relative child cores".into(),
-                        )
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let relative = RelativeInterfaceCertificate::compose_trusted(
-                &relative_children,
-                &node.protected_vertices,
-                limits,
-            )
-            .map_err(|error| Error::InvalidInput(error.to_string()))?;
-            work.relative_nodes_composed += 1;
+            let relative =
+                compose_relative_children(children, &node.protected_vertices, self.limits)?;
+            self.work.relative_nodes_composed += 1;
             (relative, IndexEventKind::RelativeCoreComposed)
         };
         let relative_work = relative.work();
-        work.relative_input_cells += relative_work.input_cells;
-        work.relative_core_cells += relative_work.core_cells;
-        work.relative_cancellations += relative_work.cancellations;
-        events.push(IndexEvent {
+        self.work.relative_input_cells += relative_work.input_cells;
+        self.work.relative_core_cells += relative_work.core_cells;
+        self.work.relative_cancellations += relative_work.cancellations;
+        self.push_event(kind, node, first_changed);
+        Ok(InterfaceState::Relative(relative))
+    }
+
+    fn composed_state(
+        &mut self,
+        node: &InterfaceNode,
+        children: &[Arc<InterfaceNode>],
+        first_changed: usize,
+        mode: InterfaceMode,
+    ) -> Result<InterfaceState> {
+        self.work.nodes_composed += 1;
+        self.push_event(IndexEventKind::InterfaceComposed, node, first_changed);
+        Ok(InterfaceState::Composed {
+            mode,
+            diagram: compose_diagram(children, mode)?,
+        })
+    }
+
+    fn rebuild_state(
+        &mut self,
+        node: &InterfaceNode,
+        first_changed: usize,
+    ) -> Result<InterfaceState> {
+        let reduction = self.build_reduction(node)?;
+        self.work.nodes_rebuilt += 1;
+        self.work.reduction_columns_reduced += reduction.column_count();
+        self.push_event(IndexEventKind::ReductionRebuilt, node, first_changed);
+        Ok(InterfaceState::Materialized(reduction))
+    }
+
+    fn repair_state(
+        &mut self,
+        node: &InterfaceNode,
+        first_changed: usize,
+    ) -> Result<InterfaceState> {
+        let Some(reduction) = node.reduction() else {
+            return self.rebuild_state(node, first_changed);
+        };
+        let scope = node_scope(node);
+        let old_local = local_graph(&scope, self.current, self.topology)?;
+        let new_local = local_graph(&scope, self.updated, self.topology)?;
+        let repair = reduction
+            .repair(&old_local, &new_local, self.limits)
+            .map_err(|error| Error::InvalidInput(error.to_string()))?;
+        let mode = repair.mode();
+        let repair_work = repair.work();
+        self.work.reduction_columns_reused += repair_work.columns_reused();
+        self.work.reduction_columns_reduced += repair_work.columns_reduced();
+        self.work.reduction_column_additions += repair_work.column_additions();
+        let kind = match mode {
+            ReductionRepairMode::Reused | ReductionRepairMode::SuffixRepaired => {
+                self.work.nodes_repaired += 1;
+                IndexEventKind::ReductionRepaired
+            }
+            ReductionRepairMode::Rebuilt => {
+                self.work.nodes_rebuilt += 1;
+                IndexEventKind::ReductionRebuilt
+            }
+        };
+        self.push_event(kind, node, first_changed);
+        Ok(InterfaceState::Materialized(repair.into_certificate()))
+    }
+
+    fn build_reduction(&self, node: &InterfaceNode) -> Result<GradedReductionCertificate> {
+        let scope = node_scope(node);
+        let local = local_graph(&scope, self.updated, self.topology)?;
+        GradedReductionCertificate::build(&local, self.params, self.limits)
+            .map_err(|error| Error::InvalidInput(error.to_string()))
+    }
+
+    fn push_event(&mut self, kind: IndexEventKind, node: &InterfaceNode, edge_position: usize) {
+        self.events.push(IndexEvent {
             kind,
             node: Some(node.digest),
-            edge: Some(topology[first_changed]),
+            edge: Some(self.topology[edge_position]),
         });
-        InterfaceState::Relative(relative)
-    } else if let Some(mode) = composition {
-        work.nodes_composed += 1;
-        events.push(IndexEvent {
-            kind: IndexEventKind::InterfaceComposed,
-            node: Some(node.digest),
-            edge: Some(topology[first_changed]),
-        });
-        InterfaceState::Composed {
-            mode,
-            diagram: compose_diagram(&children, mode)?,
-        }
-    } else if threshold_crossing {
-        events.push(IndexEvent {
-            kind: IndexEventKind::ThresholdCrossing,
-            node: Some(node.digest),
-            edge: Some(topology[first_changed]),
-        });
-        let new_local = local_graph(&scope, updated, topology)?;
-        let reduction = GradedReductionCertificate::build(&new_local, params, limits)
-            .map_err(|error| Error::InvalidInput(error.to_string()))?;
-        work.nodes_rebuilt += 1;
-        work.reduction_columns_reduced += reduction.column_count();
-        events.push(IndexEvent {
-            kind: IndexEventKind::ReductionRebuilt,
-            node: Some(node.digest),
-            edge: Some(topology[first_changed]),
-        });
-        InterfaceState::Materialized(reduction)
-    } else {
-        let old_local = local_graph(&scope, current, topology)?;
-        let new_local = local_graph(&scope, updated, topology)?;
-        match node.reduction() {
-            Some(reduction) => {
-                let repair = reduction
-                    .repair(&old_local, &new_local, limits)
-                    .map_err(|error| Error::InvalidInput(error.to_string()))?;
-                let mode = repair.mode();
-                let repair_work = repair.work();
-                work.reduction_columns_reused += repair_work.columns_reused();
-                work.reduction_columns_reduced += repair_work.columns_reduced();
-                work.reduction_column_additions += repair_work.column_additions();
-                match mode {
-                    ReductionRepairMode::Reused | ReductionRepairMode::SuffixRepaired => {
-                        work.nodes_repaired += 1;
-                    }
-                    ReductionRepairMode::Rebuilt => work.nodes_rebuilt += 1,
-                }
-                events.push(IndexEvent {
-                    kind: match mode {
-                        ReductionRepairMode::Reused | ReductionRepairMode::SuffixRepaired => {
-                            IndexEventKind::ReductionRepaired
-                        }
-                        ReductionRepairMode::Rebuilt => IndexEventKind::ReductionRebuilt,
-                    },
-                    node: Some(node.digest),
-                    edge: Some(topology[first_changed]),
-                });
-                InterfaceState::Materialized(repair.into_certificate())
-            }
-            None => {
-                let reduction = GradedReductionCertificate::build(&new_local, params, limits)
-                    .map_err(|error| Error::InvalidInput(error.to_string()))?;
-                work.nodes_rebuilt += 1;
-                work.reduction_columns_reduced += reduction.column_count();
-                events.push(IndexEvent {
-                    kind: IndexEventKind::ReductionRebuilt,
-                    node: Some(node.digest),
-                    edge: Some(topology[first_changed]),
-                });
-                InterfaceState::Materialized(reduction)
-            }
-        }
-    };
-    let digest = node_digest(
-        &node.vertices,
-        &node.edge_positions,
-        &node.separator,
-        &node.protected_vertices,
-        &children,
-        &state,
-    );
-    Ok(Arc::new(InterfaceNode {
-        digest,
+    }
+}
+
+fn node_scope(node: &InterfaceNode) -> Scope {
+    Scope {
         vertices: node.vertices.clone(),
         edge_positions: node.edge_positions.clone(),
-        separator: node.separator.clone(),
-        protected_vertices: node.protected_vertices.clone(),
-        children,
-        state,
-    }))
+    }
+}
+
+fn compose_relative_children(
+    children: &[Arc<InterfaceNode>],
+    protected_vertices: &[usize],
+    limits: CertificateLimits,
+) -> Result<RelativeInterfaceCertificate> {
+    let relative_children = children
+        .iter()
+        .map(|child| {
+            child.relative().ok_or_else(|| {
+                Error::InvalidInput("a relative index parent requires relative child cores".into())
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    RelativeInterfaceCertificate::compose_trusted(&relative_children, protected_vertices, limits)
+        .map_err(|error| Error::InvalidInput(error.to_string()))
 }
 
 fn local_graph(
@@ -1470,7 +1589,13 @@ fn node_digest(
     for child in children {
         hash.update(child.digest);
     }
-    let diagram = match state {
+    let diagram = digest_interface_state(&mut hash, state);
+    digest_diagram(&mut hash, diagram);
+    hash.finalize().into()
+}
+
+fn digest_interface_state<'a>(hash: &mut Sha256, state: &'a InterfaceState) -> &'a Diagram {
+    match state {
         InterfaceState::Relative(relative) => {
             hash.update([4]);
             hash.update(relative.source_digest());
@@ -1483,7 +1608,7 @@ fn node_digest(
             hash.update((reduction.max_dim() as u64).to_be_bytes());
             hash.update((reduction.graded_columns().len() as u64).to_be_bytes());
             for columns in reduction.graded_columns() {
-                digest_columns(&mut hash, columns);
+                digest_columns(hash, columns);
             }
             reduction.diagram()
         }
@@ -1497,14 +1622,16 @@ fn node_digest(
             }]);
             diagram
         }
-    };
+    }
+}
+
+fn digest_diagram(hash: &mut Sha256, diagram: &Diagram) {
     hash.update((diagram.bars.len() as u64).to_be_bytes());
     for bar in &diagram.bars {
         hash.update((bar.dim as u64).to_be_bytes());
         hash.update(bar.birth.to_bits().to_be_bytes());
         hash.update(bar.death.to_bits().to_be_bytes());
     }
-    hash.finalize().into()
 }
 
 fn digest_usizes(hash: &mut Sha256, values: &[usize]) {
