@@ -217,59 +217,14 @@ impl ProgramTraceArtifact {
 
     /// Encode the canonical `HOLOSDLT` version 2 envelope.
     pub fn encode(&self) -> std::result::Result<Vec<u8>, ProgramTraceError> {
-        let initial_program = self
-            .initial_program
-            .encode()
-            .map_err(program_artifact_error)?;
-        let checkpoints = self
-            .steps
-            .iter()
-            .map(|step| {
-                step.checkpoint
-                    .as_ref()
-                    .map(ProgramArtifact::encode)
-                    .transpose()
-                    .map_err(program_artifact_error)
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let initial_program = encode_program_artifact(&self.initial_program)?;
+        let checkpoints = encode_checkpoints(&self.steps)?;
         let mut out = Vec::new();
-        out.extend_from_slice(MAGIC);
-        put_u16(&mut out, WIRE_VERSION);
-        out.push(F64_BITS_CODEC);
-        put_usize(&mut out, self.steps.len(), "step count")?;
-        put_usize(
-            &mut out,
-            initial_program.len(),
-            "initial program byte count",
-        )?;
+        encode_trace_header(&mut out, self.steps.len(), initial_program.len())?;
         encode_graph(&mut out, &self.initial_graph)?;
         out.extend_from_slice(&initial_program);
         for (step, checkpoint) in self.steps.iter().zip(checkpoints) {
-            out.push(mode_tag(step.mode));
-            encode_work(&mut out, step.work)?;
-            put_usize(&mut out, step.events.len(), "event count")?;
-            put_usize(&mut out, step.continuation.len(), "continuation count")?;
-            put_usize(&mut out, step.correspondence.len(), "correspondence count")?;
-            put_usize(&mut out, step.diagram.bars.len(), "bar count")?;
-            put_usize(
-                &mut out,
-                checkpoint.as_ref().map_or(0, Vec::len),
-                "checkpoint byte count",
-            )?;
-            encode_graph(&mut out, &step.graph)?;
-            for event in &step.events {
-                encode_event(&mut out, event)?;
-            }
-            for continuation in &step.continuation {
-                encode_continuation(&mut out, continuation)?;
-            }
-            for correspondence in &step.correspondence {
-                encode_correspondence(&mut out, correspondence)?;
-            }
-            encode_diagram(&mut out, &step.diagram)?;
-            if let Some(checkpoint) = checkpoint {
-                out.extend_from_slice(&checkpoint);
-            }
+            encode_trace_step(&mut out, step, checkpoint.as_deref())?;
         }
         Ok(out)
     }
@@ -280,116 +235,30 @@ impl ProgramTraceArtifact {
         limits: ProgramTraceDecodeLimits,
         certificate_limits: CertificateLimits,
     ) -> std::result::Result<Self, ProgramTraceError> {
-        if bytes.len() > limits.max_bytes {
-            return Err(ProgramTraceError::new(format!(
-                "{} bytes exceed the decoder limit {}",
-                bytes.len(),
-                limits.max_bytes
-            )));
-        }
+        check_envelope_size(bytes, limits.max_bytes)?;
         let mut reader = Reader::new(bytes);
-        if reader.take(8)? != MAGIC {
-            return Err(ProgramTraceError::new("wrong magic bytes"));
-        }
-        if reader.u16()? != WIRE_VERSION {
-            return Err(ProgramTraceError::new("unsupported wire version"));
-        }
-        if reader.u8()? != F64_BITS_CODEC {
-            return Err(ProgramTraceError::new("unsupported scalar codec"));
-        }
-        let step_count = reader.bounded_usize("step count", limits.max_steps)?;
-        let initial_program_bytes =
-            reader.bounded_usize("initial program byte count", limits.max_checkpoint_bytes)?;
+        let header = decode_trace_header(&mut reader, limits)?;
         let mut total_edges = 0usize;
         let initial_graph = decode_graph(&mut reader, limits, &mut total_edges)?;
-        let initial_program = ProgramArtifact::decode(
-            reader.take(initial_program_bytes)?,
-            limits.program,
+        let initial_program = decode_program_artifact(
+            &mut reader,
+            header.initial_program_bytes,
+            limits,
             certificate_limits,
-        )
-        .map_err(program_artifact_error)?;
+        )?;
         let mut totals = TraceTotals {
-            checkpoint_bytes: initial_program_bytes,
+            checkpoint_bytes: header.initial_program_bytes,
             ..TraceTotals::default()
         };
-        let mut steps = Vec::with_capacity(step_count);
-        for _ in 0..step_count {
-            let mode = decode_mode(reader.u8()?)?;
-            let work = decode_work(&mut reader)?;
-            let event_count = reader.usize()?;
-            let continuation_count = reader.usize()?;
-            let correspondence_count = reader.usize()?;
-            let bar_count = reader.usize()?;
-            let checkpoint_bytes = reader.usize()?;
-            totals.events = bounded_sum(totals.events, event_count, limits.max_events, "events")?;
-            totals.continuations = bounded_sum(
-                totals.continuations,
-                continuation_count,
-                limits.max_continuations,
-                "continuations",
-            )?;
-            totals.correspondences = bounded_sum(
-                totals.correspondences,
-                correspondence_count,
-                limits.max_correspondences,
-                "correspondences",
-            )?;
-            totals.bars = bounded_sum(totals.bars, bar_count, limits.max_bars, "bars")?;
-            totals.checkpoint_bytes = bounded_sum(
-                totals.checkpoint_bytes,
-                checkpoint_bytes,
-                limits.max_checkpoint_bytes,
-                "checkpoint bytes",
-            )?;
-            let graph = decode_graph(&mut reader, limits, &mut total_edges)?;
-            let mut events = Vec::with_capacity(event_count);
-            for _ in 0..event_count {
-                events.push(decode_event(&mut reader)?);
-            }
-            let mut continuation = Vec::with_capacity(continuation_count);
-            for _ in 0..continuation_count {
-                continuation.push(decode_continuation(
-                    &mut reader,
-                    limits,
-                    &mut totals.transports,
-                )?);
-            }
-            let mut correspondence = Vec::with_capacity(correspondence_count);
-            for _ in 0..correspondence_count {
-                correspondence.push(decode_correspondence(&mut reader, limits, &mut totals)?);
-            }
-            let diagram = decode_diagram(&mut reader, bar_count)?;
-            let checkpoint = if checkpoint_bytes == 0 {
-                None
-            } else {
-                Some(
-                    ProgramArtifact::decode(
-                        reader.take(checkpoint_bytes)?,
-                        limits.program,
-                        certificate_limits,
-                    )
-                    .map_err(program_artifact_error)?,
-                )
-            };
-            let step = ProgramTraceStep {
-                graph,
-                mode,
-                work,
-                events,
-                continuation,
-                correspondence,
-                diagram,
-                checkpoint,
-            };
-            check_step_shape(&step)?;
-            steps.push(step);
-        }
-        if reader.remaining() != 0 {
-            return Err(ProgramTraceError::new(format!(
-                "{} trailing bytes after the envelope",
-                reader.remaining()
-            )));
-        }
+        let steps = decode_trace_steps(
+            &mut reader,
+            header.step_count,
+            limits,
+            certificate_limits,
+            &mut totals,
+            &mut total_edges,
+        )?;
+        check_no_trailing_bytes(&reader)?;
         Ok(Self {
             initial_graph,
             initial_program,
@@ -402,68 +271,18 @@ impl ProgramTraceArtifact {
         &self,
         certificate_limits: CertificateLimits,
     ) -> std::result::Result<VerifiedProgramTrace, ProgramTraceError> {
-        let mut program = self
-            .initial_program
-            .verify(&self.initial_graph, certificate_limits)
-            .map_err(program_artifact_error)?;
+        let mut program = verify_program_artifact(
+            &self.initial_program,
+            &self.initial_graph,
+            certificate_limits,
+        )?;
         let initial_result = program.result().clone();
         let mut verified_steps = Vec::with_capacity(self.steps.len());
         for (index, step) in self.steps.iter().enumerate() {
             check_step_shape(step)?;
-            let checked = if step.mode == ProgramUpdateMode::Reused {
-                program
-                    .advance_reused(&step.graph)
-                    .map_err(|error| ProgramTraceError::new(error.to_string()))?
-            } else {
-                let checkpoint = step.checkpoint.as_ref().ok_or_else(|| {
-                    ProgramTraceError::new(format!("step {index} has no required checkpoint"))
-                })?;
-                let replacement = checkpoint
-                    .verify(&step.graph, certificate_limits)
-                    .map_err(program_artifact_error)?;
-                let (mode, events, work) = program
-                    .preview_update(&step.graph, replacement.states().len())
-                    .map_err(|error| ProgramTraceError::new(error.to_string()))?;
-                let continuation =
-                    class_continuation(&program.result().spaces, &replacement.result().spaces);
-                let correspondence = crate::class_correspondences(
-                    program.current_graph(),
-                    &program.result().spaces,
-                    &step.graph,
-                    &replacement.result().spaces,
-                    replacement.params().modulus,
-                )
-                .map_err(|error| ProgramTraceError::new(error.to_string()))?;
-                let result = replacement.result().clone();
-                program = replacement;
-                crate::ProgramUpdate {
-                    result,
-                    mode,
-                    events,
-                    continuation,
-                    correspondence,
-                    work,
-                }
-            };
-            if checked.mode != step.mode
-                || checked.work != step.work
-                || checked.events != step.events
-                || checked.continuation != step.continuation
-                || checked.correspondence != step.correspondence
-                || !diagram_bits_equal(&checked.result.diagram, &step.diagram)
-            {
-                return Err(ProgramTraceError::new(format!(
-                    "step {index} differs from independent replay"
-                )));
-            }
-            verified_steps.push(VerifiedProgramTraceStep {
-                mode: checked.mode,
-                work: checked.work,
-                events: checked.events,
-                continuation: checked.continuation,
-                correspondence: checked.correspondence,
-                diagram: checked.result.diagram,
-            });
+            let checked = replay_step(&mut program, step, index, certificate_limits)?;
+            check_replayed_step(&checked, step, index)?;
+            verified_steps.push(checked.into());
         }
         Ok(VerifiedProgramTrace {
             initial_result,
@@ -511,6 +330,447 @@ struct TraceTotals {
     correspondence_terms: usize,
     bars: usize,
     checkpoint_bytes: usize,
+}
+
+struct TraceHeader {
+    step_count: usize,
+    initial_program_bytes: usize,
+}
+
+struct StepCounts {
+    events: usize,
+    continuations: usize,
+    correspondences: usize,
+    bars: usize,
+    checkpoint_bytes: usize,
+}
+
+struct DecodedStepBody {
+    events: Vec<ProgramEvent>,
+    continuation: Vec<ClassContinuation>,
+    correspondence: Vec<ClassCorrespondence>,
+    diagram: Diagram,
+}
+
+struct CorrespondenceHeader {
+    old_space: IntervalGroupId,
+    new_space: IntervalGroupId,
+    scale: f64,
+    old_rank: usize,
+    new_rank: usize,
+    old_image_rank: usize,
+    new_image_rank: usize,
+    relation_rank: usize,
+    basis_count: usize,
+}
+
+impl TraceTotals {
+    fn add_step(
+        &mut self,
+        counts: &StepCounts,
+        limits: ProgramTraceDecodeLimits,
+    ) -> std::result::Result<(), ProgramTraceError> {
+        self.events = bounded_sum(self.events, counts.events, limits.max_events, "events")?;
+        self.continuations = bounded_sum(
+            self.continuations,
+            counts.continuations,
+            limits.max_continuations,
+            "continuations",
+        )?;
+        self.correspondences = bounded_sum(
+            self.correspondences,
+            counts.correspondences,
+            limits.max_correspondences,
+            "correspondences",
+        )?;
+        self.bars = bounded_sum(self.bars, counts.bars, limits.max_bars, "bars")?;
+        self.checkpoint_bytes = bounded_sum(
+            self.checkpoint_bytes,
+            counts.checkpoint_bytes,
+            limits.max_checkpoint_bytes,
+            "checkpoint bytes",
+        )?;
+        Ok(())
+    }
+}
+
+impl From<crate::ProgramUpdate> for VerifiedProgramTraceStep {
+    fn from(update: crate::ProgramUpdate) -> Self {
+        Self {
+            mode: update.mode,
+            work: update.work,
+            events: update.events,
+            continuation: update.continuation,
+            correspondence: update.correspondence,
+            diagram: update.result.diagram,
+        }
+    }
+}
+
+fn encode_program_artifact(
+    artifact: &ProgramArtifact,
+) -> std::result::Result<Vec<u8>, ProgramTraceError> {
+    artifact.encode().map_err(program_artifact_error)
+}
+
+fn encode_checkpoints(
+    steps: &[ProgramTraceStep],
+) -> std::result::Result<Vec<Option<Vec<u8>>>, ProgramTraceError> {
+    let mut encoded = Vec::with_capacity(steps.len());
+    for step in steps {
+        encoded.push(
+            step.checkpoint
+                .as_ref()
+                .map(encode_program_artifact)
+                .transpose()?,
+        );
+    }
+    Ok(encoded)
+}
+
+fn encode_trace_header(
+    out: &mut Vec<u8>,
+    step_count: usize,
+    initial_program_bytes: usize,
+) -> std::result::Result<(), ProgramTraceError> {
+    out.extend_from_slice(MAGIC);
+    put_u16(out, WIRE_VERSION);
+    out.push(F64_BITS_CODEC);
+    put_usize(out, step_count, "step count")?;
+    put_usize(out, initial_program_bytes, "initial program byte count")?;
+    Ok(())
+}
+
+fn encode_trace_step(
+    out: &mut Vec<u8>,
+    step: &ProgramTraceStep,
+    checkpoint: Option<&[u8]>,
+) -> std::result::Result<(), ProgramTraceError> {
+    encode_step_header(out, step, checkpoint.map_or(0, <[u8]>::len))?;
+    encode_graph(out, &step.graph)?;
+    encode_step_body(out, step)?;
+    if let Some(checkpoint) = checkpoint {
+        out.extend_from_slice(checkpoint);
+    }
+    Ok(())
+}
+
+fn encode_step_header(
+    out: &mut Vec<u8>,
+    step: &ProgramTraceStep,
+    checkpoint_bytes: usize,
+) -> std::result::Result<(), ProgramTraceError> {
+    out.push(mode_tag(step.mode));
+    encode_work(out, step.work)?;
+    put_usize(out, step.events.len(), "event count")?;
+    put_usize(out, step.continuation.len(), "continuation count")?;
+    put_usize(out, step.correspondence.len(), "correspondence count")?;
+    put_usize(out, step.diagram.bars.len(), "bar count")?;
+    put_usize(out, checkpoint_bytes, "checkpoint byte count")?;
+    Ok(())
+}
+
+fn encode_step_body(
+    out: &mut Vec<u8>,
+    step: &ProgramTraceStep,
+) -> std::result::Result<(), ProgramTraceError> {
+    encode_events(out, &step.events)?;
+    encode_continuations(out, &step.continuation)?;
+    encode_correspondences(out, &step.correspondence)?;
+    encode_diagram(out, &step.diagram)
+}
+
+fn encode_events(
+    out: &mut Vec<u8>,
+    events: &[ProgramEvent],
+) -> std::result::Result<(), ProgramTraceError> {
+    for event in events {
+        encode_event(out, event)?;
+    }
+    Ok(())
+}
+
+fn encode_continuations(
+    out: &mut Vec<u8>,
+    continuations: &[ClassContinuation],
+) -> std::result::Result<(), ProgramTraceError> {
+    for continuation in continuations {
+        encode_continuation(out, continuation)?;
+    }
+    Ok(())
+}
+
+fn encode_correspondences(
+    out: &mut Vec<u8>,
+    correspondences: &[ClassCorrespondence],
+) -> std::result::Result<(), ProgramTraceError> {
+    for correspondence in correspondences {
+        encode_correspondence(out, correspondence)?;
+    }
+    Ok(())
+}
+
+fn check_envelope_size(bytes: &[u8], max_bytes: usize) -> Result<(), ProgramTraceError> {
+    if bytes.len() > max_bytes {
+        return Err(ProgramTraceError::new(format!(
+            "{} bytes exceed the decoder limit {max_bytes}",
+            bytes.len()
+        )));
+    }
+    Ok(())
+}
+
+fn decode_trace_header(
+    reader: &mut Reader<'_>,
+    limits: ProgramTraceDecodeLimits,
+) -> std::result::Result<TraceHeader, ProgramTraceError> {
+    check_trace_identity(reader)?;
+    Ok(TraceHeader {
+        step_count: reader.bounded_usize("step count", limits.max_steps)?,
+        initial_program_bytes: reader
+            .bounded_usize("initial program byte count", limits.max_checkpoint_bytes)?,
+    })
+}
+
+fn check_trace_identity(reader: &mut Reader<'_>) -> Result<(), ProgramTraceError> {
+    if reader.take(8)? != MAGIC {
+        return Err(ProgramTraceError::new("wrong magic bytes"));
+    }
+    if reader.u16()? != WIRE_VERSION {
+        return Err(ProgramTraceError::new("unsupported wire version"));
+    }
+    if reader.u8()? != F64_BITS_CODEC {
+        return Err(ProgramTraceError::new("unsupported scalar codec"));
+    }
+    Ok(())
+}
+
+fn decode_program_artifact(
+    reader: &mut Reader<'_>,
+    byte_count: usize,
+    limits: ProgramTraceDecodeLimits,
+    certificate_limits: CertificateLimits,
+) -> Result<ProgramArtifact, ProgramTraceError> {
+    ProgramArtifact::decode(reader.take(byte_count)?, limits.program, certificate_limits)
+        .map_err(program_artifact_error)
+}
+
+fn decode_trace_steps(
+    reader: &mut Reader<'_>,
+    count: usize,
+    limits: ProgramTraceDecodeLimits,
+    certificate_limits: CertificateLimits,
+    totals: &mut TraceTotals,
+    total_edges: &mut usize,
+) -> Result<Vec<ProgramTraceStep>, ProgramTraceError> {
+    let mut steps = Vec::with_capacity(count);
+    for _ in 0..count {
+        steps.push(decode_trace_step(
+            reader,
+            limits,
+            certificate_limits,
+            totals,
+            total_edges,
+        )?);
+    }
+    Ok(steps)
+}
+
+fn decode_trace_step(
+    reader: &mut Reader<'_>,
+    limits: ProgramTraceDecodeLimits,
+    certificate_limits: CertificateLimits,
+    totals: &mut TraceTotals,
+    total_edges: &mut usize,
+) -> Result<ProgramTraceStep, ProgramTraceError> {
+    let mode = decode_mode(reader.u8()?)?;
+    let work = decode_work(reader)?;
+    let counts = decode_step_counts(reader)?;
+    totals.add_step(&counts, limits)?;
+    let graph = decode_graph(reader, limits, total_edges)?;
+    let body = decode_step_body(reader, &counts, limits, totals)?;
+    let checkpoint =
+        decode_checkpoint(reader, counts.checkpoint_bytes, limits, certificate_limits)?;
+    let step = ProgramTraceStep {
+        graph,
+        mode,
+        work,
+        events: body.events,
+        continuation: body.continuation,
+        correspondence: body.correspondence,
+        diagram: body.diagram,
+        checkpoint,
+    };
+    check_step_shape(&step)?;
+    Ok(step)
+}
+
+fn decode_step_counts(reader: &mut Reader<'_>) -> Result<StepCounts, ProgramTraceError> {
+    Ok(StepCounts {
+        events: reader.usize()?,
+        continuations: reader.usize()?,
+        correspondences: reader.usize()?,
+        bars: reader.usize()?,
+        checkpoint_bytes: reader.usize()?,
+    })
+}
+
+fn decode_step_body(
+    reader: &mut Reader<'_>,
+    counts: &StepCounts,
+    limits: ProgramTraceDecodeLimits,
+    totals: &mut TraceTotals,
+) -> Result<DecodedStepBody, ProgramTraceError> {
+    Ok(DecodedStepBody {
+        events: decode_events(reader, counts.events)?,
+        continuation: decode_continuations(reader, counts.continuations, limits, totals)?,
+        correspondence: decode_correspondences(reader, counts.correspondences, limits, totals)?,
+        diagram: decode_diagram(reader, counts.bars)?,
+    })
+}
+
+fn decode_events(
+    reader: &mut Reader<'_>,
+    count: usize,
+) -> Result<Vec<ProgramEvent>, ProgramTraceError> {
+    let mut events = Vec::with_capacity(count);
+    for _ in 0..count {
+        events.push(decode_event(reader)?);
+    }
+    Ok(events)
+}
+
+fn decode_continuations(
+    reader: &mut Reader<'_>,
+    count: usize,
+    limits: ProgramTraceDecodeLimits,
+    totals: &mut TraceTotals,
+) -> Result<Vec<ClassContinuation>, ProgramTraceError> {
+    let mut continuations = Vec::with_capacity(count);
+    for _ in 0..count {
+        continuations.push(decode_continuation(reader, limits, &mut totals.transports)?);
+    }
+    Ok(continuations)
+}
+
+fn decode_correspondences(
+    reader: &mut Reader<'_>,
+    count: usize,
+    limits: ProgramTraceDecodeLimits,
+    totals: &mut TraceTotals,
+) -> Result<Vec<ClassCorrespondence>, ProgramTraceError> {
+    let mut correspondences = Vec::with_capacity(count);
+    for _ in 0..count {
+        correspondences.push(decode_correspondence(reader, limits, totals)?);
+    }
+    Ok(correspondences)
+}
+
+fn decode_checkpoint(
+    reader: &mut Reader<'_>,
+    byte_count: usize,
+    limits: ProgramTraceDecodeLimits,
+    certificate_limits: CertificateLimits,
+) -> Result<Option<ProgramArtifact>, ProgramTraceError> {
+    if byte_count == 0 {
+        return Ok(None);
+    }
+    decode_program_artifact(reader, byte_count, limits, certificate_limits).map(Some)
+}
+
+fn check_no_trailing_bytes(reader: &Reader<'_>) -> Result<(), ProgramTraceError> {
+    if reader.remaining() != 0 {
+        return Err(ProgramTraceError::new(format!(
+            "{} trailing bytes after the envelope",
+            reader.remaining()
+        )));
+    }
+    Ok(())
+}
+
+fn verify_program_artifact(
+    artifact: &ProgramArtifact,
+    graph: &SparseDistanceMatrix,
+    certificate_limits: CertificateLimits,
+) -> Result<PersistenceProgram, ProgramTraceError> {
+    artifact
+        .verify(graph, certificate_limits)
+        .map_err(program_artifact_error)
+}
+
+fn replay_step(
+    program: &mut PersistenceProgram,
+    step: &ProgramTraceStep,
+    index: usize,
+    certificate_limits: CertificateLimits,
+) -> Result<crate::ProgramUpdate, ProgramTraceError> {
+    if step.mode == ProgramUpdateMode::Reused {
+        return program
+            .advance_reused(&step.graph)
+            .map_err(|error| ProgramTraceError::new(error.to_string()));
+    }
+    replay_checkpoint_step(program, step, index, certificate_limits)
+}
+
+fn replay_checkpoint_step(
+    program: &mut PersistenceProgram,
+    step: &ProgramTraceStep,
+    index: usize,
+    certificate_limits: CertificateLimits,
+) -> Result<crate::ProgramUpdate, ProgramTraceError> {
+    let checkpoint = step.checkpoint.as_ref().ok_or_else(|| {
+        ProgramTraceError::new(format!("step {index} has no required checkpoint"))
+    })?;
+    let replacement = verify_program_artifact(checkpoint, &step.graph, certificate_limits)?;
+    let (mode, events, work) = program
+        .preview_update(&step.graph, replacement.states().len())
+        .map_err(|error| ProgramTraceError::new(error.to_string()))?;
+    let continuation = class_continuation(&program.result().spaces, &replacement.result().spaces);
+    let correspondence = replay_correspondence(program, &step.graph, &replacement)?;
+    let result = replacement.result().clone();
+    *program = replacement;
+    Ok(crate::ProgramUpdate {
+        result,
+        mode,
+        events,
+        continuation,
+        correspondence,
+        work,
+    })
+}
+
+fn replay_correspondence(
+    program: &PersistenceProgram,
+    graph: &SparseDistanceMatrix,
+    replacement: &PersistenceProgram,
+) -> Result<Vec<ClassCorrespondence>, ProgramTraceError> {
+    crate::class_correspondences(
+        program.current_graph(),
+        &program.result().spaces,
+        graph,
+        &replacement.result().spaces,
+        replacement.params().modulus,
+    )
+    .map_err(|error| ProgramTraceError::new(error.to_string()))
+}
+
+fn check_replayed_step(
+    checked: &crate::ProgramUpdate,
+    declared: &ProgramTraceStep,
+    index: usize,
+) -> Result<(), ProgramTraceError> {
+    let differs = checked.mode != declared.mode
+        || checked.work != declared.work
+        || checked.events != declared.events
+        || checked.continuation != declared.continuation
+        || checked.correspondence != declared.correspondence
+        || !diagram_bits_equal(&checked.result.diagram, &declared.diagram);
+    if differs {
+        return Err(ProgramTraceError::new(format!(
+            "step {index} differs from independent replay"
+        )));
+    }
+    Ok(())
 }
 
 fn check_step_shape(step: &ProgramTraceStep) -> std::result::Result<(), ProgramTraceError> {
@@ -596,18 +856,40 @@ fn encode_work(out: &mut Vec<u8>, work: ProgramWork) -> std::result::Result<(), 
 }
 
 fn decode_work(reader: &mut Reader<'_>) -> std::result::Result<ProgramWork, ProgramTraceError> {
+    let leading = decode_work_leading(reader)?;
+    let reduction = decode_work_reduction(reader)?;
     Ok(ProgramWork {
-        edges_checked: reader.usize()?,
-        h0_edges_scanned: reader.usize()?,
-        guards_checked: reader.usize()?,
-        atoms_touched: reader.usize()?,
-        atoms_reused: reader.usize()?,
-        atoms_repaired: reader.usize()?,
-        atoms_rebuilt: reader.usize()?,
-        reduction_columns_reused: reader.usize()?,
-        reduction_columns_reduced: reader.usize()?,
-        reduction_column_additions: reader.usize()?,
+        edges_checked: leading[0],
+        h0_edges_scanned: leading[1],
+        guards_checked: leading[2],
+        atoms_touched: leading[3],
+        atoms_reused: leading[4],
+        atoms_repaired: reduction[0],
+        atoms_rebuilt: reduction[1],
+        reduction_columns_reused: reduction[2],
+        reduction_columns_reduced: reduction[3],
+        reduction_column_additions: reduction[4],
     })
+}
+
+fn decode_work_leading(reader: &mut Reader<'_>) -> Result<[usize; 5], ProgramTraceError> {
+    Ok([
+        reader.usize()?,
+        reader.usize()?,
+        reader.usize()?,
+        reader.usize()?,
+        reader.usize()?,
+    ])
+}
+
+fn decode_work_reduction(reader: &mut Reader<'_>) -> Result<[usize; 5], ProgramTraceError> {
+    Ok([
+        reader.usize()?,
+        reader.usize()?,
+        reader.usize()?,
+        reader.usize()?,
+        reader.usize()?,
+    ])
 }
 
 fn encode_event(
@@ -675,51 +957,77 @@ fn decode_continuation(
     total_transports: &mut usize,
 ) -> std::result::Result<ClassContinuation, ProgramTraceError> {
     let kind = decode_continuation_kind(reader.u8()?)?;
-    let old_count = reader.usize()?;
-    let new_count = reader.usize()?;
-    let transport_count = reader.usize()?;
+    let [old_count, new_count, transport_count] = decode_continuation_counts(reader)?;
     *total_transports = bounded_sum(
         *total_transports,
         transport_count,
         limits.max_transports,
         "basis transports",
     )?;
-    let bytes = old_count
-        .checked_add(new_count)
-        .and_then(|ids| ids.checked_mul(32))
-        .and_then(|ids| {
-            transport_count
-                .checked_mul(68)
-                .and_then(|terms| ids.checked_add(terms))
-        })
-        .ok_or_else(|| ProgramTraceError::new("continuation bytes overflow usize"))?;
-    if bytes > reader.remaining() {
-        return Err(ProgramTraceError::new(
-            "continuation exceeds the remaining bytes",
-        ));
-    }
-    let mut old_spaces = Vec::with_capacity(old_count);
-    for _ in 0..old_count {
-        old_spaces.push(IntervalGroupId::from_bytes(reader.array32()?));
-    }
-    let mut new_spaces = Vec::with_capacity(new_count);
-    for _ in 0..new_count {
-        new_spaces.push(IntervalGroupId::from_bytes(reader.array32()?));
-    }
-    let mut transport = Vec::with_capacity(transport_count);
-    for _ in 0..transport_count {
-        transport.push(BasisTransport {
-            old: BasisClassId::from_bytes(reader.array32()?),
-            new: BasisClassId::from_bytes(reader.array32()?),
-            coefficient: reader.u32()?,
-        });
-    }
+    check_continuation_bytes(reader, old_count, new_count, transport_count)?;
+    let old_spaces = decode_interval_group_ids(reader, old_count)?;
+    let new_spaces = decode_interval_group_ids(reader, new_count)?;
+    let transport = decode_basis_transports(reader, transport_count)?;
     Ok(ClassContinuation {
         kind,
         old_spaces,
         new_spaces,
         transport,
     })
+}
+
+fn decode_continuation_counts(reader: &mut Reader<'_>) -> Result<[usize; 3], ProgramTraceError> {
+    Ok([reader.usize()?, reader.usize()?, reader.usize()?])
+}
+
+fn check_continuation_bytes(
+    reader: &Reader<'_>,
+    old_count: usize,
+    new_count: usize,
+    transport_count: usize,
+) -> Result<(), ProgramTraceError> {
+    let id_bytes = old_count
+        .checked_add(new_count)
+        .and_then(|count| count.checked_mul(32))
+        .ok_or_else(|| ProgramTraceError::new("continuation bytes overflow usize"))?;
+    let transport_bytes = transport_count
+        .checked_mul(68)
+        .ok_or_else(|| ProgramTraceError::new("continuation bytes overflow usize"))?;
+    let bytes = id_bytes
+        .checked_add(transport_bytes)
+        .ok_or_else(|| ProgramTraceError::new("continuation bytes overflow usize"))?;
+    if bytes > reader.remaining() {
+        return Err(ProgramTraceError::new(
+            "continuation exceeds the remaining bytes",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_interval_group_ids(
+    reader: &mut Reader<'_>,
+    count: usize,
+) -> Result<Vec<IntervalGroupId>, ProgramTraceError> {
+    let mut ids = Vec::with_capacity(count);
+    for _ in 0..count {
+        ids.push(IntervalGroupId::from_bytes(reader.array32()?));
+    }
+    Ok(ids)
+}
+
+fn decode_basis_transports(
+    reader: &mut Reader<'_>,
+    count: usize,
+) -> Result<Vec<BasisTransport>, ProgramTraceError> {
+    let mut transports = Vec::with_capacity(count);
+    for _ in 0..count {
+        transports.push(BasisTransport {
+            old: BasisClassId::from_bytes(reader.array32()?),
+            new: BasisClassId::from_bytes(reader.array32()?),
+            coefficient: reader.u32()?,
+        });
+    }
+    Ok(transports)
 }
 
 fn encode_correspondence(
@@ -760,74 +1068,142 @@ fn decode_correspondence(
     limits: ProgramTraceDecodeLimits,
     totals: &mut TraceTotals,
 ) -> std::result::Result<ClassCorrespondence, ProgramTraceError> {
+    let header = decode_correspondence_header(reader)?;
+    totals.correspondence_vectors = bounded_sum(
+        totals.correspondence_vectors,
+        header.basis_count,
+        limits.max_correspondence_vectors,
+        "correspondence vectors",
+    )?;
+    let basis = decode_correspondence_basis(reader, header.basis_count, limits, totals)?;
+    Ok(ClassCorrespondence {
+        old_space: header.old_space,
+        new_space: header.new_space,
+        scale: header.scale,
+        old_rank: header.old_rank,
+        new_rank: header.new_rank,
+        old_image_rank: header.old_image_rank,
+        new_image_rank: header.new_image_rank,
+        relation_rank: header.relation_rank,
+        basis,
+    })
+}
+
+fn decode_correspondence_header(
+    reader: &mut Reader<'_>,
+) -> Result<CorrespondenceHeader, ProgramTraceError> {
     let old_space = IntervalGroupId::from_bytes(reader.array32()?);
     let new_space = IntervalGroupId::from_bytes(reader.array32()?);
     let scale = f64::from_bits(reader.u64()?);
+    check_correspondence_scale(scale)?;
+    let ranks = decode_correspondence_ranks(reader)?;
+    let header = CorrespondenceHeader {
+        old_space,
+        new_space,
+        scale,
+        old_rank: ranks[0],
+        new_rank: ranks[1],
+        old_image_rank: ranks[2],
+        new_image_rank: ranks[3],
+        relation_rank: ranks[4],
+        basis_count: ranks[5],
+    };
+    check_correspondence_ranks(&header)?;
+    Ok(header)
+}
+
+fn check_correspondence_scale(scale: f64) -> Result<(), ProgramTraceError> {
     if !scale.is_finite() || scale < 0.0 {
         return Err(ProgramTraceError::new(
             "correspondence scale must be finite and non-negative",
         ));
     }
-    let old_rank = reader.usize()?;
-    let new_rank = reader.usize()?;
-    let old_image_rank = reader.usize()?;
-    let new_image_rank = reader.usize()?;
-    let relation_rank = reader.usize()?;
-    let basis_count = reader.usize()?;
-    if old_rank == 0
-        || new_rank == 0
-        || old_image_rank > old_rank
-        || new_image_rank > new_rank
-        || relation_rank == 0
-        || relation_rank > old_image_rank.min(new_image_rank)
-        || relation_rank != basis_count
-    {
+    Ok(())
+}
+
+fn decode_correspondence_ranks(reader: &mut Reader<'_>) -> Result<[usize; 6], ProgramTraceError> {
+    Ok([
+        reader.usize()?,
+        reader.usize()?,
+        reader.usize()?,
+        reader.usize()?,
+        reader.usize()?,
+        reader.usize()?,
+    ])
+}
+
+fn check_correspondence_ranks(header: &CorrespondenceHeader) -> Result<(), ProgramTraceError> {
+    let inconsistent = header.old_rank == 0
+        || header.new_rank == 0
+        || header.old_image_rank > header.old_rank
+        || header.new_image_rank > header.new_rank
+        || header.relation_rank == 0
+        || header.relation_rank > header.old_image_rank.min(header.new_image_rank)
+        || header.relation_rank != header.basis_count;
+    if inconsistent {
         return Err(ProgramTraceError::new(
             "correspondence ranks are inconsistent",
         ));
     }
-    totals.correspondence_vectors = bounded_sum(
-        totals.correspondence_vectors,
-        basis_count,
-        limits.max_correspondence_vectors,
-        "correspondence vectors",
-    )?;
-    let mut basis = Vec::with_capacity(basis_count);
-    for _ in 0..basis_count {
-        let old_count = reader.usize()?;
-        let new_count = reader.usize()?;
-        if old_count == 0 || new_count == 0 {
-            return Err(ProgramTraceError::new(
-                "a correspondence vector has an empty side",
-            ));
-        }
-        totals.correspondence_terms = bounded_sum(
-            totals.correspondence_terms,
-            old_count,
-            limits.max_correspondence_terms,
-            "correspondence terms",
-        )?;
-        totals.correspondence_terms = bounded_sum(
-            totals.correspondence_terms,
-            new_count,
-            limits.max_correspondence_terms,
-            "correspondence terms",
-        )?;
-        let old = decode_correspondence_terms(reader, old_count)?;
-        let new = decode_correspondence_terms(reader, new_count)?;
-        basis.push(CorrespondenceVector { old, new });
+    Ok(())
+}
+
+fn decode_correspondence_basis(
+    reader: &mut Reader<'_>,
+    count: usize,
+    limits: ProgramTraceDecodeLimits,
+    totals: &mut TraceTotals,
+) -> Result<Vec<CorrespondenceVector>, ProgramTraceError> {
+    let mut basis = Vec::with_capacity(count);
+    for _ in 0..count {
+        basis.push(decode_correspondence_vector(reader, limits, totals)?);
     }
-    Ok(ClassCorrespondence {
-        old_space,
-        new_space,
-        scale,
-        old_rank,
-        new_rank,
-        old_image_rank,
-        new_image_rank,
-        relation_rank,
-        basis,
+    Ok(basis)
+}
+
+fn decode_correspondence_vector(
+    reader: &mut Reader<'_>,
+    limits: ProgramTraceDecodeLimits,
+    totals: &mut TraceTotals,
+) -> Result<CorrespondenceVector, ProgramTraceError> {
+    let old_count = reader.usize()?;
+    let new_count = reader.usize()?;
+    check_correspondence_sides(old_count, new_count)?;
+    add_correspondence_terms(totals, old_count, new_count, limits)?;
+    Ok(CorrespondenceVector {
+        old: decode_correspondence_terms(reader, old_count)?,
+        new: decode_correspondence_terms(reader, new_count)?,
     })
+}
+
+fn check_correspondence_sides(old_count: usize, new_count: usize) -> Result<(), ProgramTraceError> {
+    if old_count == 0 || new_count == 0 {
+        return Err(ProgramTraceError::new(
+            "a correspondence vector has an empty side",
+        ));
+    }
+    Ok(())
+}
+
+fn add_correspondence_terms(
+    totals: &mut TraceTotals,
+    old_count: usize,
+    new_count: usize,
+    limits: ProgramTraceDecodeLimits,
+) -> Result<(), ProgramTraceError> {
+    totals.correspondence_terms = bounded_sum(
+        totals.correspondence_terms,
+        old_count,
+        limits.max_correspondence_terms,
+        "correspondence terms",
+    )?;
+    totals.correspondence_terms = bounded_sum(
+        totals.correspondence_terms,
+        new_count,
+        limits.max_correspondence_terms,
+        "correspondence terms",
+    )?;
+    Ok(())
 }
 
 fn decode_correspondence_terms(
