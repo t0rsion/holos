@@ -8,15 +8,15 @@
 //! other's closed common neighborhood. The matrix and certificate are
 //! identical at every worker count, including one, field for field.
 //!
-//! The rounds graph is not the serial graph. Neither output is
-//! canonical. Both preserve the barcode.
+//! The rounds graph is not the serial graph: the schedules differ, and
+//! neither output is canonical. Both preserve the barcode exactly.
 
 use rayon::prelude::*;
 
 use super::{
-    build_pool, finish, for_each_induced_edge, mark_dirty, prepare, test_edge, tombstone, AdjEntry,
-    CollapseStats, CollapseTimings, CollapsedRips, EdgeRec, Execution, Prepared, RemovalStep,
-    Scratch,
+    CollapseStats, CollapseTimings, CollapsedRips, Execution, Prepared, RemovalStep,
+    SchedulePosition, Scratch, build_pool, finish, for_each_induced_edge, mark_dirty, prepare,
+    test_edge, tombstone,
 };
 use crate::distances::Distances;
 use crate::{DistanceMatrix, Result, SparseDistanceMatrix};
@@ -49,111 +49,6 @@ pub fn collapse_sparse_rounds_parallel(
 
 /// The piecewise witness segments of one removable edge.
 type Witnesses = Vec<(f64, usize)>;
-type TestResult = (Option<Witnesses>, usize);
-
-fn collect_due(edges: &[EdgeRec], dirty: &mut [bool], test_all: bool, due: &mut Vec<usize>) {
-    due.clear();
-    for (index, edge) in edges.iter().enumerate() {
-        if edge.alive && (test_all || dirty[index]) {
-            dirty[index] = false;
-            due.push(index);
-        }
-    }
-}
-
-fn test_due_edges(
-    edges: &[EdgeRec],
-    adjacency: &[Vec<AdjEntry>],
-    due: &[usize],
-    terminal: f64,
-    pool: Option<&rayon::ThreadPool>,
-    scratch: &mut Scratch,
-) -> Vec<TestResult> {
-    match pool {
-        Some(pool) => pool.install(|| {
-            due.par_iter()
-                .map_init(Scratch::default, |local, &index| {
-                    let edge = &edges[index];
-                    let witnesses =
-                        test_edge(adjacency, edge.u, edge.v, edge.value, terminal, local);
-                    (witnesses, local.cands.len())
-                })
-                .collect()
-        }),
-        None => due
-            .iter()
-            .map(|&index| {
-                let edge = &edges[index];
-                let witnesses = test_edge(adjacency, edge.u, edge.v, edge.value, terminal, scratch);
-                (witnesses, scratch.cands.len())
-            })
-            .collect(),
-    }
-}
-
-fn select_batch(
-    edges: &[EdgeRec],
-    adjacency: &[Vec<AdjEntry>],
-    due: &[usize],
-    results: &[TestResult],
-    blocked: &mut [usize],
-    round: usize,
-    scratch: &mut Scratch,
-) -> Vec<usize> {
-    let mut selected = Vec::new();
-    for (position, &index) in due.iter().enumerate() {
-        if results[position].0.is_none() || blocked[index] == round {
-            continue;
-        }
-        selected.push(position);
-        let edge = &edges[index];
-        let walked =
-            for_each_induced_edge(adjacency, edge.u, edge.v, scratch, None, |blocked_edge| {
-                blocked[blocked_edge] = round
-            });
-        debug_assert!(walked);
-    }
-    selected
-}
-
-#[allow(clippy::too_many_arguments)]
-fn retire_batch(
-    edges: &mut [EdgeRec],
-    adjacency: &mut [Vec<AdjEntry>],
-    dirty: &mut [bool],
-    due: &[usize],
-    selected: &[usize],
-    results: &mut [TestResult],
-    round: usize,
-    scratch: &mut Scratch,
-    stats: &mut CollapseStats,
-    steps: &mut Vec<RemovalStep>,
-) -> bool {
-    let mut test_all_next = false;
-    for &position in selected {
-        let index = due[position];
-        let edge = &edges[index];
-        let (u, v, value) = (edge.u, edge.v, edge.value);
-        let witnesses = results[position]
-            .0
-            .take()
-            .expect("selected edge has witnesses");
-        stats.witness_segments += witnesses.len();
-        steps.push(RemovalStep {
-            u,
-            v,
-            value,
-            epoch: round,
-            witnesses,
-        });
-        edges[index].alive = false;
-        if !mark_dirty(adjacency, dirty, u, v, scratch) {
-            test_all_next = true;
-        }
-        tombstone(adjacency, u, v);
-    }
-    test_all_next
-}
 
 /// Build an owned pool for the call (none for one worker) and run the
 /// rounds schedule on it.
@@ -187,12 +82,11 @@ pub(crate) fn collapse_rounds_in<D: Distances + Sync>(
     let mut stats = CollapseStats::new(edges.len());
     let mut steps: Vec<RemovalStep> = Vec::new();
     let mut scratch = Scratch::default();
-    // Same pruning contract as the serial schedule: a round retests the
-    // edges marked dirty by the previous batch, or every live edge after
-    // a removal whose neighborhood was too large to mark finely. Both
-    // are supersets of the edges whose verdicts could have changed, so
-    // the trace matches the unpruned schedule; only `edge_tests`
-    // reflects the pruning.
+    // Same pruning contract as v1: a round retests the edges marked dirty
+    // by the previous batch, or every live edge after a removal whose
+    // neighborhood was too large to mark finely. Both are supersets of the
+    // edges whose verdicts could have changed, so the trace matches the
+    // unpruned schedule; only `edge_tests` reflects the pruning.
     let mut dirty: Vec<bool> = vec![false; edges.len()];
     // Round-stamped conflict blocking: an edge is blocked in the current
     // round when its stamp equals the round number, so no per-round reset
@@ -204,52 +98,88 @@ pub(crate) fn collapse_rounds_in<D: Distances + Sync>(
         stats.epochs += 1;
         let round = stats.epochs;
 
-        // The due list follows the edge array, which is the frozen
-        // priority order. Tests are read-only on the frozen graph, and
-        // the results collect in due order, so every worker count
-        // produces the same result set and the same counters.
-        collect_due(&edges, &mut dirty, test_all, &mut due);
+        // TEST. The due list follows the edge array, which is the frozen
+        // priority order. The tests are read-only on the snapshot, and the
+        // results collect in due order, so every worker count produces the
+        // same result set and the same deterministic counters.
+        due.clear();
+        for idx in 0..edges.len() {
+            if edges[idx].alive && (test_all || dirty[idx]) {
+                dirty[idx] = false;
+                due.push(idx);
+            }
+        }
         stats.edge_tests += due.len();
-        let mut results = test_due_edges(&edges, &adj, &due, run.terminal, pool, &mut scratch);
+        let mut results: Vec<(Option<Witnesses>, usize)> = match pool {
+            Some(pool) => pool.install(|| {
+                due.par_iter()
+                    .map_init(Scratch::default, |s, &idx| {
+                        let e = &edges[idx];
+                        let w = test_edge(&adj, e.u, e.v, e.value, run.terminal, s);
+                        (w, s.cands.len())
+                    })
+                    .collect()
+            }),
+            None => due
+                .iter()
+                .map(|&idx| {
+                    let e = &edges[idx];
+                    let w = test_edge(&adj, e.u, e.v, e.value, run.terminal, &mut scratch);
+                    (w, scratch.cands.len())
+                })
+                .collect(),
+        };
         for &(_, c) in &results {
             stats.max_common_neighborhood = stats.max_common_neighborhood.max(c);
         }
 
-        // Greedy maximal independent set in priority order: an edge is
-        // selected when no earlier selection blocked it, and a selection
-        // blocks every edge induced by its S set in the frozen graph. The
-        // selected edge marks itself, which is harmless. A blocked
-        // successful edge keeps nothing: its witnesses drop with
-        // `results`, and the conflicting removal's dirty marking retests
-        // it next round.
-        let selected = select_batch(
-            &edges,
-            &adj,
-            &due,
-            &results,
-            &mut blocked,
-            round,
-            &mut scratch,
-        );
+        // SELECT. Greedy maximal independent set in priority order: an edge
+        // is selected when no earlier selection blocked it, and a selection
+        // blocks every edge induced by its S set in the snapshot. The
+        // selected edge marks itself, which is harmless. Blocked-successful
+        // edges keep nothing: their witnesses drop with `results`, and the
+        // conflicting removal's dirty marking retests them next round.
+        let mut selected: Vec<usize> = Vec::new();
+        for (k, &idx) in due.iter().enumerate() {
+            if results[k].0.is_none() || blocked[idx] == round {
+                continue;
+            }
+            selected.push(k);
+            let (u, v) = (edges[idx].u, edges[idx].v);
+            // Exact, so no size limit: conflict blocking must see every
+            // induced edge, or one round could commit two conflicting
+            // removals.
+            let walked =
+                for_each_induced_edge(&adj, u, v, &mut scratch, None, |e| blocked[e] = round);
+            debug_assert!(walked);
+        }
         if selected.is_empty() {
             break;
         }
 
-        // Deletions run one at a time in priority order. Each edge marks
-        // dirty before its own tombstone so S still sees it: the same
-        // conservative cover as the serial schedule.
-        test_all = retire_batch(
-            &mut edges,
-            &mut adj,
-            &mut dirty,
-            &due,
-            &selected,
-            &mut results,
-            round,
-            &mut scratch,
-            &mut stats,
-            &mut steps,
-        );
+        // COMMIT. Deletions run one at a time in priority order, each edge
+        // marking dirty before its own tombstone so S still sees it; this
+        // is the same conservative cover as v1.
+        let mut test_all_next = false;
+        for &k in &selected {
+            let idx = due[k];
+            let (u, v, value) = (edges[idx].u, edges[idx].v, edges[idx].value);
+            let witnesses = results[k].0.take().expect("selected edge has witnesses");
+            stats.witness_segments += witnesses.len();
+            steps.push(RemovalStep {
+                u,
+                v,
+                value,
+                position: SchedulePosition::Round(round),
+                witnesses,
+            });
+            edges[idx].alive = false;
+            if !mark_dirty(&adj, &mut dirty, u, v, &mut scratch) {
+                test_all_next = true;
+            }
+            tombstone(&mut adj, u, v);
+        }
+        test_all = test_all_next;
     }
 
     finish(
@@ -289,10 +219,13 @@ mod tests {
         let mut prev = 1;
         for s in c.steps() {
             assert!(s.edge().0 < s.edge().1);
-            assert_eq!(s.epoch(), s.epoch());
-            assert!(s.epoch() >= prev);
-            prev = s.epoch();
-            assert!(s.epoch() < r.stats.epochs, "final round removes nothing");
+            assert_eq!(s.position().number(), s.position().number());
+            assert!(s.position().number() >= prev);
+            prev = s.position().number();
+            assert!(
+                s.position().number() < r.stats.epochs,
+                "final round removes nothing"
+            );
             assert!(!s.witnesses().is_empty());
             assert_eq!(s.witnesses()[0].0, s.value());
             for w in s.witnesses().windows(2) {
@@ -301,7 +234,7 @@ mod tests {
             assert!(s.witnesses().iter().all(|&(_, w)| w < c.vertex_count()));
         }
         for pair in c.steps().windows(2) {
-            if pair[0].epoch() == pair[1].epoch() {
+            if pair[0].position().number() == pair[1].position().number() {
                 let (u0, v0) = pair[0].edge();
                 let (u1, v1) = pair[1].edge();
                 assert!(
@@ -345,9 +278,8 @@ mod tests {
     // for every edge, so all six removable edges conflict pairwise and the
     // batch width is 1. Round 1 removes only (0,1). In round 2 the S sets
     // shrink, (0,2) and (1,2) no longer conflict, and both fall with apex 3.
-    // Round 3 finds the spanning star at 3 and yields nothing. The serial
-    // schedule removes the same edges but records them all in pass 1: the
-    // epochs diverge.
+    // Round 3 finds the spanning star at 3 and yields nothing. v1 removes
+    // the same edges but records them all in pass 1: the epochs diverge.
     #[test]
     fn k4_round_one_is_a_conflict_clique() {
         let d = DistanceMatrix::from_condensed(vec![1.0; 6]).unwrap();
@@ -357,7 +289,7 @@ mod tests {
             .certificate
             .steps()
             .iter()
-            .map(|s| (s.edge(), s.epoch(), s.witnesses().to_vec()))
+            .map(|s| (s.edge(), s.position().number(), s.witnesses().to_vec()))
             .collect();
         assert_eq!(
             trace,
@@ -399,7 +331,7 @@ mod tests {
             .certificate
             .steps()
             .iter()
-            .map(|s| (s.edge(), s.epoch()))
+            .map(|s| (s.edge(), s.position().number()))
             .collect();
         assert_eq!(
             trace,
@@ -444,24 +376,28 @@ mod tests {
     // In unit K4, (0,2) succeeds in round 1 but the selection of (0,1)
     // blocks it. Its round-1 witness would be (1.0, 1); the recorded step
     // sits in round 2 with apex 3, so the blocked witnesses were dropped
-    // and recomputed against the next frozen graph. The retest happens
-    // through the ordinary dirty marking (conflict symmetry puts the
-    // blocked edge inside the removed edge's S), with no special case:
-    // the exact test count proves no fallback widened the round-2 test
-    // set.
+    // and recomputed against the next snapshot. The retest happens through
+    // the ordinary dirty marking (conflict symmetry puts the blocked edge
+    // inside the removed edge's S), with no special case: the exact test
+    // count proves no fallback widened the round-2 test set.
     #[test]
     fn blocked_successful_edge_is_retested_later() {
         let d = DistanceMatrix::from_condensed(vec![1.0; 6]).unwrap();
         let r = collapse_dense_rounds_parallel(&d, None, 2).unwrap();
         check_invariants(&r);
-        assert!(r.certificate.steps().iter().any(|s| s.epoch() >= 2));
+        assert!(
+            r.certificate
+                .steps()
+                .iter()
+                .any(|s| s.position().number() >= 2)
+        );
         let blocked = r
             .certificate
             .steps()
             .iter()
             .find(|s| s.edge() == (0, 2))
             .unwrap();
-        assert_eq!(blocked.epoch(), 2);
+        assert_eq!(blocked.position().number(), 2);
         assert_eq!(blocked.witnesses(), &[(1.0, 3)]);
         assert_eq!(r.stats.edge_tests, 14);
     }

@@ -33,9 +33,9 @@ fn git_hash(manifest: &str) -> Option<String> {
     (!hash.is_empty()).then_some(hash)
 }
 
-/// Rerun the script when the checked-out commit changes. Watch the
-/// resolved ref. Commits and amends on the same branch update that file
-/// and leave HEAD unchanged.
+/// Rerun the script when the checked-out commit changes. Watch the resolved
+/// ref, not just HEAD. Commits and amends on the same branch update the ref
+/// file, but leave HEAD unchanged.
 fn watch_head(manifest: &str) {
     let Some(head) = git_file(manifest, "HEAD") else {
         return;

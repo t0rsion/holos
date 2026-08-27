@@ -8,18 +8,18 @@ use rayon::prelude::*;
 
 use crate::{Diagram, DistanceMatrix, Error, Result, SparseDistanceMatrix};
 
-/// Bytes one window of a file holds. A reader holds one window and the
-/// parsed values, not the whole text. On a 36 MiB L3 a window this size is
-/// still cache-warm when its parse starts.
+/// Bytes one window of a file holds. A reader parses one window at a time,
+/// so it holds one window and the parsed values, not the whole text. On a
+/// 36 MiB L3 a window this size is still cache-warm when its parse starts.
 const WINDOW_BYTES: usize = 16 << 20;
 
 /// Feed the text of `path` to `on_window`, one window at a time, in file
 /// order. A window ends after a newline or at the end of the file, so no
 /// line spans two windows. `on_window` gets the 1-based number of the
 /// window's first line and the window text, and returns the number of
-/// newlines it saw. With `threads` above one, a second thread reads the
-/// next window while `on_window` parses the current one; at one thread the
-/// reads and the parses alternate.
+/// newlines it saw, which the parse counts anyway. With `threads` above one, a
+/// second thread reads the next window while `on_window` parses the
+/// current one; at one thread the reads and the parses alternate.
 fn for_each_window(
     path: &Path,
     threads: usize,
@@ -73,7 +73,7 @@ fn for_each_window(
             }
         });
         // Both channel ends this thread holds drop with the closure, so an
-        // early return unblocks a reader waiting on either channel.
+        // early return frees a reader blocked on either channel.
         let empty_tx = empty_tx;
         for buf in full_rx {
             let buf = buf.map_err(io_err)?;
@@ -85,9 +85,9 @@ fn for_each_window(
     })
 }
 
-/// Append up to `size` bytes of `file` to `buf`, in reads of the remaining
-/// space, and return how many arrived. Fewer than `size` means the end of
-/// the file.
+/// Append up to `size` bytes of `file` to `buf`, in reads the size of the
+/// space left, and return how many arrived. Fewer than `size` means the end
+/// of the file.
 fn read_up_to(file: &mut std::fs::File, buf: &mut Vec<u8>, size: usize) -> std::io::Result<usize> {
     use std::io::Read;
     let start = buf.len();
@@ -214,31 +214,25 @@ fn token_end(bytes: &[u8], start: usize) -> usize {
 /// Parse every number on `line` in order and hand each to `push`. Returns
 /// the offending token when one is not a number. The ASCII path scans bytes
 /// and parses in place; it gives the same bits as `str::parse::<f64>`.
-fn parse_unicode_numbers<'a>(
-    line: &'a str,
-    push: &mut impl FnMut(f64),
-) -> std::result::Result<(), &'a str> {
-    for token in tokens(line) {
-        push(token.parse::<f64>().map_err(|_| token)?);
+fn parse_numbers(line: &str, mut push: impl FnMut(f64)) -> std::result::Result<(), &str> {
+    if !line.is_ascii() {
+        for t in tokens(line) {
+            push(t.parse::<f64>().map_err(|_| t)?);
+        }
+        return Ok(());
     }
-    Ok(())
-}
-
-fn parse_ascii_numbers<'a>(
-    line: &'a str,
-    push: &mut impl FnMut(f64),
-) -> std::result::Result<(), &'a str> {
     let bytes = line.as_bytes();
+    let n = bytes.len();
     let mut i = 0;
-    while i < bytes.len() {
-        while i < bytes.len() && is_separator(bytes[i]) {
+    while i < n {
+        while i < n && is_separator(bytes[i]) {
             i += 1;
         }
-        if i == bytes.len() {
+        if i == n {
             break;
         }
         match fast_float2::parse_partial::<f64, _>(&bytes[i..]) {
-            Ok((value, used)) if i + used == bytes.len() || is_separator(bytes[i + used]) => {
+            Ok((value, used)) if i + used == n || is_separator(bytes[i + used]) => {
                 push(value);
                 i += used;
             }
@@ -248,20 +242,12 @@ fn parse_ascii_numbers<'a>(
     Ok(())
 }
 
-fn parse_numbers(line: &str, mut push: impl FnMut(f64)) -> std::result::Result<(), &str> {
-    if line.is_ascii() {
-        parse_ascii_numbers(line, &mut push)
-    } else {
-        parse_unicode_numbers(line, &mut push)
-    }
-}
-
 /// The smallest text a parse splits across workers. A split costs a pool
 /// build and one pass that counts the newlines of every chunk. Measured on
 /// this machine's E-cores with `engine-bench`, condensed input, two workers
 /// against serial: 1.48 ms to 0.89 ms at one mebibyte, and 0.168 ms to
 /// 0.149 ms at 128 kibibytes. The smaller file saves too little to pay for
-/// the split, so the parse stays serial.
+/// the split, so the parse takes it serially.
 const MIN_PARALLEL_BYTES: usize = 1 << 20;
 
 /// The worker count a parse of `text` runs under, given the caller's budget
@@ -301,10 +287,10 @@ fn line_chunks(text: &str, workers: usize) -> Vec<&str> {
 ///
 /// `parse_chunk` takes the 1-based number of the chunk's first line, counted
 /// from `first_line`, and the chunk text, so it names the lines a serial
-/// parse of the whole text names. The outputs come back in file order; the
-/// first error in that order is the one the caller reports. The line
-/// numbers cost one pass over the text, which counts the newlines of every
-/// chunk.
+/// parse of the whole text names. The outputs come back in file order. Read
+/// them in that order and the first error in file order is the one you
+/// report. The line numbers cost one pass over the text, which counts the
+/// newlines of every chunk.
 fn map_line_chunks<T: Send>(
     pool: Option<&rayon::ThreadPool>,
     text: &str,
@@ -344,8 +330,9 @@ fn map_line_chunks<T: Send>(
     (results, lineno - first_line)
 }
 
-/// One input's parse: a pool of the caller's workers, built once. Every
-/// reader feeds windows to one of these; a text parser feeds one window.
+/// The parse of one input: a pool of the caller's workers, built once, and
+/// the values gathered so far. Every reader and every text parser feeds
+/// windows to one of these; a text parser feeds one window.
 struct Parse {
     threads: usize,
     /// The smallest text that splits; tests lower it to split short texts.
@@ -447,14 +434,15 @@ impl PointSink {
                     None => self.width = Some(first.len()),
                     // A serial parse measures every point against the first
                     // point of the file. A chunk measures against its own
-                    // first point, so the file-wide check lands here, on a
-                    // line at or before any line the chunk itself rejected.
+                    // first point, so the file-wide check lands here, and it
+                    // lands on a line at or before any line the chunk itself
+                    // rejected.
                     Some(w) if first.len() != w => {
                         return Err(Error::InvalidInput(format!(
                             "{name}:{}: point has {} coordinates, expected {w}",
                             chunk.first_line,
                             first.len()
-                        )))
+                        )));
                     }
                     Some(_) => {}
                 }
@@ -764,30 +752,6 @@ pub enum OutputFormat {
     Csv,
 }
 
-fn write_ripser<W: Write>(w: &mut W, diagram: &Diagram, max_dim: usize) -> Result<()> {
-    for dim in 0..=max_dim {
-        writeln!(w, "persistence intervals in dim {dim}:").map_err(|e| Error::Io(e.to_string()))?;
-        for bar in diagram.in_dim(dim) {
-            if bar.is_essential() {
-                writeln!(w, " [{}, )", bar.birth).map_err(|e| Error::Io(e.to_string()))?;
-            } else {
-                writeln!(w, " [{},{})", bar.birth, bar.death)
-                    .map_err(|e| Error::Io(e.to_string()))?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn write_csv<W: Write>(w: &mut W, diagram: &Diagram) -> Result<()> {
-    writeln!(w, "dim,birth,death").map_err(|e| Error::Io(e.to_string()))?;
-    for bar in &diagram.bars {
-        writeln!(w, "{},{},{}", bar.dim, bar.birth, bar.death)
-            .map_err(|e| Error::Io(e.to_string()))?;
-    }
-    Ok(())
-}
-
 /// Write a diagram to `w` in the given format.
 ///
 /// `max_dim` fixes how many dimension headers the ripser format prints, so
@@ -800,10 +764,30 @@ pub fn write_diagram<W: Write>(
     format: OutputFormat,
     max_dim: usize,
 ) -> Result<()> {
+    let io_err = |e: std::io::Error| Error::Io(e.to_string());
     match format {
-        OutputFormat::Ripser => write_ripser(w, diagram, max_dim),
-        OutputFormat::Csv => write_csv(w, diagram),
+        OutputFormat::Ripser => {
+            for dim in 0..=max_dim {
+                writeln!(w, "persistence intervals in dim {dim}:").map_err(io_err)?;
+                for bar in diagram.in_dim(dim) {
+                    if bar.is_essential() {
+                        writeln!(w, " [{}, )", bar.birth).map_err(io_err)?;
+                    } else {
+                        writeln!(w, " [{},{})", bar.birth, bar.death).map_err(io_err)?;
+                    }
+                }
+            }
+        }
+        OutputFormat::Csv => {
+            writeln!(w, "dim,birth,death").map_err(io_err)?;
+            for bar in &diagram.bars {
+                // f64 Display renders infinity as "inf". That string is the
+                // documented essential-death marker.
+                writeln!(w, "{},{},{}", bar.dim, bar.birth, bar.death).map_err(io_err)?;
+            }
+        }
     }
+    Ok(())
 }
 
 /// The text parsers with `workers` forced, whatever the text size. Tests use
@@ -1280,9 +1264,9 @@ mod tests {
         assert_eq!(count_newlines(&[0x0a; 16]), 16);
     }
 
-    /// The window reader against the one-window parse. Window size 64 bytes
-    /// so a small file crosses many windows: a line longer than the window,
-    /// a missing final newline, and a bad token in a late window.
+    /// The window reader against the one-window parse, at a window of 64
+    /// bytes so a small file crosses many windows: a line longer than the
+    /// window, a missing final newline, and a bad token in a late window.
     #[test]
     fn windows_give_the_one_window_parse() {
         let mut text = String::new();
@@ -1323,7 +1307,7 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             let serial = parse_condensed("t", &bad, 1).unwrap_err().to_string();
-            assert_eq!(err.rsplit(':').nth(2), serial.rsplit(':').nth(2), "{err}");
+            assert_eq!(err.split(':').nth(2), serial.split(':').nth(2), "{err}");
             assert!(err.contains(":405: not a number: \"x\""), "{err}");
         }
     }

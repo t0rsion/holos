@@ -4,7 +4,7 @@
 use std::f64::consts::PI;
 
 use holos_tda::oracle::rips_persistence_oracle;
-use holos_tda::{rips_persistence, Bar, Diagram, DistanceMatrix, RipsParams};
+use holos_tda::{Bar, Diagram, DistanceMatrix, RipsParams, rips_persistence};
 
 struct Rng(u64);
 
@@ -179,11 +179,13 @@ fn figure_eight_has_two_long_h1_classes() {
 fn sphere_sample_has_one_dominant_h2_class() {
     let mut rng = Rng::new(2);
     let points: Vec<Vec<f64>> = (0..30)
-        .map(|_| loop {
-            let g = [rng.gaussian(), rng.gaussian(), rng.gaussian()];
-            let norm = g.iter().map(|x| x * x).sum::<f64>().sqrt();
-            if norm > 1e-3 {
-                break g.iter().map(|x| x / norm).collect();
+        .map(|_| {
+            loop {
+                let g = [rng.gaussian(), rng.gaussian(), rng.gaussian()];
+                let norm = g.iter().map(|x| x * x).sum::<f64>().sqrt();
+                if norm > 1e-3 {
+                    break g.iter().map(|x| x / norm).collect();
+                }
             }
         })
         .collect();

@@ -3,7 +3,7 @@
 //! to scale the fuzz budgets). All seeds are fixed.
 
 use holos_tda::oracle::rips_persistence_oracle_mod;
-use holos_tda::{rips_persistence, Bar, Diagram, DistanceMatrix, RipsParams};
+use holos_tda::{Bar, Diagram, DistanceMatrix, RipsParams, rips_persistence};
 
 struct Rng(u64);
 
@@ -74,35 +74,6 @@ fn iters(default: usize) -> usize {
         .unwrap_or(default)
 }
 
-fn random_distance(rng: &mut Rng, regime: usize) -> f64 {
-    match regime {
-        0 => rng.uniform(),
-        1 => (rng.uniform() * 4.0).ceil() / 4.0,
-        2 => [0.5, 1.0, 2.0, f64::INFINITY][rng.below(4)],
-        _ if rng.below(4) == 0 => 0.0,
-        _ => rng.uniform(),
-    }
-}
-
-fn random_threshold(rng: &mut Rng) -> Option<f64> {
-    match rng.below(4) {
-        0 => None,
-        1 => Some(0.0),
-        2 => Some(rng.uniform() * 2.0),
-        _ => Some(f64::INFINITY),
-    }
-}
-
-fn random_params(rng: &mut Rng, n: usize, modulus: u32) -> RipsParams {
-    let mut params = RipsParams::new(1 + rng.below(n - 1)).with_modulus(modulus);
-    params.threshold = random_threshold(rng);
-    params.use_emergent_pairs = rng.below(2) == 0;
-    params.use_apparent_pairs = rng.below(2) == 0;
-    params.use_clearing = rng.below(2) == 0;
-    params.collapse_edges = rng.below(2) == 0;
-    params
-}
-
 /// Random matrices over mixed regimes: continuous, tie-heavy quantized,
 /// {0.5,1,2,inf} discrete, zero-distance duplicates. Every prime class,
 /// random toggles, random dims and thresholds.
@@ -115,21 +86,46 @@ fn fuzz_random_matrices_all_fields() {
         let n = 4 + rng.below(6); // 4..=9
         let regime = rng.below(4);
         let m = n * (n - 1) / 2;
-        let data: Vec<_> = (0..m).map(|_| random_distance(&mut rng, regime)).collect();
+        let mut data = Vec::with_capacity(m);
+        for _ in 0..m {
+            let d = match regime {
+                0 => rng.uniform(),
+                1 => (rng.uniform() * 4.0).ceil() / 4.0,
+                2 => [0.5, 1.0, 2.0, f64::INFINITY][rng.below(4)],
+                _ => {
+                    if rng.below(4) == 0 {
+                        0.0
+                    } else {
+                        rng.uniform()
+                    }
+                }
+            };
+            data.push(d);
+        }
         let dist = DistanceMatrix::from_condensed(data).unwrap();
+        let max_dim = 1 + rng.below(n - 1);
+        let threshold = match rng.below(4) {
+            0 => None,
+            1 => Some(0.0),
+            2 => Some(rng.uniform() * 2.0),
+            _ => Some(f64::INFINITY),
+        };
         let p = primes[rng.below(primes.len())];
-        let params = random_params(&mut rng, n, p);
+        let mut params = RipsParams::new(max_dim).with_modulus(p);
+        params.threshold = threshold;
+        params.use_emergent_pairs = rng.below(2) == 0;
+        params.use_apparent_pairs = rng.below(2) == 0;
+        params.use_clearing = rng.below(2) == 0;
+        params.collapse_edges = rng.below(2) == 0;
         let solver = rips_persistence(&dist, &params).unwrap();
         let oracle = Diagram {
-            bars: oracle_bars(&dist, params.max_dim, params.threshold, p),
+            bars: oracle_bars(&dist, max_dim, threshold, p),
         };
         assert_eq!(
             canonical(&solver),
             canonical(&oracle),
-            "iter {it}: n={n} regime={regime} max_dim={} p={p} \
-             threshold={:?} toggles=({},{},{}) collapse={}",
-            params.max_dim,
-            params.threshold,
+            "iter {it}: n={n} regime={regime} max_dim={max_dim} p={p} \
+             threshold={threshold:?} toggles=({},{},{}) collapse={}",
             params.use_emergent_pairs,
             params.use_apparent_pairs,
             params.use_clearing,
@@ -190,9 +186,9 @@ fn ultrametrics_have_no_higher_homology() {
     let mut rng = Rng::new(0x0a17_a3e7);
     for it in 0..iters(20_000).min(2_000) {
         let n = 4 + rng.below(57); // 4..=60
-                                   // Random binary merge tree. Each point
-                                   // gets a leaf path. The distance is the
-                                   // height of the lowest common ancestor.
+        // Random binary merge tree. Each point
+        // gets a leaf path. The distance is the
+        // height of the lowest common ancestor.
         let depth = 6;
         let labels: Vec<u32> = (0..n)
             .map(|_| rng.next() as u32 & ((1 << depth) - 1))

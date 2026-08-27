@@ -1,7 +1,7 @@
 //! Property tests: invariances the barcode must satisfy regardless of the
 //! reduction strategy, plus input edge cases.
 
-use holos_tda::{rips_persistence, Diagram, DistanceMatrix, Engine, RipsParams};
+use holos_tda::{Diagram, DistanceMatrix, Engine, RipsParams, rips_persistence};
 use proptest::prelude::*;
 
 fn canonical(d: &Diagram) -> Vec<(usize, f64, f64)> {

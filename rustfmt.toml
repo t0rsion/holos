@@ -1,1 +1,2 @@
-# Intentionally empty: default rustfmt settings, pinned as explicit policy.
+# Follow the workspace language edition.
+style_edition = "2024"

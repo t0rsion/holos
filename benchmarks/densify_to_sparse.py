@@ -36,61 +36,6 @@ def read_cloud(path):
     return pts
 
 
-def distance_matrix(points):
-    size = len(points)
-    matrix = [[0.0] * size for _ in range(size)]
-    for i, point in enumerate(points):
-        for j in range(i):
-            distance = math.dist(point, points[j])
-            matrix[i][j] = distance
-            matrix[j][i] = distance
-    return matrix
-
-
-def graph_degrees(matrix, threshold):
-    degree = [0] * len(matrix)
-    edges = 0
-    for i, row in enumerate(matrix):
-        for j in range(i):
-            if row[j] <= threshold:
-                degree[i] += 1
-                degree[j] += 1
-                edges += 1
-    return degree, edges
-
-
-def vertex_order(degree):
-    isolated = [vertex for vertex, value in enumerate(degree) if value == 0]
-    connected = [vertex for vertex, value in enumerate(degree) if value > 0]
-    return isolated + connected, len(isolated)
-
-
-def write_sparse(path, matrix, order, threshold):
-    with open(path, "w") as output:
-        for a in range(1, len(order)):
-            row = matrix[order[a]]
-            for b in range(a):
-                distance = row[order[b]]
-                if distance <= threshold:
-                    output.write(f"{a} {b} {distance!r}\n")
-
-
-def write_lower(path, matrix):
-    with open(path, "w") as output:
-        for i in range(1, len(matrix)):
-            output.write(" ".join(repr(matrix[i][j]) for j in range(i)) + "\n")
-
-
-def metadata(size, edges, degree, isolated, relabelled, radius, tau, threshold):
-    pairs = size * (size - 1) // 2
-    return (
-        f"n={size} pairs={pairs} edges={edges} density={edges / pairs:.6f} "
-        f"mean_degree={2 * edges / size:.2f} max_degree={max(degree)} "
-        f"isolated={isolated} relabelled={relabelled} "
-        f"enclosing_radius={radius!r} tau={tau!r} threshold={threshold!r}"
-    )
-
-
 def main() -> None:
     if len(sys.argv) not in (4, 5):
         sys.exit("usage: densify_to_sparse.py CLOUD TAU OUT_SPARSE [OUT_LOWER]")
@@ -102,19 +47,54 @@ def main() -> None:
     if n < 2:
         sys.exit(f"{cloud_path}: need at least two points, got {n}")
 
-    dmat = distance_matrix(pts)
+    dmat = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        row, pi = dmat[i], pts[i]
+        for j in range(i):
+            d = math.dist(pi, pts[j])
+            row[j] = d
+            dmat[j][i] = d
+
     radius = min(max(row) for row in dmat)
     threshold = tau * radius
-    degree, edges = graph_degrees(dmat, threshold)
+
+    degree = [0] * n
+    edges = 0
+    for i in range(n):
+        row = dmat[i]
+        for j in range(i):
+            if row[j] <= threshold:
+                degree[i] += 1
+                degree[j] += 1
+                edges += 1
     if edges == 0:
         sys.exit(f"{cloud_path}: threshold {threshold!r} keeps no edge")
 
-    order, isolated = vertex_order(degree)
+    order = [i for i in range(n) if degree[i] == 0]
+    isolated = len(order)
+    order += [i for i in range(n) if degree[i] > 0]
     relabelled = "yes" if any(old != new for new, old in enumerate(order)) else "no"
-    write_sparse(sparse_path, dmat, order, threshold)
+
+    with open(sparse_path, "w") as f:
+        for a in range(1, n):
+            i = dmat[order[a]]
+            for b in range(a):
+                d = i[order[b]]
+                if d <= threshold:
+                    f.write(f"{a} {b} {d!r}\n")
+
     if lower_path is not None:
-        write_lower(lower_path, dmat)
-    print(metadata(n, edges, degree, isolated, relabelled, radius, tau, threshold))
+        with open(lower_path, "w") as f:
+            for i in range(1, n):
+                f.write(" ".join(repr(dmat[i][j]) for j in range(i)) + "\n")
+
+    pairs = n * (n - 1) // 2
+    print(
+        f"n={n} pairs={pairs} edges={edges} density={edges / pairs:.6f} "
+        f"mean_degree={2 * edges / n:.2f} max_degree={max(degree)} "
+        f"isolated={isolated} relabelled={relabelled} "
+        f"enclosing_radius={radius!r} tau={tau!r} threshold={threshold!r}"
+    )
 
 
 if __name__ == "__main__":

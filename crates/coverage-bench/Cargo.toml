@@ -1,0 +1,9 @@
+[package]
+name = "coverage-bench"
+version = "0.22.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+holos-tda = { path = "../holos-tda" }
+holos-tda-check = { path = "../holos-tda-check" }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/collapse-bench", "crates/engine-bench", "crates/holos-tda", "crates/holos-tda-py"]
+members = ["crates/atlas-bench", "crates/cohomology-bench", "crates/collapse-bench", "crates/coverage-bench", "crates/distributed-bench", "crates/dynamic-bench", "crates/engine-bench", "crates/holos-tda", "crates/holos-tda-check", "crates/holos-tda-py", "crates/index-bench", "crates/interface-bench", "crates/intervention-bench", "crates/kinetic-zigzag-bench", "crates/program-bench", "crates/relative-index-bench", "crates/synthesis-bench"]
 
 # Profiles apply from the workspace root only; member profiles are ignored.
 [profile.release]

@@ -14,15 +14,15 @@ use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use dashmap::mapref::entry::Entry as MapEntry;
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry as MapEntry;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
+use crate::Bar;
 use crate::distances::Distances;
 use crate::field::{Coeffs, Entry, HeapEntry};
 use crate::reduce::{Engine, PairScratch, Pivots};
 use crate::simplex::Simplex;
-use crate::Bar;
 
 /// A reduced column that owns a pivot: the pivot's coefficient and diameter,
 /// the owning column, and the column's V-column (the reducers combined into
@@ -76,11 +76,6 @@ fn claim(table: &Table, index: u64, owner: Owner) -> Claim {
 #[repr(align(128))]
 struct Padded<T>(T);
 
-/// Idle polls a worker spends yielding before it sleeps.
-const IDLE_YIELDS: u32 = 32;
-/// The sleep doubles from one microsecond this many times, then holds.
-const IDLE_SLEEP_DOUBLINGS: u32 = 7;
-
 /// Columns awaiting reduction. An atomic counter dispenses the initial
 /// `0..len` lock-free. A mutex holds the rare displaced columns to
 /// re-reduce, and a flag gates that mutex, so the common path never locks
@@ -89,7 +84,13 @@ const IDLE_SLEEP_DOUBLINGS: u32 = 7;
 /// The three shared counters sit on separate cache lines. A worker writes
 /// `next` on every column, so a `pending` on the same line would cost every
 /// other worker a miss per column.
+/// Idle polls a worker spends yielding before it sleeps.
+const IDLE_YIELDS: u32 = 32;
+/// The sleep doubles from one microsecond this many times, then holds.
+const IDLE_SLEEP_DOUBLINGS: u32 = 7;
+
 struct WorkQueue {
+    /// The next undispensed column.
     next: Padded<AtomicUsize>,
     /// Columns not yet in a final state; the region ends when it hits zero.
     pending: Padded<AtomicUsize>,
@@ -169,7 +170,7 @@ struct Scratch {
     pairs: PairScratch,
 }
 
-/// Outcome of one reduction pass over a column.
+/// The state in which one reduction pass over a column ended.
 enum Pass {
     /// Owns a pivot; carries a column it displaced (to re-reduce), if any.
     Owned(Option<usize>),
@@ -232,9 +233,10 @@ impl<C: Coeffs + Sync, D: Distances + Sync> Engine<'_, C, D> {
         (table, bars)
     }
 
-    /// The converged pivot registry: (pivot index, coefficient, owner
-    /// column, diameter bits), sorted by pivot index. The thread-invariance
-    /// gate compares this. The reduced output drops the diameter.
+    /// The converged pivot registry, with the pivot diameter the reduced
+    /// output drops: (pivot index, coefficient, owner column, diameter
+    /// bits), by pivot index. The thread-invariance gate compares this,
+    /// which is wider than the diagram.
     #[cfg(test)]
     pub(crate) fn parallel_pivot_registry(
         &self,

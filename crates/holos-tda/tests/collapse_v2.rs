@@ -15,18 +15,15 @@
 //! attack. Their expected certificates are derived from the specification,
 //! not observed from a run.
 
-mod common;
-
-use common::ref_test_edge;
 use holos_tda::collapse::verify::{verify_dense, verify_sparse};
 use holos_tda::collapse::{
-    collapse_dense, collapse_dense_rounds_parallel, collapse_sparse,
-    collapse_sparse_rounds_parallel, CollapsedRips, RemovalStep,
+    CollapsedRips, RemovalStep, collapse_dense, collapse_dense_rounds_parallel, collapse_sparse,
+    collapse_sparse_rounds_parallel,
 };
 use holos_tda::oracle::rips_persistence_oracle_mod;
 use holos_tda::{
-    rips_persistence, rips_persistence_sparse, Bar, CollapseSchedule, Diagram, DistanceMatrix,
-    RipsParams, SparseDistanceMatrix,
+    Bar, CollapseSchedule, Diagram, DistanceMatrix, RipsParams, SparseDistanceMatrix,
+    rips_persistence, rips_persistence_sparse,
 };
 
 const MODULI: [u32; 3] = [2, 3, 5];
@@ -98,7 +95,7 @@ fn step_bits(cert: &holos_tda::collapse::CollapseCertificate) -> Vec<StepBits> {
                 u,
                 v,
                 s.value().to_bits(),
-                s.epoch(),
+                s.position().number(),
                 s.witnesses()
                     .iter()
                     .map(|&(a, w)| (a.to_bits(), w))
@@ -244,12 +241,12 @@ fn removed_set(result: &CollapsedRips) -> Vec<(usize, usize)> {
     v
 }
 
-/// Steps per round, one entry per schedule epoch. The last entry is the
+/// Steps per round, one entry per schedule position. The last entry is the
 /// closing round, which removes nothing.
 fn round_widths(result: &CollapsedRips) -> Vec<usize> {
     let mut widths = vec![0usize; result.stats.epochs];
     for step in result.certificate.steps() {
-        let round = step.epoch();
+        let round = step.position().number();
         assert!(
             round >= 1 && round <= widths.len(),
             "step round {round} outside the {} recorded epochs",
@@ -283,7 +280,7 @@ fn common_closed_set(adj: &[Vec<bool>], u: usize, v: usize) -> Vec<usize> {
 
 /// Largest |S(e)| seen at a removal, measured on the snapshot its round
 /// read. Replayed from the certificate alone, independently of any
-/// production counter: rounds group by schedule epoch, and every step of a
+/// production counter: rounds group by schedule position, and every step of a
 /// round reads the graph as it stood before the round.
 fn widest_round_read_set(n: usize, input: &[(usize, usize, f64)], result: &CollapsedRips) -> usize {
     let mut adj = adjacency(n, input);
@@ -291,9 +288,9 @@ fn widest_round_read_set(n: usize, input: &[(usize, usize, f64)], result: &Colla
     let mut widest = 0;
     let mut i = 0;
     while i < steps.len() {
-        let round = steps[i].epoch();
+        let round = steps[i].position().number();
         let mut j = i;
-        while j < steps.len() && steps[j].epoch() == round {
+        while j < steps.len() && steps[j].position().number() == round {
             j += 1;
         }
         for step in &steps[i..j] {
@@ -347,6 +344,8 @@ fn v2_sparse(
     result
 }
 
+// The unpruned version 2 reference schedule.
+//
 // Production may skip an edge whose verdict provably cannot have changed
 // since its last test, and falls back to retesting everything once the
 // affected vertex set grows past the marking limit. Only the test counter
@@ -386,83 +385,58 @@ struct RefRun {
     terminal: f64,
 }
 
-fn reference_matrix(n: usize, edges: &[(usize, usize, f64)]) -> Vec<Vec<f64>> {
-    let mut matrix = vec![vec![f64::INFINITY; n]; n];
-    for (vertex, row) in matrix.iter_mut().enumerate() {
-        row[vertex] = 0.0;
-    }
-    for &(u, v, distance) in edges {
-        matrix[u][v] = distance;
-        matrix[v][u] = distance;
-    }
-    matrix
-}
-
-fn reference_successes(
-    live: &[(usize, usize, f64)],
-    snapshot: &[Vec<f64>],
+/// The version 1 section 2 predicate with the section 3 witness rule,
+/// evaluated against the value matrix `f`. Returns the witness segments, or
+/// `None` when some level has no dominating vertex. The version 2 schedule
+/// leaves this rule untouched; only the graph it reads changes.
+fn ref_test_edge(
+    f: &[Vec<f64>],
+    u: usize,
+    v: usize,
+    a: f64,
     terminal: f64,
-) -> Vec<RefSuccess> {
-    let mut successes: Vec<_> = live
-        .iter()
-        .filter_map(|&(u, v, value)| {
-            ref_test_edge(snapshot, u, v, value, terminal).map(|witnesses| RefSuccess {
-                u,
-                v,
-                value,
-                witnesses,
-            })
-        })
-        .collect();
-    successes.sort_by(|a, b| {
-        b.value
-            .total_cmp(&a.value)
-            .then((a.v, a.u).cmp(&(b.v, b.u)))
-    });
-    successes
-}
-
-fn reference_read_set(snapshot: &[Vec<f64>], u: usize, v: usize) -> Vec<bool> {
-    (0..snapshot.len())
-        .map(|vertex| {
-            vertex == u
-                || vertex == v
-                || (snapshot[u][vertex].is_finite() && snapshot[v][vertex].is_finite())
-        })
-        .collect()
-}
-
-fn reference_batch(successes: &[RefSuccess], snapshot: &[Vec<f64>]) -> Vec<usize> {
-    let mut read_sets: Vec<Vec<bool>> = Vec::new();
-    let mut batch = Vec::new();
-    for (index, success) in successes.iter().enumerate() {
-        if read_sets.iter().any(|set| set[success.u] && set[success.v]) {
+) -> Option<Vec<(f64, usize)>> {
+    let mut cands: Vec<(usize, f64)> = Vec::new();
+    for (x, (&du, &dv)) in f[u].iter().zip(f[v].iter()).enumerate() {
+        if x == u || x == v || !du.is_finite() || !dv.is_finite() {
             continue;
         }
-        read_sets.push(reference_read_set(snapshot, success.u, success.v));
-        batch.push(index);
+        let b = a.max(du).max(dv);
+        if b <= terminal {
+            cands.push((x, b));
+        }
     }
-    batch
-}
 
-fn commit_reference_batch(
-    matrix: &mut [Vec<f64>],
-    successes: &[RefSuccess],
-    batch: &[usize],
-    epoch: usize,
-    steps: &mut Vec<RefStep>,
-) {
-    for &index in batch {
-        let success = &successes[index];
-        steps.push(RefStep {
-            edge: (success.u, success.v),
-            value: success.value,
-            epoch,
-            witnesses: success.witnesses.clone(),
-        });
-        matrix[success.u][success.v] = f64::INFINITY;
-        matrix[success.v][success.u] = f64::INFINITY;
+    let mut critical: Vec<f64> = std::iter::once(a)
+        .chain(cands.iter().map(|&(_, b)| b))
+        .collect();
+    critical.sort_by(f64::total_cmp);
+    critical.dedup();
+
+    let mut segments: Vec<(f64, usize)> = Vec::new();
+    let mut apex: Option<usize> = None;
+    for t in critical {
+        // C_t in increasing vertex order, as the witness rule requires.
+        let level: Vec<usize> = cands
+            .iter()
+            .filter(|&&(_, b)| b <= t)
+            .map(|&(x, _)| x)
+            .collect();
+        if level.is_empty() {
+            return None;
+        }
+        let dominates = |w: usize| level.iter().all(|&x| x == w || f[w][x] <= t);
+        let birth = |w: usize| cands.iter().find(|&&(x, _)| x == w).map(|&(_, b)| b);
+        if let Some(w) = apex {
+            if birth(w).is_some_and(|b| b <= t) && dominates(w) {
+                continue;
+            }
+        }
+        let found = level.iter().copied().find(|&w| dominates(w))?;
+        segments.push((t, found));
+        apex = Some(found);
     }
+    Some(segments)
 }
 
 /// Run the version 2 schedule with no pruning: every round tests every live
@@ -482,7 +456,15 @@ fn reference_collapse_v2(n: usize, all_edges: &[(usize, usize, f64)], resolved: 
         edges.iter().map(|e| e.2).fold(0.0f64, f64::max)
     };
 
-    let mut f = reference_matrix(n, &edges);
+    let mut f = vec![vec![f64::INFINITY; n]; n];
+    for (x, row) in f.iter_mut().enumerate() {
+        row[x] = 0.0;
+    }
+    for &(u, v, d) in &edges {
+        f[u][v] = d;
+        f[v][u] = d;
+    }
+
     let mut live = edges.clone();
     let mut steps: Vec<RefStep> = Vec::new();
     let mut epochs = 0;
@@ -490,12 +472,54 @@ fn reference_collapse_v2(n: usize, all_edges: &[(usize, usize, f64)], resolved: 
         epochs += 1;
         let snapshot = f.clone();
 
-        let successes = reference_successes(&live, &snapshot, terminal);
+        let mut successes: Vec<RefSuccess> = live
+            .iter()
+            .filter_map(|&(u, v, value)| {
+                ref_test_edge(&snapshot, u, v, value, terminal).map(|witnesses| RefSuccess {
+                    u,
+                    v,
+                    value,
+                    witnesses,
+                })
+            })
+            .collect();
         if successes.is_empty() {
             break;
         }
-        let batch = reference_batch(&successes, &snapshot);
-        commit_reference_batch(&mut f, &successes, &batch, epochs, &mut steps);
+        successes.sort_by(|a, b| {
+            b.value
+                .total_cmp(&a.value)
+                .then((a.v, a.u).cmp(&(b.v, b.u)))
+        });
+
+        let mut read_sets: Vec<Vec<bool>> = Vec::new();
+        let mut batch: Vec<&RefSuccess> = Vec::new();
+        for success in &successes {
+            let (u, v) = (success.u, success.v);
+            if read_sets.iter().any(|s| s[u] && s[v]) {
+                continue;
+            }
+            let mut s = vec![false; n];
+            for (x, flag) in s.iter_mut().enumerate() {
+                *flag =
+                    x == u || x == v || (snapshot[u][x].is_finite() && snapshot[v][x].is_finite());
+            }
+            read_sets.push(s);
+            batch.push(success);
+        }
+
+        for success in &batch {
+            steps.push(RefStep {
+                edge: (success.u, success.v),
+                value: success.value,
+                epoch: epochs,
+                witnesses: success.witnesses.clone(),
+            });
+        }
+        for success in &batch {
+            f[success.u][success.v] = f64::INFINITY;
+            f[success.v][success.u] = f64::INFINITY;
+        }
         live.retain(|&(u, v, _)| f[u][v].is_finite());
     }
 
@@ -539,7 +563,11 @@ fn assert_reference_match(name: &str, result: &CollapsedRips, reference: &RefRun
             want.value.to_bits(),
             "{name}: step {i} value"
         );
-        assert_eq!(got.epoch(), want.epoch, "{name}: step {i} round number");
+        assert_eq!(
+            got.position().number(),
+            want.epoch,
+            "{name}: step {i} round number"
+        );
         assert_eq!(
             got.witnesses().len(),
             want.witnesses.len(),
@@ -572,6 +600,8 @@ fn assert_reference_match(name: &str, result: &CollapsedRips, reference: &RefRun
         "{name}: terminal level"
     );
 }
+
+// Fixture graphs.
 
 /// The complete graph on `n` vertices, every edge at distance 1.
 fn complete_matrix(n: usize) -> DistanceMatrix {
@@ -740,6 +770,8 @@ fn battery_ties() -> DistanceMatrix {
     DistanceMatrix::from_condensed(condensed).unwrap()
 }
 
+// The reference gate.
+
 #[test]
 fn production_matches_unpruned_v2_reference() {
     // Small tie-heavy graphs: zeros, repeated values, and absent pairs, over
@@ -817,6 +849,8 @@ fn production_matches_unpruned_v2_reference() {
     }
 }
 
+// The thread-invariance gate.
+
 /// Every worker count must give the same certificate, the same matrix, and
 /// the same counters, `edge_tests` included: the pruning rule is a function
 /// of the schedule, not of the worker count.
@@ -878,6 +912,8 @@ fn v2_is_thread_invariant() {
     assert_thread_invariant("fallback", &fallback_matrix(), Some(1.0));
     assert_thread_invariant("k64_64+k4", &bipartite_k4_dense(), None);
 }
+
+// The equality gates.
 
 /// Bar-for-bar equality of five paths: the uncollapsed engine, the
 /// convenience path, the standalone version 1 collapse, the standalone
@@ -986,6 +1022,8 @@ fn assert_fixture_barcode(
     }
 }
 
+// Named round-structure fixtures.
+
 #[test]
 fn overlapping_but_commuting_read_sets() {
     // Two triangles sharing vertex 2. The read sets S((0, 1)) = {0, 1, 2}
@@ -1023,8 +1061,16 @@ fn overlapping_but_commuting_read_sets() {
     let result = v2_dense("bowtie", &dense, Some(1.0), 2);
     let first = step_for(&result, (0, 1)).expect("edge (0, 1) must be removable");
     let second = step_for(&result, (2, 3)).expect("edge (2, 3) must be removable");
-    assert_eq!(first.epoch(), 1, "edge (0, 1) must go in round 1");
-    assert_eq!(second.epoch(), 1, "edge (2, 3) must go in round 1");
+    assert_eq!(
+        first.position().number(),
+        1,
+        "edge (0, 1) must go in round 1"
+    );
+    assert_eq!(
+        second.position().number(),
+        1,
+        "edge (2, 3) must go in round 1"
+    );
     assert_eq!(
         round_widths(&result)[0],
         2,
@@ -1053,7 +1099,11 @@ fn conflicting_removals_split_rounds() {
     );
     assert_eq!(result.stats.epochs, 3, "K4: rounds");
     assert!(
-        result.certificate.steps().iter().any(|s| s.epoch() >= 2),
+        result
+            .certificate
+            .steps()
+            .iter()
+            .any(|s| s.position().number() >= 2),
         "the conflicting removals must spread over rounds"
     );
 
@@ -1120,7 +1170,7 @@ fn many_disjoint_k4s() {
         .certificate
         .steps()
         .iter()
-        .filter(|s| s.epoch() == 1)
+        .filter(|s| s.position().number() == 1)
         .map(|s| s.edge().0 / 4)
         .collect();
     round1.sort_unstable();
@@ -1146,12 +1196,16 @@ fn later_round_removability() {
     let result = v2_dense("later_round", &dense, Some(1.0), 2);
     let step = step_for(&result, (0, 1)).expect("edge (0, 1) must be removable in a later round");
     assert_eq!(
-        step.epoch(),
+        step.position().number(),
         2,
         "edge (0, 1) must survive round 1 and leave in round 2"
     );
     assert!(
-        result.certificate.steps().iter().any(|s| s.epoch() >= 2),
+        result
+            .certificate
+            .steps()
+            .iter()
+            .any(|s| s.position().number() >= 2),
         "no removal happened after the first round"
     );
     assert_eq!(
@@ -1252,7 +1306,11 @@ fn large_neighborhood_fallback() {
     let result = v2_dense("fallback", &dense, threshold, 4);
 
     let step = step_for(&result, (0, 1)).expect("edge (0, 1) must be removable");
-    assert_eq!(step.epoch(), 1, "edge (0, 1) leads the schedule");
+    assert_eq!(
+        step.position().number(),
+        1,
+        "edge (0, 1) leads the schedule"
+    );
     assert_eq!(
         step.witnesses().to_vec(),
         vec![(1.0, 2)],

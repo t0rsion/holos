@@ -3,9 +3,9 @@
 //! [`RipsParams::threads`](crate::RipsParams::threads) is the most workers a
 //! run may use, not the number every region must use. A region with little
 //! work runs faster on one thread: the split, the joins, and the cold
-//! per-worker scratch cost more than the work itself. Each region turns its
-//! own work estimate into a worker count, and one worker means the serial
-//! path.
+//! per-worker scratch cost more than the work itself. Each region therefore
+//! turns its own work estimate into a worker count, and one worker means the
+//! serial path.
 //!
 //! The constants come from timing grids on the engineering tuning set at 1,
 //! 2, 4, and 8 requested workers. A decision table in the tests pins them,

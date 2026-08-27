@@ -1,0 +1,48 @@
+[meta]
+version = 1
+date = "2026-08-24"
+
+[[screen]]
+id = "s-eight-z2"
+atoms = 8
+atom_vertices = 5
+seed = 91001
+steps = 16
+branches = 4
+modulus = 2
+
+[[screen]]
+id = "s-sixteen-z3"
+atoms = 16
+atom_vertices = 6
+seed = 91002
+steps = 24
+branches = 4
+modulus = 3
+
+[[confirm]]
+id = "c-sixteen-z5"
+atoms = 16
+atom_vertices = 5
+seed = 101001
+steps = 24
+branches = 4
+modulus = 5
+
+[[confirm]]
+id = "c-twenty-four-z3"
+atoms = 24
+atom_vertices = 6
+seed = 101002
+steps = 32
+branches = 4
+modulus = 3
+
+[[confirm]]
+id = "c-thirty-two-z2"
+atoms = 32
+atom_vertices = 5
+seed = 101003
+steps = 40
+branches = 8
+modulus = 2

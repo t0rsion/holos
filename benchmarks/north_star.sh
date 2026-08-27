@@ -5,9 +5,9 @@
 # timing protocol. Neither the corpus nor this runner changes in response
 # to a result.
 #
-# This study produces the public performance statements of the release.
-# engine_bench.sh does not; it tunes the engine and decides landing on
-# disclosed data.
+# This study produces the public performance statements of the release. The
+# engineering harness (engine_bench.sh) does not; it tunes the engine and
+# decides landing on disclosed data.
 #
 # One frozen pass, three parts:
 #   serial     every holos arm, the A/A control, and one ripser build on
@@ -143,7 +143,7 @@ done
 source "$(dirname "$0")/_common.sh"
 require_proc
 
-# CARGO may carry a toolchain ("cargo +1.92"), so it is an array before
+# CARGO may carry a toolchain ("cargo +1.92"), so it becomes an array before
 # on_allowed passes it on.
 read -r -a CARGO_CMD <<<"$CARGO"
 
@@ -1152,7 +1152,7 @@ generate_one() {
     local collapse="${16}" multicore="${17}"
     local cloud lower sparse graph threshold edges file format collapsed note
 
-    # A stale reference from an earlier run must not survive.
+    # A stale reference from an earlier run must not survive into this one.
     rm -f "$DATA/ns_${id}_ref.out"
 
     cloud="$DATA/ns_${id}.csv"
@@ -1232,8 +1232,8 @@ if ((GENERATED_COUNT == 0)); then
     exit 1
 fi
 
-# The corpus that named these inputs must be the corpus the timings are
-# recorded against.
+# The freeze check. The corpus that named these inputs must be the corpus
+# the timings are recorded against.
 CORPUS_SHA_AT_TIMING="$(sha256 "$CORPUS")"
 if [[ "$CORPUS_SHA_AT_TIMING" != "$CORPUS_SHA_AT_GENERATION" ]]; then
     echo "error: $(basename "$CORPUS") changed while the inputs were generated" >&2
@@ -1336,9 +1336,10 @@ while IFS=$'\t' read -r kind id stratum file format n edges threshold max_dim mo
     echo "entry=$id" >>"$DONE_IDS"
 done <"$GENERATED"
 
-# A complete study is a clean, unfiltered run of the frozen corpus with
-# the frozen arms, every required competitor, the registered giotto-ph, a
-# verified topology, and no void entry. Every invalidity reason is listed.
+# The validity rule of the corpus. A complete study is a clean, unfiltered
+# run of the frozen corpus with the frozen arms, every required competitor,
+# the registered giotto-ph, a verified topology, and no void entry. Every
+# reason is listed, not just the first.
 CLEAN_TREE=yes
 if [[ "$PROV_COMMIT" == *-DIRTY ]]; then
     CLEAN_TREE=no

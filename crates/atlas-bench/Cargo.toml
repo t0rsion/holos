@@ -1,0 +1,12 @@
+[package]
+name = "atlas-bench"
+version = "0.10.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+holos-tda = { path = "../holos-tda" }

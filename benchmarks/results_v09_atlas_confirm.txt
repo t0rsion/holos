@@ -1,0 +1,20 @@
+commit=9b5d5151641ff155f9253489627ed3849781fd3b
+corpus=v09_atlas_corpus.toml
+corpus_version=1
+corpus_sha256=036c58ca058290222a68d94eed706a329d94f2e8a09ddbb63c2864d659c7be21
+set=confirm
+repetitions=5
+affinity=0-3,12-15
+cpu=13th Gen Intel(R) Core(TM) i9-13900KS
+platform=Linux-7.1.8-arch1-3-x86_64-with-glibc2.44
+python=3.14.7
+cargo=cargo 1.92.0 (344c4567c 2025-10-21)
+binary_sha256=c547e3c6227e00de629e0f9a45cd8b1a953f68ad5109d69b4e8e9db6ad2e43e6
+source_dirty=no
+decision=pass
+entry=c-plane-z3 binding_sha256=506ffed409e8d9abe9504ea4e52ab4d8d7d8277011fb12ab0f01a7df447f0246
+command=target/release/atlas-bench --n 52 --coord-dim 2 --seed 29001 --steps 40 --reps 5 --modulus 3
+record=format=holos-atlas-bench-v1 n=52 coord_dim=2 seed=29001 edges=1326 steps=40 reps=5 modulus=3 compile_ns=1102521 reuse_ns=487777 recompute_ns=1997385 speedup=4.094873 break_even_steps=30
+entry=c-volume-z5 binding_sha256=9410d0c848658b457c4d9eef9a04f3f33ac1fae825cf0e0ec283d5a7ed1f3c7e
+command=target/release/atlas-bench --n 48 --coord-dim 3 --seed 29002 --steps 40 --reps 5 --modulus 5
+record=format=holos-atlas-bench-v1 n=48 coord_dim=3 seed=29002 edges=1128 steps=40 reps=5 modulus=5 compile_ns=1029957 reuse_ns=448223 recompute_ns=2128835 speedup=4.749500 break_even_steps=25

@@ -8,11 +8,11 @@ a pipe: a pipe's 64 KB buffer fills up on a large diagram output and deadlocks
 the child. Stderr is discarded, unless MEASURE_STDERR names a file to keep it
 in. That file is also a real file, for the same reason.
 
-MEASURE_AFFINITY, when set, is a comma-separated CPU list. The child is
-pinned to it before it execs. Pinning here, instead of under taskset, keeps
-argv[0] the target binary, which is what the peak RSS sampler matches on.
-The parent keeps its own affinity, so the sampler never competes with the
-run it times. Unset, nothing is pinned.
+MEASURE_AFFINITY, when set, is a comma-separated CPU list, and the child is
+pinned to it before it execs. Pinning the child here instead of running it
+under taskset keeps argv[0] the target binary, which is what the peak RSS
+sampler below matches on. The parent keeps its own affinity, so the sampler
+never competes with the run it times. Unset, nothing is pinned.
 
 Wall time is time.monotonic around the process. Peak RSS is VmHWM from
 /proc/PID/status, the kernel's own high-water mark, in kB. The sampling
@@ -63,20 +63,18 @@ def cpu_list(text):
     return cpus
 
 
-def child_pin(affinity):
-    """Return a child hook that pins the process, or `None`."""
-    if not affinity:
-        return None
-    cpus = cpu_list(affinity)
+def main():
+    if len(sys.argv) < 3:
+        sys.exit("usage: measure.py OUTFILE CMD [ARG...]")
+    outfile, cmd = sys.argv[1], sys.argv[2:]
+    errfile = os.environ.get("MEASURE_STDERR")
+    affinity = os.environ.get("MEASURE_AFFINITY")
+    pin = None
+    if affinity:
+        cpus = cpu_list(affinity)
+        def pin():  # noqa: E306  (set in the child, between fork and exec)
+            os.sched_setaffinity(0, cpus)
 
-    def pin():
-        os.sched_setaffinity(0, cpus)
-
-    return pin
-
-
-def run_command(outfile, cmd, errfile, pin):
-    """Run and measure one command."""
     want_argv0 = os.fsencode(cmd[0])
     peak = 0
     with open(outfile, "wb") as out:
@@ -98,16 +96,6 @@ def run_command(outfile, cmd, errfile, pin):
         finally:
             if err:
                 err.close()
-    return wall, peak, proc.returncode
-
-
-def main():
-    if len(sys.argv) < 3:
-        sys.exit("usage: measure.py OUTFILE CMD [ARG...]")
-    outfile, cmd = sys.argv[1], sys.argv[2:]
-    errfile = os.environ.get("MEASURE_STDERR")
-    pin = child_pin(os.environ.get("MEASURE_AFFINITY"))
-    wall, peak, returncode = run_command(outfile, cmd, errfile, pin)
     print(f"wall_s={wall:.3f} max_rss_kb={peak}")
     sys.exit(returncode)
 

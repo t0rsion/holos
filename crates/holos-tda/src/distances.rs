@@ -1,5 +1,7 @@
 use std::ops::ControlFlow;
 
+use rayon::prelude::*;
+
 use crate::combinadic::{BinomialTable, CofacetIter};
 use crate::simplex::Simplex;
 use crate::{Error, Result};
@@ -12,10 +14,10 @@ use crate::{Error, Result};
 /// The matrix has two storage forms. The compact form holds the condensed
 /// lower triangle, `n(n-1)/2` entries, and is the form every constructor
 /// builds. The full form holds both triangles row-major, `n * n` entries,
-/// so a cofacet diameter fold reads one contiguous row per simplex vertex
-/// instead of one strided column. A dense run converts to the full form
-/// when [`crate::DenseStorage`] selects it. Both forms answer every query
-/// identically.
+/// so that a cofacet diameter fold reads one contiguous row per simplex
+/// vertex instead of one strided column. A dense run converts to the full
+/// form when [`crate::DenseStorage`] selects it. Both forms answer every
+/// query identically.
 #[derive(Debug, Clone)]
 pub struct DistanceMatrix {
     n: usize,
@@ -30,19 +32,7 @@ impl DistanceMatrix {
     /// Euclidean distances of a point cloud. Coordinates must be finite.
     pub fn from_points(points: &[Vec<f64>]) -> Result<Self> {
         let n = points.len();
-        if n > 0 {
-            let d = points[0].len();
-            if let Some(p) = points.iter().find(|p| p.len() != d) {
-                return Err(Error::InvalidInput(format!(
-                    "inconsistent point dimensions: {} vs {}",
-                    d,
-                    p.len()
-                )));
-            }
-            if points.iter().flatten().any(|x| !x.is_finite()) {
-                return Err(Error::InvalidInput("non-finite coordinate".into()));
-            }
-        }
+        validate_points(points)?;
         let mut data = Vec::with_capacity(n.saturating_sub(1) * n / 2);
         for i in 1..n {
             for j in 0..i {
@@ -58,7 +48,8 @@ impl DistanceMatrix {
 
     /// Build from the condensed lower triangle, row by row: d(1,0), d(2,0),
     /// d(2,1), d(3,0), and so on. An empty vector means one point (n = 1).
-    /// Only [`DistanceMatrix::from_points`] can build n = 0.
+    /// Only [`DistanceMatrix::from_points`] can build an empty *space*
+    /// (n = 0).
     pub fn from_condensed(mut condensed: Vec<f64>) -> Result<Self> {
         let m = condensed.len();
         let n = ((1.0 + 8.0 * m as f64).sqrt() as usize).div_ceil(2);
@@ -127,6 +118,8 @@ impl DistanceMatrix {
 
     /// Count the pairs that enter the complex at `threshold`: finite and at
     /// or below it. One pass over the condensed triangle, no allocation.
+    /// This is the predicate the engine applies to an edge, so the count is
+    /// the edge count of the filtered complex.
     pub(crate) fn count_edges_at(&self, threshold: f64) -> usize {
         (1..self.n)
             .map(|i| {
@@ -144,7 +137,7 @@ impl DistanceMatrix {
     ///
     /// The conversion writes the compressed neighbor block directly. One
     /// pass over the lower triangle counts the degrees, and a second pass
-    /// writes each kept pair under both of its endpoints. Row `i` reaches
+    /// files each kept pair under both of its endpoints. Row `i` reaches
     /// vertex `v` before any later row does, and it lists the neighbors
     /// below `v` in ascending order, so every list comes out sorted and the
     /// conversion needs no sort.
@@ -203,7 +196,8 @@ impl DistanceMatrix {
 
     /// Return the minimum over i of the maximum over j of d(i,j). Past that
     /// radius the complex is a cone and acquires no further homology, so it
-    /// is the default threshold.
+    /// is the default threshold. It does not change the full persistence
+    /// result.
     pub fn enclosing_radius(&self) -> f64 {
         if self.n < 2 {
             return 0.0;
@@ -225,10 +219,329 @@ impl DistanceMatrix {
     }
 }
 
+/// Kernel used to build an exact threshold graph from points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum PointCloudStrategy {
+    /// Use the k-d tree for at most 12 coordinates and exhaustive blocks
+    /// otherwise. An infinite threshold always uses exhaustive blocks.
+    #[default]
+    Auto,
+    /// Use an exact k-d-tree radius join.
+    KdTree,
+    /// Test every unordered pair without storing a dense matrix.
+    Exhaustive,
+}
+
+/// Parameters for exact threshold-graph construction from points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct PointCloudParams {
+    /// Largest retained Euclidean distance. Must be non-negative and not
+    /// NaN. Positive infinity retains every pair with a finite distance.
+    pub threshold: f64,
+    /// Worker threads. Zero and one both run serially.
+    pub threads: usize,
+    /// Construction kernel. Default [`PointCloudStrategy::Auto`].
+    pub strategy: PointCloudStrategy,
+}
+
+impl PointCloudParams {
+    /// Build parameters for `threshold` with one worker and automatic
+    /// routing.
+    pub fn new(threshold: f64) -> Self {
+        Self {
+            threshold,
+            threads: 1,
+            strategy: PointCloudStrategy::Auto,
+        }
+    }
+
+    /// Set the worker count. Zero runs serially.
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads;
+        self
+    }
+
+    /// Force a construction kernel.
+    pub fn with_strategy(mut self, strategy: PointCloudStrategy) -> Self {
+        self.strategy = strategy;
+        self
+    }
+}
+
+/// Counters from exact threshold-graph construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointCloudStats {
+    /// Points in the input.
+    pub points: usize,
+    /// Coordinates per point.
+    pub dimensions: usize,
+    /// Unordered pairs whose Euclidean distance was evaluated.
+    pub distance_evaluations: u64,
+    /// Edges retained at the threshold.
+    pub edges: usize,
+    /// Kernel that ran after automatic routing.
+    pub strategy: PointCloudStrategy,
+}
+
+/// Exact threshold graph from a point cloud, with construction counters.
+#[derive(Debug, Clone)]
+pub struct PointCloudGraph {
+    matrix: SparseDistanceMatrix,
+    stats: PointCloudStats,
+}
+
+impl PointCloudGraph {
+    /// Build the exact Euclidean threshold graph of `points`.
+    ///
+    /// This function does not allocate a dense distance matrix. Both kernels
+    /// use the same scaled Euclidean calculation as
+    /// [`DistanceMatrix::from_points`]. The result is bit-identical at every
+    /// worker count and under both forced strategies.
+    pub fn build(points: &[Vec<f64>], params: PointCloudParams) -> Result<Self> {
+        let dimensions = validate_points(points)?;
+        if params.threshold.is_nan() || params.threshold < 0.0 {
+            return Err(Error::InvalidInput(format!(
+                "threshold must be non-negative, got {}",
+                params.threshold
+            )));
+        }
+        if points.len() > u32::MAX as usize {
+            return Err(Error::InvalidInput(format!(
+                "sparse matrix holds at most {} points, got {}",
+                u32::MAX,
+                points.len()
+            )));
+        }
+        let strategy = match params.strategy {
+            PointCloudStrategy::Auto if dimensions <= 12 && params.threshold.is_finite() => {
+                PointCloudStrategy::KdTree
+            }
+            PointCloudStrategy::Auto => PointCloudStrategy::Exhaustive,
+            strategy => strategy,
+        };
+        let rows = match strategy {
+            PointCloudStrategy::KdTree => {
+                threshold_rows_kd(points, dimensions, params.threshold, params.threads)?
+            }
+            PointCloudStrategy::Exhaustive => {
+                threshold_rows_exhaustive(points, params.threshold, params.threads)?
+            }
+            PointCloudStrategy::Auto => unreachable!("automatic strategy was resolved"),
+        };
+        let distance_evaluations = rows.iter().fold(0u64, |total, row| {
+            total.saturating_add(row.evaluations as u64)
+        });
+        let lower: Vec<Vec<(usize, f64)>> = rows.into_iter().map(|row| row.edges).collect();
+        let matrix = SparseDistanceMatrix::from_lower_rows(points.len(), &lower)?;
+        let stats = PointCloudStats {
+            points: points.len(),
+            dimensions,
+            distance_evaluations,
+            edges: matrix.num_edges(),
+            strategy,
+        };
+        Ok(Self { matrix, stats })
+    }
+
+    /// The exact sparse distance matrix.
+    pub fn matrix(&self) -> &SparseDistanceMatrix {
+        &self.matrix
+    }
+
+    /// Consume the result and return its sparse matrix.
+    pub fn into_matrix(self) -> SparseDistanceMatrix {
+        self.matrix
+    }
+
+    /// Construction counters.
+    pub fn stats(&self) -> PointCloudStats {
+        self.stats
+    }
+}
+
+fn validate_points(points: &[Vec<f64>]) -> Result<usize> {
+    let dimensions = points.first().map_or(0, Vec::len);
+    if let Some(point) = points.iter().find(|point| point.len() != dimensions) {
+        return Err(Error::InvalidInput(format!(
+            "inconsistent point dimensions: {} vs {}",
+            dimensions,
+            point.len()
+        )));
+    }
+    if points
+        .iter()
+        .flatten()
+        .any(|coordinate| !coordinate.is_finite())
+    {
+        return Err(Error::InvalidInput("non-finite coordinate".into()));
+    }
+    Ok(dimensions)
+}
+
+#[derive(Default)]
+struct ThresholdRow {
+    edges: Vec<(usize, f64)>,
+    evaluations: usize,
+}
+
+fn collect_threshold_rows(
+    n: usize,
+    threads: usize,
+    row: impl Fn(usize) -> ThresholdRow + Sync + Send,
+) -> Result<Vec<ThresholdRow>> {
+    if threads <= 1 || n < 2 {
+        return Ok((0..n).map(row).collect());
+    }
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map_err(|error| Error::Io(format!("thread pool: {error}")))?;
+    Ok(pool.install(|| (0..n).into_par_iter().map(row).collect()))
+}
+
+fn threshold_rows_exhaustive(
+    points: &[Vec<f64>],
+    threshold: f64,
+    threads: usize,
+) -> Result<Vec<ThresholdRow>> {
+    collect_threshold_rows(points.len(), threads, |i| {
+        let mut row = ThresholdRow {
+            edges: Vec::new(),
+            evaluations: i,
+        };
+        for j in 0..i {
+            let distance = euclidean(&points[i], &points[j]);
+            if distance.is_finite() && distance <= threshold {
+                row.edges.push((j, distance));
+            }
+        }
+        row
+    })
+}
+
+struct KdNode {
+    point: usize,
+    axis: usize,
+    left: Option<usize>,
+    right: Option<usize>,
+}
+
+struct KdTree {
+    nodes: Vec<KdNode>,
+    root: Option<usize>,
+}
+
+impl KdTree {
+    fn build(points: &[Vec<f64>], dimensions: usize) -> Self {
+        let mut order: Vec<usize> = (0..points.len()).collect();
+        let mut nodes = Vec::with_capacity(points.len());
+        let root = Self::build_node(points, dimensions, &mut order, &mut nodes);
+        Self { nodes, root }
+    }
+
+    fn build_node(
+        points: &[Vec<f64>],
+        dimensions: usize,
+        order: &mut [usize],
+        nodes: &mut Vec<KdNode>,
+    ) -> Option<usize> {
+        if order.is_empty() {
+            return None;
+        }
+        let axis = (0..dimensions)
+            .max_by(|&a, &b| {
+                coordinate_spread(points, order, a)
+                    .total_cmp(&coordinate_spread(points, order, b))
+                    .then_with(|| b.cmp(&a))
+            })
+            .unwrap_or(0);
+        let middle = order.len() / 2;
+        order.select_nth_unstable_by(middle, |&a, &b| {
+            points[a][axis].total_cmp(&points[b][axis]).then(a.cmp(&b))
+        });
+        let (lower, rest) = order.split_at_mut(middle);
+        let (pivot, upper) = rest.split_first_mut().expect("non-empty k-d-tree slice");
+        let point = *pivot;
+        let left = Self::build_node(points, dimensions, lower, nodes);
+        let right = Self::build_node(points, dimensions, upper, nodes);
+        let node = nodes.len();
+        nodes.push(KdNode {
+            point,
+            axis,
+            left,
+            right,
+        });
+        Some(node)
+    }
+
+    fn query_lower(
+        &self,
+        node: Option<usize>,
+        points: &[Vec<f64>],
+        query: usize,
+        threshold: f64,
+        row: &mut ThresholdRow,
+    ) {
+        let Some(node) = node else {
+            return;
+        };
+        let node = &self.nodes[node];
+        let query_coordinate = points[query][node.axis];
+        let pivot_coordinate = points[node.point][node.axis];
+        let (near, far) = if query_coordinate.total_cmp(&pivot_coordinate).is_lt() {
+            (node.left, node.right)
+        } else {
+            (node.right, node.left)
+        };
+        self.query_lower(near, points, query, threshold, row);
+        if node.point < query {
+            row.evaluations += 1;
+            let distance = euclidean(&points[query], &points[node.point]);
+            if distance.is_finite() && distance <= threshold {
+                row.edges.push((node.point, distance));
+            }
+        }
+        if (query_coordinate - pivot_coordinate).abs() <= threshold {
+            self.query_lower(far, points, query, threshold, row);
+        }
+    }
+}
+
+fn coordinate_spread(points: &[Vec<f64>], order: &[usize], axis: usize) -> f64 {
+    let mut low = f64::INFINITY;
+    let mut high = f64::NEG_INFINITY;
+    for &point in order {
+        low = low.min(points[point][axis]);
+        high = high.max(points[point][axis]);
+    }
+    high - low
+}
+
+fn threshold_rows_kd(
+    points: &[Vec<f64>],
+    dimensions: usize,
+    threshold: f64,
+    threads: usize,
+) -> Result<Vec<ThresholdRow>> {
+    if dimensions == 0 {
+        return threshold_rows_exhaustive(points, threshold, threads);
+    }
+    let tree = KdTree::build(points, dimensions);
+    collect_threshold_rows(points.len(), threads, |i| {
+        let mut row = ThresholdRow::default();
+        tree.query_lower(tree.root, points, i, threshold, &mut row);
+        row.edges.sort_unstable_by_key(|&(j, _)| j);
+        row
+    })
+}
+
 #[cfg(test)]
 thread_local! {
     /// Conversions to the full form on this thread. Each test runs on its
-    /// own thread.
+    /// own thread, so the count belongs to one test and no other test can
+    /// disturb it.
     pub(crate) static SQUARE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -245,7 +558,7 @@ impl DistanceMatrix {
     ///
     /// The caller keeps the compact matrix, so the conversion holds
     /// `n * n + n(n-1)/2` entries at once: one and a half times the full
-    /// form, three times the compact one. The peak lasts as long as the
+    /// form, three times the compact one. That peak lasts as long as the
     /// dense run.
     pub(crate) fn to_square(&self) -> Self {
         #[cfg(test)]
@@ -268,14 +581,14 @@ impl DistanceMatrix {
 }
 
 /// Sparse dissimilarities: only listed pairs have finite distance. Every
-/// unlisted pair is an absent edge (+inf). No metric assumptions; same
-/// entry rules as [`DistanceMatrix`].
+/// unlisted pair is an absent edge (+inf) that never enters the filtration.
+/// No metric assumptions, same entry rules as [`DistanceMatrix`].
 ///
 /// The neighbor lists live in one compressed block: an offset for each
 /// vertex, then the neighbor vertices as `u32` and their distances in two
 /// arrays of the same length. A list is sorted by neighbor vertex. The
-/// cofacet merge walks four bytes an entry and reads a distance only where
-/// two lists meet.
+/// cofacet merge then walks four bytes an entry and reads a distance only
+/// where two lists meet.
 #[derive(Debug, Clone)]
 pub struct SparseDistanceMatrix {
     n: usize,
@@ -291,125 +604,160 @@ pub struct SparseDistanceMatrix {
     max_distance: f64,
 }
 
-fn sparse_degrees(n: usize, triplets: &[(usize, usize, f64)]) -> Result<Vec<usize>> {
-    if n > u32::MAX as usize {
-        return Err(Error::InvalidInput(format!(
-            "sparse matrix holds at most {} points, got {n}",
-            u32::MAX
-        )));
-    }
-    let mut degree = vec![0usize; n];
-    for (idx, &(i, j, d)) in triplets.iter().enumerate() {
-        if i >= n || j >= n {
-            return Err(Error::InvalidInput(format!(
-                "triplet {idx}: vertex out of range ({i}, {j}) for n = {n}"
-            )));
-        }
-        if i == j {
-            return Err(Error::InvalidInput(format!(
-                "triplet {idx}: self-distance for vertex {i}"
-            )));
-        }
-        if !d.is_finite() || d < 0.0 {
-            return Err(Error::InvalidDistance(format!(
-                "triplet {idx}: distance must be finite and non-negative, got {d}"
-            )));
-        }
-        degree[i] += 1;
-        degree[j] += 1;
-    }
-    Ok(degree)
-}
-
-fn sparse_offsets(degree: &[usize]) -> Vec<usize> {
-    let mut offsets = Vec::with_capacity(degree.len() + 1);
-    let mut total = 0;
-    for &value in degree {
-        offsets.push(total);
-        total += value;
-    }
-    offsets.push(total);
-    offsets
-}
-
-fn sparse_entries(offsets: &[usize], triplets: &[(usize, usize, f64)]) -> (Vec<u32>, Vec<f64>) {
-    let mut indices = vec![0u32; *offsets.last().unwrap_or(&0)];
-    let mut values = vec![0.0f64; indices.len()];
-    let mut cursor = offsets[..offsets.len() - 1].to_vec();
-    for &(i, j, d) in triplets {
-        let d = if d == 0.0 { 0.0 } else { d };
-        indices[cursor[i]] = j as u32;
-        values[cursor[i]] = d;
-        cursor[i] += 1;
-        indices[cursor[j]] = i as u32;
-        values[cursor[j]] = d;
-        cursor[j] += 1;
-    }
-    (indices, values)
-}
-
-fn check_neighbor_distances(vertex: usize, list: &[(u32, f64)]) -> Result<()> {
-    for pair in list.windows(2) {
-        if pair[0].0 == pair[1].0 && pair[0].1 != pair[1].1 {
-            return Err(Error::InvalidInput(format!(
-                "conflicting distances for pair ({vertex}, {}): {} vs {}",
-                pair[0].0, pair[0].1, pair[1].1
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn compact_sparse_entries(
-    offsets: &mut [usize],
-    degree: &[usize],
-    indices: &mut Vec<u32>,
-    values: &mut Vec<f64>,
-) -> Result<()> {
-    let mut list: Vec<(u32, f64)> = Vec::with_capacity(degree.iter().copied().max().unwrap_or(0));
-    let mut write = 0;
-    for vertex in 0..degree.len() {
-        let start = offsets[vertex];
-        let end = offsets[vertex + 1];
-        offsets[vertex] = write;
-        if indices[start..end].is_sorted_by(|a, b| a < b) {
-            indices.copy_within(start..end, write);
-            values.copy_within(start..end, write);
-            write += end - start;
-            continue;
-        }
-        list.clear();
-        list.extend(
-            indices[start..end]
-                .iter()
-                .zip(&values[start..end])
-                .map(|(&neighbor, &distance)| (neighbor, distance)),
-        );
-        list.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-        check_neighbor_distances(vertex, &list)?;
-        list.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
-        for &(neighbor, distance) in &list {
-            indices[write] = neighbor;
-            values[write] = distance;
-            write += 1;
-        }
-    }
-    offsets[degree.len()] = write;
-    indices.truncate(write);
-    values.truncate(write);
-    Ok(())
-}
-
 impl SparseDistanceMatrix {
+    fn from_lower_rows(n: usize, rows: &[Vec<(usize, f64)>]) -> Result<Self> {
+        debug_assert_eq!(rows.len(), n);
+        let mut degree = vec![0usize; n];
+        let mut max_distance = 0.0f64;
+        for (i, row) in rows.iter().enumerate() {
+            debug_assert!(row.is_sorted_by_key(|&(j, _)| j));
+            for &(j, distance) in row {
+                debug_assert!(j < i);
+                degree[i] += 1;
+                degree[j] += 1;
+                max_distance = max_distance.max(distance);
+            }
+        }
+        let mut offsets = vec![0usize; n + 1];
+        let mut total = 0usize;
+        for (vertex, &count) in degree.iter().enumerate() {
+            offsets[vertex] = total;
+            total = total
+                .checked_add(count)
+                .ok_or_else(|| Error::InvalidInput("sparse edge storage overflows usize".into()))?;
+        }
+        offsets[n] = total;
+        let mut indices = vec![0u32; total];
+        let mut values = vec![0.0; total];
+        let mut cursor = offsets[..n].to_vec();
+        for (i, row) in rows.iter().enumerate() {
+            for &(j, distance) in row {
+                indices[cursor[i]] = j as u32;
+                values[cursor[i]] = distance;
+                cursor[i] += 1;
+                indices[cursor[j]] = i as u32;
+                values[cursor[j]] = distance;
+                cursor[j] += 1;
+            }
+        }
+        // Lower neighbors arrive first in ascending order. Higher neighbors
+        // arrive later as their rows are visited, also in ascending order.
+        debug_assert!((0..n).all(|v| {
+            let start = offsets[v];
+            let end = offsets[v + 1];
+            indices[start..end].is_sorted()
+        }));
+        Ok(Self {
+            n,
+            offsets,
+            indices,
+            values,
+            max_distance,
+        })
+    }
+
     /// Build from `(i, j, d)` triplets over `n` points. A repeated unordered
     /// pair must carry an identical distance. Entries must be finite and
-    /// non-negative. An omitted pair is absent. `n` must be at or below
+    /// non-negative. Omit a pair to make it absent. `n` must be at or below
     /// `u32::MAX`.
     pub fn from_triplets(n: usize, triplets: &[(usize, usize, f64)]) -> Result<Self> {
-        let degree = sparse_degrees(n, triplets)?;
-        let mut offsets = sparse_offsets(&degree);
-        let (mut indices, mut values) = sparse_entries(&offsets, triplets);
-        compact_sparse_entries(&mut offsets, &degree, &mut indices, &mut values)?;
+        if n > u32::MAX as usize {
+            return Err(Error::InvalidInput(format!(
+                "sparse matrix holds at most {} points, got {n}",
+                u32::MAX
+            )));
+        }
+        // Validate and count the degrees first, then lay the lists out end
+        // to end. A repeated pair is counted twice, so the offsets are an
+        // upper bound and the dedup below closes the gaps.
+        let mut degree = vec![0usize; n];
+        for (idx, &(i, j, d)) in triplets.iter().enumerate() {
+            if i >= n || j >= n {
+                return Err(Error::InvalidInput(format!(
+                    "triplet {idx}: vertex out of range ({i}, {j}) for n = {n}"
+                )));
+            }
+            if i == j {
+                return Err(Error::InvalidInput(format!(
+                    "triplet {idx}: self-distance for vertex {i}"
+                )));
+            }
+            if !d.is_finite() || d < 0.0 {
+                return Err(Error::InvalidDistance(format!(
+                    "triplet {idx}: distance must be finite and non-negative, got {d}"
+                )));
+            }
+            degree[i] += 1;
+            degree[j] += 1;
+        }
+        let mut offsets = vec![0usize; n + 1];
+        let mut total = 0usize;
+        for (v, &deg) in degree.iter().enumerate() {
+            offsets[v] = total;
+            total += deg;
+        }
+        offsets[n] = total;
+
+        let mut indices = vec![0u32; total];
+        let mut values = vec![0.0f64; total];
+        let mut cursor = offsets[..n].to_vec();
+        for &(i, j, d) in triplets {
+            let d = if d == 0.0 { 0.0 } else { d };
+            indices[cursor[i]] = j as u32;
+            values[cursor[i]] = d;
+            cursor[i] += 1;
+            indices[cursor[j]] = i as u32;
+            values[cursor[j]] = d;
+            cursor[j] += 1;
+        }
+
+        // Sort and dedup one list at a time through a buffer the widest
+        // list sizes, then write the survivors back. The write position
+        // never passes the read position, because a list only shrinks, so
+        // the block compacts in place. A list that already ascends with no
+        // repeat skips the buffer: triplets in row-major order, which is
+        // what the sparse reader and the collapse write, land that way.
+        let widest = degree.iter().copied().max().unwrap_or(0);
+        let mut list: Vec<(u32, f64)> = Vec::with_capacity(widest);
+        let mut write = 0usize;
+        for v in 0..n {
+            let (start, end) = (offsets[v], offsets[v + 1]);
+            offsets[v] = write;
+            if indices[start..end].is_sorted_by(|a, b| a < b) {
+                if start != write {
+                    indices.copy_within(start..end, write);
+                    values.copy_within(start..end, write);
+                }
+                write += end - start;
+                continue;
+            }
+            list.clear();
+            list.extend(
+                indices[start..end]
+                    .iter()
+                    .zip(&values[start..end])
+                    .map(|(&w, &d)| (w, d)),
+            );
+            list.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            for w in list.windows(2) {
+                if w[0].0 == w[1].0 && w[0].1 != w[1].1 {
+                    return Err(Error::InvalidInput(format!(
+                        "conflicting distances for pair ({v}, {}): {} vs {}",
+                        w[0].0, w[0].1, w[1].1
+                    )));
+                }
+            }
+            list.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+            for &(w, d) in &list {
+                indices[write] = w;
+                values[write] = d;
+                write += 1;
+            }
+        }
+        offsets[n] = write;
+        indices.truncate(write);
+        values.truncate(write);
+
         let max_distance = triplets.iter().fold(0.0f64, |m, &(_, _, d)| m.max(d));
         Ok(Self {
             n,
@@ -448,66 +796,6 @@ impl SparseDistanceMatrix {
         self.offsets[v + 1] - self.offsets[v]
     }
 
-    fn seek_neighbor<const BOUNDED: bool>(
-        &self,
-        cursor: &mut (usize, usize),
-        vertex: u32,
-        bound: f64,
-    ) -> NeighborSeek {
-        loop {
-            if cursor.1 == cursor.0 {
-                return NeighborSeek::Exhausted;
-            }
-            counters::note_candidate();
-            let at = cursor.1 - 1;
-            let candidate = self.indices[at];
-            if candidate > vertex {
-                cursor.1 = at;
-                continue;
-            }
-            if candidate < vertex {
-                return NeighborSeek::Missing;
-            }
-            cursor.1 = at;
-            let distance = self.values[at];
-            if BOUNDED && distance > bound {
-                return NeighborSeek::Missing;
-            }
-            return NeighborSeek::Present(distance);
-        }
-    }
-
-    fn next_common_neighbor<const BOUNDED: bool>(
-        &self,
-        cursor: &mut [(usize, usize)],
-        floor: usize,
-        simplex_diameter: f64,
-        bound: f64,
-    ) -> Option<(u32, f64)> {
-        'candidate: loop {
-            if cursor[0].1 == floor {
-                return None;
-            }
-            cursor[0].1 -= 1;
-            counters::note_candidate();
-            let at = cursor[0].1;
-            let vertex = self.indices[at];
-            let distance = self.values[at];
-            if BOUNDED && distance > bound {
-                continue;
-            }
-            let mut diameter = simplex_diameter.max(distance);
-            for slot in &mut cursor[1..] {
-                match self.seek_neighbor::<BOUNDED>(slot, vertex, bound) {
-                    NeighborSeek::Exhausted => return None,
-                    NeighborSeek::Missing => continue 'candidate,
-                    NeighborSeek::Present(value) => diameter = diameter.max(value),
-                }
-            }
-            return Some((vertex, diameter));
-        }
-    }
-
     /// Distance between `i` and `j`; +inf when the pair is not listed.
     #[inline]
     pub fn get(&self, i: usize, j: usize) -> f64 {
@@ -536,11 +824,11 @@ impl SparseDistanceMatrix {
     }
 }
 
-/// A cofacet produced during enumeration.
-///
-/// `k` is the position of the added vertex in the cofacet, the coboundary
-/// sign exponent. `vertex` lets a caller build the cofacet's vertex set
-/// from the simplex without unranking.
+/// A cofacet produced during enumeration: its combinadic index, the position
+/// `k` of the added vertex in the cofacet (the coboundary sign exponent), the
+/// added vertex itself, and the cofacet's filtration diameter. The vertex
+/// lets a caller build the cofacet's vertex set from the simplex's own set
+/// instead of unranking the cofacet.
 ///
 /// Under `upper_only` every enumerator reports `k` as 0, not as `dim + 1`.
 /// No caller reads the position there.
@@ -557,8 +845,10 @@ const INLINE_VERTS: usize = 16;
 
 /// Untimed event counters for the sparse cofacet enumerator.
 ///
-/// Only a test build has them. Elsewhere the `note_*` functions are empty.
-/// The counts are thread-local because tests run on several threads at once.
+/// Only a test build has them. Everywhere else the `note_*` functions are
+/// empty, so the shipped enumerator carries no counter code and no counter
+/// state. The counts are thread-local because the test binary runs tests
+/// on several threads at once.
 #[cfg(test)]
 mod counters {
     use std::cell::Cell;
@@ -702,7 +992,9 @@ pub(crate) trait Distances {
     ///
     /// A cofacet diameter is the largest of the simplex diameter and the
     /// distances from the added vertex to the simplex vertices, so the fold
-    /// can stop at the first distance above the bound.
+    /// can stop at the first distance above the bound. A caller that drops
+    /// the cofacets above a bound then pays for one distance in place of the
+    /// whole fold.
     #[inline]
     #[allow(clippy::too_many_arguments)]
     fn for_each_cofacet_bounded<T>(
@@ -716,9 +1008,10 @@ pub(crate) trait Distances {
         f: impl FnMut(Cofacet) -> ControlFlow<T>,
     ) -> Option<T> {
         debug_assert!(bound >= simplex.diameter);
-        // A bound no distance reaches drops nothing. Raising it to infinity
-        // makes the walk's bound test a predicted branch and keeps one
-        // instance of the walk at the call site.
+        // A bound no distance reaches drops nothing, and infinity is such a
+        // bound. Raising it there turns the test in the walk into one the
+        // branch predictor always gets right, and it keeps one instance of
+        // the walk at the call site.
         let mut bound = bound;
         if bound >= self.max_distance() {
             counters::note_vacuous_bound();
@@ -838,7 +1131,8 @@ impl Distances for DistanceMatrix {
             // The square form reads each simplex vertex's own row, which the
             // descending candidates walk backward, one contiguous run at a
             // time. The condensed form holds no row for the candidates above
-            // a vertex, so it reads what the trait default reads.
+            // a vertex, so it reads what the trait default reads. One walk
+            // never mixes the two, so the test costs a predicted branch.
             let row = added * added.saturating_sub(1) / 2;
             for &v in verts {
                 let x = if square {
@@ -945,19 +1239,24 @@ impl Distances for SparseDistanceMatrix {
     /// Enumerate cofacets from the neighbor lists, as ripser's sparse
     /// coboundary does. An in-complex cofacet adds a vertex adjacent to
     /// every simplex vertex, so the enumeration merges the vertices'
-    /// neighbor lists from their high ends. Each cofacet reaches `f` as
-    /// soon as the merge finds it, so a `Break` stops the merge. A simplex
-    /// vertex never appears in its own neighbor list, so the merge excludes
-    /// the simplex vertices without a separate test.
+    /// neighbor lists from their high ends instead of scanning all `n`
+    /// candidates. It streams: each cofacet reaches `f` as soon as the
+    /// merge finds it, so a `Break` stops the merge as well as the
+    /// callbacks. A simplex vertex never appears in its own neighbor list,
+    /// so the merge excludes the simplex vertices without a separate test.
+    /// The descent reads `indices` and takes a distance from `values` only
+    /// where every list holds the same vertex.
     ///
-    /// The index, `k`, and diameter match the dense default bit for bit.
-    /// The index recurrence is the one [`CofacetIter::advance`] runs, and
-    /// the diameter folds the same values in the same order. Cofacets of
-    /// infinite diameter are omitted.
+    /// The index, the position `k`, and the diameter match the dense
+    /// default bit for bit. The index recurrence is the one
+    /// [`CofacetIter::advance`] runs, and the diameter folds the same
+    /// values in the same order. The enumeration omits the cofacets whose
+    /// diameter is infinite, which are exactly the ones with an absent
+    /// edge.
     ///
     /// Under `BOUNDED` the merge drops a candidate as soon as one of its
-    /// distances exceeds `bound`. Cursors of lists it did not reach stay
-    /// where they stand. Every later candidate is smaller, so those
+    /// distances exceeds `bound`. The cursors of the lists it did not reach
+    /// stay where they stand. Every later candidate is smaller, so those
     /// cursors pass the same entries then and read nothing twice.
     #[allow(clippy::too_many_arguments)]
     fn enumerate_cofacets<const BOUNDED: bool, T, F>(
@@ -979,9 +1278,11 @@ impl Distances for SparseDistanceMatrix {
         );
         let width = verts.len();
         let indices = &self.indices[..];
+        let values = &self.values[..];
         // Where each neighbor list starts, and one past the entry it has
-        // reached walking downward. The first simplex vertex drives the
-        // merge; the other lists follow it.
+        // reached walking downward. Both are positions in the flat block.
+        // The first simplex vertex drives the merge; the other lists follow
+        // it.
         let mut inline = [(0usize, 0usize); INLINE_VERTS];
         let mut spill: Vec<(usize, usize)>;
         let cursor: &mut [(usize, usize)] = if width <= INLINE_VERTS {
@@ -1010,9 +1311,48 @@ impl Distances for SparseDistanceMatrix {
         let mut idx_below = simplex.index;
         let mut idx_above = 0u64;
         let mut k = dim + 1;
-        while let Some((w, diameter)) =
-            self.next_common_neighbor::<BOUNDED>(cursor, floor, simplex.diameter, bound)
-        {
+        'candidate: loop {
+            if cursor[0].1 == floor {
+                return None;
+            }
+            cursor[0].1 -= 1;
+            counters::note_candidate();
+            let at = cursor[0].1;
+            let w = indices[at];
+            let d0 = values[at];
+            if BOUNDED && d0 > bound {
+                continue 'candidate;
+            }
+            // The fold takes the vertices in ascending position, as the
+            // dense default does, so the diameter matches bit for bit.
+            let mut diameter = simplex.diameter.max(d0);
+            for slot in cursor[1..].iter_mut() {
+                let lo = slot.0;
+                loop {
+                    if slot.1 == lo {
+                        // This list holds nothing at or below `w`, and
+                        // every later candidate is smaller.
+                        return None;
+                    }
+                    counters::note_candidate();
+                    let at = slot.1 - 1;
+                    let x = indices[at];
+                    if x > w {
+                        slot.1 = at;
+                        continue;
+                    }
+                    if x < w {
+                        continue 'candidate;
+                    }
+                    slot.1 = at;
+                    if BOUNDED && values[at] > bound {
+                        continue 'candidate;
+                    }
+                    diameter = diameter.max(values[at]);
+                    break;
+                }
+            }
+
             let w = w as usize;
             while k >= 1 && verts[k - 1] > w {
                 idx_below -= bt.get(verts[k - 1], k);
@@ -1022,6 +1362,8 @@ impl Distances for SparseDistanceMatrix {
             debug_assert!(!upper_only || k == dim + 1);
             let cofacet = Cofacet {
                 index: idx_above + bt.get(w, k + 1) + idx_below,
+                // Under `upper_only` both enumerators report 0 rather than
+                // `dim + 1`. No caller reads `k` there.
                 k: if upper_only { 0 } else { k },
                 vertex: w,
                 diameter,
@@ -1032,45 +1374,17 @@ impl Distances for SparseDistanceMatrix {
                 return Some(t);
             }
         }
-        None
     }
 }
 
-enum NeighborSeek {
-    Exhausted,
-    Missing,
-    Present(f64),
-}
-
-/// The sparse cofacet reference builds every candidate before it emits one.
-/// A callback `Break` therefore cannot change its candidate scan.
+/// The sparse cofacet enumerator of 0.5.0, kept verbatim as the reference
+/// the shipped enumerator is tested against. It builds the whole candidate
+/// set before it emits anything, so it honors a `Break` in the callbacks
+/// alone. Do not change it: its worth is that it is the old body, and the
+/// tests in this file require the shipped one to agree with it bit for
+/// bit.
 #[cfg(test)]
 impl SparseDistanceMatrix {
-    fn reference_candidates(&self, simplex: Simplex, verts: &[usize]) -> Vec<(usize, f64)> {
-        let pivot = *verts
-            .iter()
-            .min_by_key(|&&vertex| self.degree(vertex))
-            .expect("cofacet enumeration needs a non-empty simplex");
-        let (start, end) = self.span(pivot);
-        let mut candidates = Vec::new();
-        'candidate: for &vertex in &self.indices[start..end] {
-            let vertex = vertex as usize;
-            if verts.binary_search(&vertex).is_ok() {
-                continue;
-            }
-            let mut diameter = simplex.diameter;
-            for &simplex_vertex in verts {
-                let distance = self.get(vertex, simplex_vertex);
-                if !distance.is_finite() {
-                    continue 'candidate;
-                }
-                diameter = diameter.max(distance);
-            }
-            candidates.push((vertex, diameter));
-        }
-        candidates
-    }
-
     pub(crate) fn for_each_cofacet_reference<T>(
         &self,
         bt: &BinomialTable,
@@ -1080,7 +1394,31 @@ impl SparseDistanceMatrix {
         upper_only: bool,
         mut f: impl FnMut(Cofacet) -> ControlFlow<T>,
     ) -> Option<T> {
-        let candidates = self.reference_candidates(simplex, verts);
+        // Candidate added vertices: neighbors shared by every simplex vertex.
+        // Pivot on the shortest list, then confirm membership in the rest.
+        // The same pass folds the cofacet diameter. Simplex vertices are
+        // mutual neighbors, so they surface here and must be excluded.
+        let pivot = *verts
+            .iter()
+            .min_by_key(|&&v| self.degree(v))
+            .expect("cofacet enumeration needs a non-empty simplex");
+        let (start, end) = self.span(pivot);
+        let mut candidates: Vec<(usize, f64)> = Vec::new();
+        'w: for &w in &self.indices[start..end] {
+            let w = w as usize;
+            if verts.binary_search(&w).is_ok() {
+                continue;
+            }
+            let mut diameter = simplex.diameter;
+            for &v in verts {
+                let d = self.get(w, v);
+                if !d.is_finite() {
+                    continue 'w;
+                }
+                diameter = diameter.max(d);
+            }
+            candidates.push((w, diameter));
+        }
 
         // Descending candidate order is descending cofacet-index order. Move
         // each simplex vertex the added vertex overtakes from the below-set to
@@ -1160,14 +1498,15 @@ mod tests {
         }
     }
 
-    // Index, sign position, and diameter bits. Diameter is compared by bits,
-    // not by f64 equality.
+    // One cofacet as the bits the frozen rules name: index, sign position,
+    // and the diameter compared bit for bit rather than by f64 equality.
     type Bits = (u64, usize, u64);
 
     fn bits(cf: &Cofacet) -> Bits {
         (cf.index, cf.k, cf.diameter.to_bits())
     }
 
+    // Collect the full sequence a distance source yields for a base simplex.
     fn cofacets<D: Distances>(
         d: &D,
         bt: &BinomialTable,
@@ -1184,6 +1523,7 @@ mod tests {
         out
     }
 
+    // The same sequence from the bounded entry point.
     fn bounded_cofacets<D: Distances>(
         d: &D,
         bt: &BinomialTable,
@@ -1225,7 +1565,7 @@ mod tests {
             .sum()
     }
 
-    // The dense matrix of a sparse graph: +inf at every absent pair.
+    // The dense matrix that matches a sparse graph: +inf at every absent pair.
     fn densify(sparse: &SparseDistanceMatrix) -> DistanceMatrix {
         let n = sparse.len();
         let mut condensed = Vec::new();
@@ -1254,8 +1594,8 @@ mod tests {
         out
     }
 
-    // Every simplex of the graph up to `max_dim`. A vertex set is a simplex
-    // when every pair is present.
+    // Every simplex of the graph up to `max_dim`, as (simplex, vertices,
+    // dimension). A vertex set is a simplex when every pair is present.
     fn simplices(
         dense: &DistanceMatrix,
         bt: &BinomialTable,
@@ -1317,17 +1657,13 @@ mod tests {
                     "{label}: cofacet indices must strictly descend, verts {verts:?}"
                 );
             }
+            // The shipped path, reached through the trait the engine calls.
             let shipped = cofacets(sparse, bt, simplex, verts, dim, upper_only);
             assert_eq!(
                 shipped, expected,
                 "{label}: shipped against dense, verts {verts:?}, upper_only {upper_only}"
             );
         }
-    }
-
-    fn previous_positive_float(value: f64) -> f64 {
-        debug_assert!(value.is_finite() && value > 0.0);
-        f64::from_bits(value.to_bits() - 1)
     }
 
     // Every bound worth testing on one base simplex: the simplex diameter,
@@ -1339,7 +1675,7 @@ mod tests {
             let d = f64::from_bits(diameter);
             if d.is_finite() && d > simplex.diameter {
                 out.push(d);
-                out.push(previous_positive_float(d));
+                out.push(d.next_down());
             }
         }
         out.sort_unstable_by(f64::total_cmp);
@@ -1461,6 +1797,7 @@ mod tests {
         }
     }
 
+    // Both gates on every simplex of a graph up to `max_dim`.
     fn check_graph(label: &str, sparse: &SparseDistanceMatrix, max_dim: usize) {
         let dense = densify(sparse);
         let n = sparse.len();
@@ -1485,8 +1822,18 @@ mod tests {
         SparseDistanceMatrix::from_triplets(n, triplets).unwrap()
     }
 
-    fn star_and_joined_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
+    // The adversarial graphs, each one a shape that defeats a plausible
+    // enumerator shortcut.
+    fn adversarial_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
+        let mut out: Vec<(&'static str, SparseDistanceMatrix)> = Vec::new();
+
+        // A star. The shortest neighbor list belongs to a leaf, which is
+        // the least selective pivot there is.
         let star: Vec<_> = (1..7).map(|v| (0, v, 1.0 + v as f64)).collect();
+        out.push(("star", graph(7, &star)));
+
+        // Two cliques joined by one edge. Every intersection across the
+        // join is empty.
         let mut joined = Vec::new();
         for a in 0..4 {
             for b in 0..a {
@@ -1495,32 +1842,31 @@ mod tests {
             }
         }
         joined.push((3, 4, 3.0));
-        vec![
-            ("star", graph(7, &star)),
-            ("joined cliques", graph(8, &joined)),
-        ]
-    }
+        out.push(("joined cliques", graph(8, &joined)));
 
-    fn bipartite_and_equal_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
+        // Complete bipartite. No two vertices of a part are adjacent, so
+        // half the base simplices do not exist and the rest intersect
+        // across the parts.
         let mut bipartite = Vec::new();
         for a in 0..3 {
             for b in 3..6 {
                 bipartite.push((a, b, 1.0 + a as f64));
             }
         }
+        out.push(("bipartite", graph(6, &bipartite)));
+
+        // Every distance equal. Every cofacet carries the base diameter, so
+        // an apparent-pair Break fires at the first candidate.
         let mut all_equal = Vec::new();
         for a in 0..6 {
             for b in 0..a {
                 all_equal.push((a, b, 2.0));
             }
         }
-        vec![
-            ("bipartite", graph(6, &bipartite)),
-            ("all equal", graph(6, &all_equal)),
-        ]
-    }
+        out.push(("all equal", graph(6, &all_equal)));
 
-    fn duplicate_and_skewed_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
+        // Duplicate points: vertices 0, 1, and 2 coincide, so the graph
+        // carries zero-length edges beside longer ones.
         let mut duplicates = Vec::new();
         for a in 0..6 {
             for b in 0..a {
@@ -1528,6 +1874,11 @@ mod tests {
                 duplicates.push((a, b, d));
             }
         }
+        out.push(("duplicate points", graph(6, &duplicates)));
+
+        // The shortest list is the least selective one: vertex 0 has two
+        // neighbors and both are adjacent to everything, while the long
+        // lists disagree.
         let mut skewed = vec![(0, 1, 1.0), (0, 2, 1.0)];
         for a in 1..7 {
             for b in 1..a {
@@ -1536,14 +1887,13 @@ mod tests {
                 }
             }
         }
-        vec![
-            ("duplicate points", graph(6, &duplicates)),
-            ("least selective pivot", graph(7, &skewed)),
-        ]
-    }
+        out.push(("least selective pivot", graph(7, &skewed)));
 
-    fn threshold_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
-        let mut out = Vec::new();
+        // Cut at a threshold that is itself an edge length. A dense input
+        // that the caller thresholds reaches the sparse enumerator this
+        // way, and the pairs at the cut are the ones a comparison can get
+        // wrong. The distances take four values, so 1.0 and 3.0 sit on a
+        // tie and 2.5 sits between two of them.
         let quantized = |a: usize, b: usize| 1.0 + ((a * 7 + b) % 4) as f64;
         for (label, threshold) in [
             ("threshold at the smallest edge", 1.0),
@@ -1561,50 +1911,45 @@ mod tests {
             }
             out.push((label, graph(7, &cut)));
         }
-        out
-    }
 
-    fn boundary_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
+        // Disconnected: two triangles and an isolated vertex.
+        out.push((
+            "disconnected",
+            graph(
+                7,
+                &[
+                    (0, 1, 1.0),
+                    (0, 2, 1.0),
+                    (1, 2, 1.0),
+                    (3, 4, 2.0),
+                    (3, 5, 2.0),
+                    (4, 5, 2.0),
+                ],
+            ),
+        ));
+
+        // Complete, so the sparse enumerator must reproduce the whole dense
+        // sequence with nothing omitted.
         let mut complete = Vec::new();
         for a in 0..7 {
             for b in 0..a {
                 complete.push((a, b, 1.0 + ((a * 5 + b) % 4) as f64));
             }
         }
-        vec![
-            (
-                "disconnected",
-                graph(
-                    7,
-                    &[
-                        (0, 1, 1.0),
-                        (0, 2, 1.0),
-                        (1, 2, 1.0),
-                        (3, 4, 2.0),
-                        (3, 5, 2.0),
-                        (4, 5, 2.0),
-                    ],
-                ),
-            ),
-            ("dense as sparse", graph(7, &complete)),
-            ("one point", graph(1, &[])),
-            ("two points", graph(2, &[(0, 1, 1.0)])),
-            ("edge across the range", graph(5, &[(0, 4, 1.0)])),
-        ]
-    }
+        out.push(("dense as sparse", graph(7, &complete)));
 
-    fn adversarial_fixtures() -> Vec<(&'static str, SparseDistanceMatrix)> {
-        let mut out = star_and_joined_fixtures();
-        out.extend(bipartite_and_equal_fixtures());
-        out.extend(duplicate_and_skewed_fixtures());
-        out.extend(threshold_fixtures());
-        out.extend(boundary_fixtures());
+        // The small ends of the contract: one point, two points, and a
+        // graph whose only edge touches both ends of the vertex range.
+        out.push(("one point", graph(1, &[])));
+        out.push(("two points", graph(2, &[(0, 1, 1.0)])));
+        out.push(("edge across the range", graph(5, &[(0, 4, 1.0)])));
+
         out
     }
 
-    // A random sparse graph and the dense matrix with +inf at every absent
-    // pair. The dense default enumerates the same cofacets and gives the
-    // missing ones an infinite diameter that the sparse side omits.
+    // A random sparse graph plus the dense matrix that uses +inf for every
+    // absent pair. The dense default then enumerates the same cofacets. It
+    // gives the missing ones an infinite diameter that the sparse side omits.
     fn random_graph(rng: &mut Rng, n: usize) -> (SparseDistanceMatrix, DistanceMatrix) {
         // Duplicates and a zero so the diameter fold is exercised.
         let palette = [0.0, 1.0, 1.0, 2.0, 2.0, 3.0];
@@ -1627,8 +1972,9 @@ mod tests {
         )
     }
 
-    // A random graph with the density and distance palette the caller asks
-    // for. `present` is the chance in a thousand that a pair is an edge.
+    // A random graph with the density and the distance palette the caller
+    // asks for. `present` is the chance in a thousand that a pair is an
+    // edge, so a caller can reach a near-empty or a complete graph.
     fn random_graph_shaped(
         rng: &mut Rng,
         n: usize,
@@ -1646,11 +1992,11 @@ mod tests {
         SparseDistanceMatrix::from_triplets(n, &triplets).unwrap()
     }
 
-    // The sparse override must yield what the dense default yields once
-    // infinite-diameter cofacets are dropped: the same indices, k,
-    // diameters, and descending order. The frozen reference stands between
-    // the two, so the shipped enumerator is compared against the body it
-    // replaced as well as against the dense one.
+    // The sparse override must yield exactly what the dense default yields
+    // once its infinite-diameter (absent-neighbor) cofacets are dropped: the
+    // same indices, k, diameters, and descending order. The frozen reference
+    // stands between the two, so the shipped enumerator is compared against
+    // the body it replaced as well as against the dense one.
     #[test]
     fn sparse_cofacets_match_dense_default() {
         let mut rng = Rng::new(0xc0fa_ce75_0000_0001);
@@ -1735,6 +2081,8 @@ mod tests {
         }
     }
 
+    // The named adversarial graphs, every simplex of each, by bits and by
+    // Break position.
     #[test]
     fn adversarial_graphs_match_the_reference() {
         for (label, sparse) in adversarial_fixtures() {
@@ -1742,8 +2090,9 @@ mod tests {
         }
     }
 
-    // Shapes the fixed graphs do not reach: complete, thin, all-equal, and
-    // duplicate points. Every simplex of every draw is checked.
+    // Randomized shapes the fixed graphs do not reach: a complete graph, a
+    // graph so thin that most intersections are empty, an all-equal graph,
+    // and one with duplicate points. Every simplex of every draw is checked.
     #[test]
     fn random_shapes_match_the_reference() {
         let mut rng = Rng::new(0x5ea5_0f17_0000_0003);
@@ -1812,6 +2161,7 @@ mod tests {
         }
     }
 
+    // A dense source that counts the distance reads its enumerator makes.
     struct Counting<'a> {
         inner: &'a DistanceMatrix,
         reads: std::cell::Cell<usize>,
@@ -1833,10 +2183,11 @@ mod tests {
         }
     }
 
-    // The edge {0,1} of this four-point matrix has cofacets 3 then 2.
-    // Vertex 3 is far from vertex 0, so it costs one read and no callback.
-    // Vertex 2 is near both, so it costs two reads and reaches the
-    // callback. The unbounded walk reads all four distances and reports
+    // The bounded fold reads distances until one exceeds the bound, and it
+    // stops there. The edge {0,1} of this four-point matrix has the cofacets
+    // 3 and then 2. Vertex 3 is far from vertex 0, so it costs one read and
+    // no callback; vertex 2 is near both, so it costs two reads and reaches
+    // the callback. The unbounded walk reads all four distances and reports
     // both cofacets.
     #[test]
     fn the_bounded_fold_stops_at_the_first_distance_above_the_bound() {
@@ -1866,6 +2217,9 @@ mod tests {
         assert_eq!(got, expected, "cofacets of the bounded walk");
     }
 
+    // The dense source overrides the walk; `Counting` does not, so it runs
+    // the default body on the same distances. The two must agree in bits and
+    // in order, bounded and unbounded alike.
     // Under `upper_only` the merge stops at the first candidate that is not
     // above every simplex vertex. The fixture puts two qualifying candidates
     // above the edge {2, 3} and two failing ones below it, so a walk that
@@ -1902,6 +2256,8 @@ mod tests {
         assert_eq!(events.candidates, 4, "neighbor list entries read");
     }
 
+    // A bound no stored distance reaches drops nothing, so the walk reads
+    // exactly what the unbounded walk reads and reports the same cofacets.
     #[test]
     fn a_vacuous_bound_drops_nothing() {
         let mut rng = Rng::new(0x51ed_2701);
@@ -1942,7 +2298,7 @@ mod tests {
                 &verts,
                 1,
                 upper_only,
-                previous_positive_float(sparse.max_distance()),
+                sparse.max_distance().next_down(),
             );
             assert_eq!(
                 counters::read().vacuous,
@@ -1952,9 +2308,9 @@ mod tests {
         }
     }
 
-    // The engine passes the simplex diameter as the bound. A simplex of
-    // identical points has diameter zero. Both zeros are legal there, and
-    // neither drops a cofacet at distance zero.
+    // The bound the engine passes is the simplex diameter, and a simplex of
+    // identical points has diameter zero. Both zeros are legal bounds there,
+    // and neither drops a cofacet at distance zero.
     #[test]
     fn a_zero_bound_keeps_the_cofacets_at_zero() {
         let triplets: Vec<(usize, usize, f64)> = (1..5)
@@ -1979,9 +2335,6 @@ mod tests {
         }
     }
 
-    // The dense source overrides the walk; `Counting` does not, so it runs
-    // the default body on the same distances. The two must agree in bits and
-    // in order, bounded and unbounded alike.
     #[test]
     fn the_dense_walk_matches_the_default_fold() {
         let mut rng = Rng::new(0x9e37_79b9);
@@ -2075,6 +2428,103 @@ mod tests {
         assert_eq!(d.get(0, 1), 1e-200);
         let d = DistanceMatrix::from_points(&[vec![3e200, 0.0], vec![0.0, 4e200]]).unwrap();
         assert!((d.get(0, 1) / 5e200 - 1.0).abs() < 1e-15);
+    }
+
+    fn edge_bits(matrix: &SparseDistanceMatrix) -> Vec<(usize, usize, u64)> {
+        matrix
+            .edges()
+            .map(|(u, v, distance)| (u, v, distance.to_bits()))
+            .collect()
+    }
+
+    #[test]
+    fn threshold_point_kernels_match_the_dense_constructor() {
+        let mut rng = Rng::new(0x8d47_2016_7f31);
+        for dimensions in [0usize, 1, 2, 3, 7, 13] {
+            let mut points = Vec::new();
+            for i in 0..47 {
+                let point = (0..dimensions)
+                    .map(|axis| {
+                        let raw = (rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64;
+                        if i % 11 == 0 {
+                            axis as f64 * 0.125
+                        } else {
+                            raw.mul_add(4.0, -2.0)
+                        }
+                    })
+                    .collect();
+                points.push(point);
+            }
+            let dense = DistanceMatrix::from_points(&points).unwrap();
+            for threshold in [0.0, 0.25, 1.0, 4.0, f64::INFINITY] {
+                let expected = edge_bits(&dense.to_sparse_at(threshold).unwrap());
+                for strategy in [PointCloudStrategy::KdTree, PointCloudStrategy::Exhaustive] {
+                    let serial = PointCloudGraph::build(
+                        &points,
+                        PointCloudParams::new(threshold).with_strategy(strategy),
+                    )
+                    .unwrap();
+                    let parallel = PointCloudGraph::build(
+                        &points,
+                        PointCloudParams::new(threshold)
+                            .with_strategy(strategy)
+                            .with_threads(3),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        edge_bits(serial.matrix()),
+                        expected,
+                        "dimensions {dimensions}, threshold {threshold}, strategy {strategy:?}"
+                    );
+                    assert_eq!(edge_bits(parallel.matrix()), expected);
+                    assert_eq!(serial.stats(), parallel.stats());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn threshold_point_constructor_preserves_extreme_distance_bits() {
+        let points = vec![
+            vec![0.0, 0.0],
+            vec![1e-200, 0.0],
+            vec![0.0, 1e200],
+            vec![1e308, 0.0],
+            vec![-1e308, 0.0],
+        ];
+        let dense = DistanceMatrix::from_points(&points).unwrap();
+        for threshold in [0.0, 1e-200, 1e200, f64::MAX, f64::INFINITY] {
+            let expected = edge_bits(&dense.to_sparse_at(threshold).unwrap());
+            let graph = PointCloudGraph::build(&points, PointCloudParams::new(threshold)).unwrap();
+            assert_eq!(edge_bits(graph.matrix()), expected, "threshold {threshold}");
+        }
+    }
+
+    #[test]
+    fn automatic_point_route_is_frozen() {
+        let low = vec![vec![0.0; 12], vec![1.0; 12]];
+        let high = vec![vec![0.0; 13], vec![1.0; 13]];
+        assert_eq!(
+            PointCloudGraph::build(&low, PointCloudParams::new(1.0))
+                .unwrap()
+                .stats()
+                .strategy,
+            PointCloudStrategy::KdTree
+        );
+        assert_eq!(
+            PointCloudGraph::build(&high, PointCloudParams::new(1.0))
+                .unwrap()
+                .stats()
+                .strategy,
+            PointCloudStrategy::Exhaustive
+        );
+        assert_eq!(
+            PointCloudGraph::build(&low, PointCloudParams::new(f64::INFINITY))
+                .unwrap()
+                .stats()
+                .strategy,
+            PointCloudStrategy::Exhaustive
+        );
     }
 
     #[test]

@@ -15,19 +15,16 @@
 //! `(v, u)` ascending), and its expectations come from hand-simulating the
 //! serial schedule, not from a run.
 
-mod common;
-
-use common::ref_test_edge;
 use holos_tda::collapse::verify::{verify_dense, verify_sparse};
 use holos_tda::collapse::{
-    collapse_dense, collapse_dense_ordered_parallel, collapse_dense_ordered_with_window,
-    collapse_sparse, collapse_sparse_ordered_parallel, collapse_sparse_ordered_with_window,
-    CollapsedRips,
+    CollapsedRips, collapse_dense, collapse_dense_ordered_parallel,
+    collapse_dense_ordered_with_window, collapse_sparse, collapse_sparse_ordered_parallel,
+    collapse_sparse_ordered_with_window,
 };
 use holos_tda::oracle::rips_persistence_oracle_mod;
 use holos_tda::{
-    rips_persistence, rips_persistence_sparse, Bar, CollapseSchedule, Diagram, DistanceMatrix,
-    RipsParams, SparseDistanceMatrix,
+    Bar, CollapseSchedule, Diagram, DistanceMatrix, RipsParams, SparseDistanceMatrix,
+    rips_persistence, rips_persistence_sparse,
 };
 
 /// Worker counts the invariance gate crosses. 0 and 1 delegate to the
@@ -118,7 +115,7 @@ fn step_bits(result: &CollapsedRips) -> Vec<StepBits> {
             (
                 s.edge(),
                 s.value().to_bits(),
-                s.epoch(),
+                s.position().number(),
                 s.witnesses()
                     .iter()
                     .map(|&(t, w)| (t.to_bits(), w))
@@ -278,6 +275,55 @@ struct RefRun {
 /// The predicate with the witness rule, against the value matrix `f`.
 /// Returns the witness segments, or `None` when some level has no
 /// dominating vertex.
+fn ref_test_edge(
+    f: &[Vec<f64>],
+    u: usize,
+    v: usize,
+    a: f64,
+    terminal: f64,
+) -> Option<Vec<(f64, usize)>> {
+    let mut cands: Vec<(usize, f64)> = Vec::new();
+    for (x, (&du, &dv)) in f[u].iter().zip(f[v].iter()).enumerate() {
+        if x == u || x == v || !du.is_finite() || !dv.is_finite() {
+            continue;
+        }
+        let b = a.max(du).max(dv);
+        if b <= terminal {
+            cands.push((x, b));
+        }
+    }
+
+    let mut critical: Vec<f64> = std::iter::once(a)
+        .chain(cands.iter().map(|&(_, b)| b))
+        .collect();
+    critical.sort_by(f64::total_cmp);
+    critical.dedup();
+
+    let mut segments: Vec<(f64, usize)> = Vec::new();
+    let mut apex: Option<usize> = None;
+    for t in critical {
+        let level: Vec<usize> = cands
+            .iter()
+            .filter(|&&(_, b)| b <= t)
+            .map(|&(x, _)| x)
+            .collect();
+        if level.is_empty() {
+            return None;
+        }
+        let dominates = |w: usize| level.iter().all(|&x| x == w || f[w][x] <= t);
+        let birth = |w: usize| cands.iter().find(|&&(x, _)| x == w).map(|&(_, b)| b);
+        if let Some(w) = apex {
+            if birth(w).is_some_and(|b| b <= t) && dominates(w) {
+                continue;
+            }
+        }
+        let found = level.iter().copied().find(|&w| dominates(w))?;
+        segments.push((t, found));
+        apex = Some(found);
+    }
+    Some(segments)
+}
+
 /// The frozen schedule with no pruning: every pass tests every live edge.
 fn reference_collapse(n: usize, all_edges: &[(usize, usize, f64)], resolved: f64) -> RefRun {
     let mut edges: Vec<(usize, usize, f64)> = all_edges
@@ -334,7 +380,7 @@ fn reference_collapse(n: usize, all_edges: &[(usize, usize, f64)], resolved: f64
     let mut survivors: Vec<(usize, usize, f64)> = edges
         .iter()
         .zip(&alive)
-        .filter(|(_, &live)| live)
+        .filter(|&(_, &live)| live)
         .map(|(&e, _)| e)
         .collect();
     survivors.sort_by_key(|&(u, v, _)| (u, v));
@@ -376,7 +422,11 @@ fn assert_matches_reference(name: &str, result: &CollapsedRips, reference: &RefR
             want.value.to_bits(),
             "{name}: step {i} value"
         );
-        assert_eq!(got.epoch(), want.pass, "{name}: step {i} pass number");
+        assert_eq!(
+            got.position().number(),
+            want.pass,
+            "{name}: step {i} pass number"
+        );
         assert_eq!(
             got.witnesses().len(),
             want.witnesses.len(),
@@ -450,6 +500,8 @@ fn assert_trace_sparse(
     verify_sparse(dist, threshold, &ordered)
         .unwrap_or_else(|e| panic!("{name}: verifier rejected the ordered certificate: {e}"));
 }
+
+// A. The trace gate.
 
 #[test]
 fn ordered_matches_serial_v1_and_reference() {
@@ -543,6 +595,8 @@ fn bipartite_k4_dense() -> DistanceMatrix {
     }
     DistanceMatrix::from_condensed(data).unwrap()
 }
+
+// B. The invariance gate.
 
 /// Inputs with different pass shapes, yields, and densities.
 fn invariance_inputs() -> Vec<(String, DistanceMatrix, Option<f64>)> {
@@ -643,6 +697,8 @@ fn ordered_is_invariant_across_workers_and_windows() {
         }
     }
 }
+
+// C. The equality battery.
 
 fn params(
     max_dim: usize,
@@ -818,6 +874,8 @@ fn ordered_preserves_the_diagram() {
     assert_ordered_preserves_diagram("non_metric", &non_metric, 5.0);
 }
 
+// D. Named scheduler fixtures.
+
 /// Run one fixture through the ordered path and gate it against both
 /// references, then return the ordered result for the fixture's own
 /// counter checks.
@@ -929,7 +987,7 @@ fn forward_arming() {
 
     let armed = step_for(&result, (0, 1)).expect("the armed edge must be removed");
     assert_eq!(
-        armed.epoch(),
+        armed.position().number(),
         2,
         "the armed edge must leave in the pass that armed it"
     );
@@ -939,9 +997,13 @@ fn forward_arming() {
         "the armed edge is certified by its only remaining candidate"
     );
     let arming = step_for(&result, (0, 3)).expect("the arming removal must happen");
-    assert_eq!(arming.epoch(), 2, "the arming removal is in pass 2");
     assert_eq!(
-        step_for(&result, (1, 4)).map(|s| s.epoch()),
+        arming.position().number(),
+        2,
+        "the arming removal is in pass 2"
+    );
+    assert_eq!(
+        step_for(&result, (1, 4)).map(|s| s.position().number()),
         Some(1),
         "the pass 1 removal that unblocks (1, 3)"
     );
@@ -967,7 +1029,7 @@ fn backward_dirtiness() {
 
     let step = step_for(&result, (0, 1)).expect("the dirtied edge must come back");
     assert_eq!(
-        step.epoch(),
+        step.position().number(),
         2,
         "a backward dirty flag must be served in the next pass"
     );
@@ -976,7 +1038,7 @@ fn backward_dirtiness() {
             .certificate
             .steps()
             .iter()
-            .any(|s| s.edge() == (0, 3) && s.epoch() == 1),
+            .any(|s| s.edge() == (0, 3) && s.position().number() == 1),
         "the removal that dirties (0, 1) must be in pass 1"
     );
     assert!(
@@ -1011,14 +1073,18 @@ fn stale_negative_to_positive() {
     );
 
     let step = step_for(&result, (0, 1)).expect("the repaired edge must be removed");
-    assert_eq!(step.epoch(), 1, "the repair must happen inside pass 1");
+    assert_eq!(
+        step.position().number(),
+        1,
+        "the repair must happen inside pass 1"
+    );
     assert_eq!(
         step.witnesses().to_vec(),
         vec![(1.0, 2)],
         "the surviving candidate certifies the removal"
     );
     assert_eq!(
-        step_for(&result, (1, 3)).map(|s| s.epoch()),
+        step_for(&result, (1, 3)).map(|s| s.position().number()),
         Some(1),
         "the conflicting removal is the first step"
     );
@@ -1063,7 +1129,7 @@ fn stale_positive_to_negative() {
         "the stale positive must not survive the repair"
     );
     assert_eq!(
-        step_for(&result, (2, 3)).map(|s| s.epoch()),
+        step_for(&result, (2, 3)).map(|s| s.position().number()),
         Some(1),
         "the conflicting removal is in pass 1"
     );
@@ -1118,14 +1184,18 @@ fn changed_witness_same_verdict() {
     );
 
     let step = step_for(&result, (0, 1)).expect("the repaired edge must still be removed");
-    assert_eq!(step.epoch(), 1, "the verdict is unchanged, so the pass is");
+    assert_eq!(
+        step.position().number(),
+        1,
+        "the verdict is unchanged, so the pass is"
+    );
     assert_eq!(
         step.witnesses().to_vec(),
         vec![(1.0, 2)],
         "the repair must record the witnesses of the graph at the turn"
     );
     assert_eq!(
-        step_for(&result, (1, 4)).map(|s| s.epoch()),
+        step_for(&result, (1, 4)).map(|s| s.position().number()),
         Some(1),
         "the conflicting removal is in pass 1"
     );
@@ -1156,7 +1226,7 @@ fn one_repair_for_many_invalidations() {
         .certificate
         .steps()
         .iter()
-        .map(|s| (s.edge(), s.epoch()))
+        .map(|s| (s.edge(), s.position().number()))
         .collect();
     assert_eq!(
         removals,
@@ -1197,12 +1267,12 @@ fn nonconflicting_reuse() {
         result.stats.removed_edges
     );
     assert_eq!(
-        step_for(&result, (1, 2)).map(|s| s.epoch()),
+        step_for(&result, (1, 2)).map(|s| s.position().number()),
         Some(1),
         "the unrelated removal is in pass 1"
     );
     assert_eq!(
-        step_for(&result, (1, 4)).map(|s| s.epoch()),
+        step_for(&result, (1, 4)).map(|s| s.position().number()),
         Some(1),
         "the reusing member leaves in the same pass"
     );
@@ -1294,7 +1364,11 @@ fn underfilled_final_pass() {
     );
     let last = result.stats.epochs;
     assert!(
-        result.certificate.steps().iter().all(|s| s.epoch() < last),
+        result
+            .certificate
+            .steps()
+            .iter()
+            .all(|s| s.position().number() < last),
         "the final pass must remove nothing"
     );
 }

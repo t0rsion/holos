@@ -1,0 +1,9 @@
+[package]
+name = "intervention-bench"
+version = "0.20.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+holos-tda = { path = "../holos-tda" }
+holos-tda-check = { path = "../holos-tda-check" }

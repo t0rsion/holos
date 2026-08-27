@@ -3,17 +3,18 @@
 //! the serial engine; `--threads` puts the same phases on the parallel
 //! one.
 //!
-//! benchmarks/engine_bench.sh runs this driver on
-//! benchmarks/engineering_corpus.toml. It is not a registered study.
-//! No grade reads it.
+//! The driver is the tuning and landing instrument of the engineering
+//! benchmark, benchmarks/engine_bench.sh with
+//! benchmarks/engineering_corpus.toml. It is not part of a registered
+//! study, and no grade reads it.
 //!
 //! Each phase carries its own clock, so no number comes from subtracting
 //! one command line from another. Every configuration computes its
 //! diagram once before any timing starts. The diagrams must agree bar for
 //! bar, or the run aborts.
 //!
-//! Timed repetitions interleave the configurations instead of running one
-//! configuration to exhaustion.
+//! The timed repetitions are counterbalanced: they interleave the
+//! configurations instead of running one configuration to exhaustion.
 //!
 //! Output is one key=value line per record. benchmarks/engine_bench.sh
 //! parses it; the fields below are its interface.
@@ -27,10 +28,10 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use holos_tda::collapse::collapse_sparse;
-use holos_tda::io::{self, write_diagram, OutputFormat};
+use holos_tda::io::{self, OutputFormat, write_diagram};
 use holos_tda::{
-    rips_persistence, rips_persistence_sparse, DenseStorage, Diagram, DistanceMatrix,
-    Engine as LibEngine, RipsParams, SparseDistanceMatrix,
+    DenseStorage, Diagram, DistanceMatrix, Engine as LibEngine, RipsParams, SparseDistanceMatrix,
+    rips_persistence, rips_persistence_sparse,
 };
 
 const USAGE: &str = "\
@@ -73,8 +74,9 @@ Options:
   --emit-collapsed FILE   do not time anything. Read the input, collapse its
                           dominated edges with the serial schedule, and write
                           the reduced graph to FILE as 'i j d' triplets. One
-                          metadata line goes to stdout. Preprocessing for
-                          corpus entries whose input is a collapsed graph
+                          metadata line goes to stdout. This is the
+                          preprocessing step behind the corpus entries whose
+                          input is a real collapsed graph
   -h, --help              print this text
   --version               print the driver version
 
@@ -89,12 +91,13 @@ against each other. auto lets the library rule choose; compact forbids the
 full row-major matrix; square forces it. A configuration routed to the
 sparse engine never holds a distance matrix, so the flag does not reach it.
 
-Every configuration runs at the same thread count with collapse off.
-auto and dense set RipsParams::engine and differ in nothing else, so their
-gap is the routing rule alone. sparse is an entry point instead:
+All run the same engine at the same thread count with the collapse off,
+which is what this instrument measures. The auto and dense configurations set
+RipsParams::engine and differ in nothing else, so their gap is the routing
+rule alone. The sparse configuration is an entry point instead:
 rips_persistence_sparse on a graph this driver builds, which puts the
-conversion on a clock of its own. The three optimization toggles stay at
-their defaults.
+conversion on a clock of its own. The three optimization toggles are for
+differential testing and stay at their defaults.
 
 With --format sparse the auto and dense configurations first widen the
 graph back to a full matrix, one +inf per absent pair. That is the routing
@@ -110,13 +113,14 @@ Phases:
   graph     build the sparse graph (sparse configuration only): a threshold
             pass over the matrix, or the triplets of a sparse input
   reduce    the whole reduction. The solver exposes no per-dimension
-            boundary outside the crate, so the reduction is one clock
+            boundary outside the crate, so the reduction is one clock. A
+            driver that split it would have to call something else.
   total     the whole configuration, from one enclosing clock
 
 Every repetition parses the file again, so total covers the work a command
 line does and compares against another tool's process time. The comparison
-still favors this driver by the process start it never pays. Read the
-reduce phase for the engine alone.
+still favors this driver by the process start it never pays. Read a ratio
+near 1.0 with that in mind, and read the reduce phase for the engine alone.
 
 Counterbalancing:
   The timed repetitions interleave the configurations. Repetition r runs
@@ -178,42 +182,6 @@ struct Args {
     emit_collapsed: Option<String>,
 }
 
-struct ArgsBuilder {
-    input: Option<String>,
-    entry: Option<String>,
-    threshold_text: Option<String>,
-    format: Format,
-    max_dim: usize,
-    modulus: u32,
-    reps: usize,
-    threads: usize,
-    parse_threads: usize,
-    mode: Vec<Engine>,
-    dense_storage: DenseStorage,
-    diagram_out: Option<String>,
-    emit_collapsed: Option<String>,
-}
-
-impl Default for ArgsBuilder {
-    fn default() -> Self {
-        Self {
-            input: None,
-            entry: None,
-            threshold_text: None,
-            format: Format::Points,
-            max_dim: 1,
-            modulus: 2,
-            reps: 5,
-            threads: 1,
-            parse_threads: 1,
-            mode: all_modes(),
-            dense_storage: DenseStorage::Auto,
-            diagram_out: None,
-            emit_collapsed: None,
-        }
-    }
-}
-
 struct Config {
     name: &'static str,
     engine: Engine,
@@ -263,32 +231,12 @@ fn run(argv: &[String]) -> Result<(), String> {
         return emit_collapsed(&args, &path);
     }
     let configs = configurations(&args);
-    let verified = verify_configurations(&args, &configs)?;
-    let reference = verified
-        .first()
-        .ok_or_else(|| "no configuration ran; --mode selected none".to_string())?;
-    if let Some(path) = &args.diagram_out {
-        write_reference_diagram(path, &reference.diagram, args.max_dim)?;
-    }
 
-    let hwm_start = vm_hwm_kb();
-    let rotation = rotation_orders(configs.len(), args.reps);
-    print_header(&args, &configs, &verified, &rotation);
-    let mut samples = collect_samples(&args, &configs, &verified, &rotation)?;
-    print_phase_summaries(&args, &configs, &verified, &mut samples);
-    println!(
-        "kind=memory entry={} config=all vm_hwm_kb={} vm_hwm_kb_at_start={} scope=process_high_water",
-        args.entry,
-        report_kb(vm_hwm_kb()),
-        report_kb(hwm_start)
-    );
-    Ok(())
-}
-
-fn verify_configurations(args: &Args, configs: &[Config]) -> Result<Vec<Outcome>, String> {
+    // Agreement first. A timed repetition never runs before every
+    // configuration has produced its diagram and matched the reference.
     let mut verified: Vec<Outcome> = Vec::with_capacity(configs.len());
-    for cfg in configs {
-        let outcome = run_pipeline(args, cfg)?;
+    for cfg in &configs {
+        let outcome = run_pipeline(&args, cfg)?;
         if let Some(first) = verified.first() {
             if !diagrams_equal(&first.diagram, &outcome.diagram) {
                 return Err(format!(
@@ -303,15 +251,19 @@ fn verify_configurations(args: &Args, configs: &[Config]) -> Result<Vec<Outcome>
         }
         verified.push(outcome);
     }
-    Ok(verified)
-}
+    let reference = verified
+        .first()
+        .ok_or_else(|| "no configuration ran; --mode selected none".to_string())?;
+    if let Some(path) = &args.diagram_out {
+        write_reference_diagram(path, &reference.diagram, args.max_dim)?;
+    }
 
-fn collect_samples(
-    args: &Args,
-    configs: &[Config],
-    verified: &[Outcome],
-    rotation: &[Vec<usize>],
-) -> Result<Vec<Vec<Vec<f64>>>, String> {
+    let hwm_start = vm_hwm_kb();
+    let rotation = rotation_orders(configs.len(), args.reps);
+    print_header(&args, &configs, &verified, &rotation);
+
+    // Counterbalanced timing: each repetition walks the configurations from
+    // its own starting point, so no configuration owns the end of the run.
     let mut samples: Vec<Vec<Vec<f64>>> = verified
         .iter()
         .map(|verify| vec![Vec::with_capacity(args.reps); verify.phases.len()])
@@ -319,9 +271,10 @@ fn collect_samples(
     for (rep, order) in rotation.iter().enumerate() {
         for &index in order {
             let cfg = &configs[index];
-            let outcome = run_pipeline(args, cfg)?;
-            // After the clocks stop: a mid-run diagram change is a hard
-            // failure, not a timing.
+            let outcome = run_pipeline(&args, cfg)?;
+            // The clocks have stopped; comparing the repetition's diagram
+            // against the verified reference costs no timed work and turns
+            // a mid-run corruption into a hard failure instead of a timing.
             if !diagrams_equal(&outcome.diagram, &verified[index].diagram) {
                 return Err(format!(
                     "config {} rep {rep}: diagram differs from the agreement run",
@@ -333,16 +286,8 @@ fn collect_samples(
             }
         }
     }
-    Ok(samples)
-}
 
-fn print_phase_summaries(
-    args: &Args,
-    configs: &[Config],
-    verified: &[Outcome],
-    samples: &mut [Vec<Vec<f64>>],
-) {
-    for ((cfg, verify), values) in configs.iter().zip(verified).zip(samples) {
+    for ((cfg, verify), values) in configs.iter().zip(&verified).zip(&mut samples) {
         for ((name, _), phase_samples) in verify.phases.iter().zip(values) {
             let summary = summarize(phase_samples);
             println!(
@@ -361,6 +306,15 @@ fn print_phase_summaries(
             );
         }
     }
+    // One mark for the process. The repetitions interleave, so no
+    // configuration can claim it.
+    println!(
+        "kind=memory entry={} config=all vm_hwm_kb={} vm_hwm_kb_at_start={} scope=process_high_water",
+        args.entry,
+        report_kb(vm_hwm_kb()),
+        report_kb(hwm_start)
+    );
+    Ok(())
 }
 
 /// The counterbalancing rotation: repetition r starts at configuration r and
@@ -452,18 +406,83 @@ fn print_header(args: &Args, configs: &[Config], verified: &[Outcome], rotation:
 fn run_pipeline(args: &Args, cfg: &Config) -> Result<Outcome, String> {
     let mut phases: Vec<(&'static str, f64)> = Vec::with_capacity(5);
     let whole = Instant::now();
-    let values = timed(&mut phases, "parse", || {
-        read_input(&args.input, args.format, args.parse_threads)
-    })?;
-    let params = pipeline_params(args, cfg.engine);
-    let (points, mut diagram, graph_edges) = match (values, cfg.engine) {
+
+    let clock = Instant::now();
+    let values = read_input(&args.input, args.format, args.parse_threads)?;
+    phases.push(("parse", clock.elapsed().as_secs_f64()));
+
+    // The dense configuration forces its engine, or the routing rule
+    // would answer for it. The sparse configuration reduces a graph, which
+    // no rule routes.
+    let params = RipsParams::new(args.max_dim)
+        .with_threshold(args.threshold)
+        .with_modulus(args.modulus)
+        .with_threads(args.threads)
+        .with_engine(match cfg.engine {
+            Engine::Auto | Engine::Sparse => LibEngine::Auto,
+            Engine::Dense => LibEngine::Dense,
+        })
+        .with_dense_storage(args.dense_storage);
+
+    let mut graph_edges = None;
+    let (points, mut diagram) = match (values, cfg.engine) {
         (Parsed::Triplets(n, triplets), Engine::Sparse) => {
-            reduce_sparse_triplets(n, &triplets, &params, &mut phases)?
+            let clock = Instant::now();
+            let sparse =
+                SparseDistanceMatrix::from_triplets(n, &triplets).map_err(|e| e.to_string())?;
+            phases.push(("graph", clock.elapsed().as_secs_f64()));
+            graph_edges = Some(sparse.num_edges());
+            let clock = Instant::now();
+            let diagram = rips_persistence_sparse(&sparse, &params).map_err(|e| e.to_string())?;
+            phases.push(("reduce", clock.elapsed().as_secs_f64()));
+            (n, diagram)
         }
         (Parsed::Triplets(n, triplets), Engine::Dense | Engine::Auto) => {
-            reduce_widened_triplets(n, &triplets, &params, &mut phases)?
+            let clock = Instant::now();
+            let dist = widen_to_dense(n, &triplets)?;
+            phases.push(("distance", clock.elapsed().as_secs_f64()));
+            let clock = Instant::now();
+            let diagram = rips_persistence(&dist, &params).map_err(|e| e.to_string())?;
+            phases.push(("reduce", clock.elapsed().as_secs_f64()));
+            (n, diagram)
         }
-        (values, engine) => reduce_dense_input(values, engine, args, &params, &mut phases)?,
+        (values, engine) => {
+            let clock = Instant::now();
+            let dist = match values {
+                Parsed::Points(points) => DistanceMatrix::from_points(&points),
+                Parsed::Condensed(data) => DistanceMatrix::from_condensed(data),
+                Parsed::Triplets(..) => unreachable!("triplets take their own arms"),
+            }
+            .map_err(|e| e.to_string())?;
+            phases.push(("distance", clock.elapsed().as_secs_f64()));
+            if dist.len() < 2 {
+                return Err(format!(
+                    "{}: need at least two points",
+                    file_stem(&args.input)
+                ));
+            }
+            let n = dist.len();
+            let diagram = match engine {
+                Engine::Dense | Engine::Auto => {
+                    let clock = Instant::now();
+                    let diagram = rips_persistence(&dist, &params).map_err(|e| e.to_string())?;
+                    phases.push(("reduce", clock.elapsed().as_secs_f64()));
+                    diagram
+                }
+                Engine::Sparse => {
+                    let clock = Instant::now();
+                    let sparse = threshold_to_sparse(&dist, args.threshold)?;
+                    phases.push(("graph", clock.elapsed().as_secs_f64()));
+                    graph_edges = Some(sparse.num_edges());
+                    let clock = Instant::now();
+                    let diagram =
+                        rips_persistence_sparse(&sparse, &params).map_err(|e| e.to_string())?;
+                    phases.push(("reduce", clock.elapsed().as_secs_f64()));
+                    diagram
+                }
+            };
+            (n, diagram)
+        }
     };
     phases.push(("total", whole.elapsed().as_secs_f64()));
     if points < 2 {
@@ -482,113 +501,10 @@ fn run_pipeline(args: &Args, cfg: &Config) -> Result<Outcome, String> {
     })
 }
 
-fn timed<T>(
-    phases: &mut Vec<(&'static str, f64)>,
-    name: &'static str,
-    operation: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
-    let clock = Instant::now();
-    let value = operation()?;
-    phases.push((name, clock.elapsed().as_secs_f64()));
-    Ok(value)
-}
-
-fn pipeline_params(args: &Args, engine: Engine) -> RipsParams {
-    RipsParams::new(args.max_dim)
-        .with_threshold(args.threshold)
-        .with_modulus(args.modulus)
-        .with_threads(args.threads)
-        .with_engine(match engine {
-            Engine::Auto | Engine::Sparse => LibEngine::Auto,
-            Engine::Dense => LibEngine::Dense,
-        })
-        .with_dense_storage(args.dense_storage)
-}
-
-fn reduce_sparse_triplets(
-    points: usize,
-    triplets: &[(usize, usize, f64)],
-    params: &RipsParams,
-    phases: &mut Vec<(&'static str, f64)>,
-) -> Result<(usize, Diagram, Option<usize>), String> {
-    let sparse = timed(phases, "graph", || {
-        SparseDistanceMatrix::from_triplets(points, triplets).map_err(|error| error.to_string())
-    })?;
-    let edges = sparse.num_edges();
-    let diagram = timed(phases, "reduce", || {
-        rips_persistence_sparse(&sparse, params).map_err(|error| error.to_string())
-    })?;
-    Ok((points, diagram, Some(edges)))
-}
-
-fn reduce_widened_triplets(
-    points: usize,
-    triplets: &[(usize, usize, f64)],
-    params: &RipsParams,
-    phases: &mut Vec<(&'static str, f64)>,
-) -> Result<(usize, Diagram, Option<usize>), String> {
-    let distances = timed(phases, "distance", || widen_to_dense(points, triplets))?;
-    let diagram = timed(phases, "reduce", || {
-        rips_persistence(&distances, params).map_err(|error| error.to_string())
-    })?;
-    Ok((points, diagram, None))
-}
-
-fn distance_matrix(values: Parsed) -> Result<DistanceMatrix, String> {
-    match values {
-        Parsed::Points(points) => DistanceMatrix::from_points(&points),
-        Parsed::Condensed(data) => DistanceMatrix::from_condensed(data),
-        Parsed::Triplets(..) => unreachable!("triplets take their own arms"),
-    }
-    .map_err(|error| error.to_string())
-}
-
-fn reduce_dense_input(
-    values: Parsed,
-    engine: Engine,
-    args: &Args,
-    params: &RipsParams,
-    phases: &mut Vec<(&'static str, f64)>,
-) -> Result<(usize, Diagram, Option<usize>), String> {
-    let distances = timed(phases, "distance", || distance_matrix(values))?;
-    if distances.len() < 2 {
-        return Err(format!(
-            "{}: need at least two points",
-            file_stem(&args.input)
-        ));
-    }
-    let points = distances.len();
-    match engine {
-        Engine::Dense | Engine::Auto => {
-            let diagram = timed(phases, "reduce", || {
-                rips_persistence(&distances, params).map_err(|error| error.to_string())
-            })?;
-            Ok((points, diagram, None))
-        }
-        Engine::Sparse => reduce_thresholded(points, &distances, args, params, phases),
-    }
-}
-
-fn reduce_thresholded(
-    points: usize,
-    distances: &DistanceMatrix,
-    args: &Args,
-    params: &RipsParams,
-    phases: &mut Vec<(&'static str, f64)>,
-) -> Result<(usize, Diagram, Option<usize>), String> {
-    let sparse = timed(phases, "graph", || {
-        threshold_to_sparse(distances, args.threshold)
-    })?;
-    let edges = sparse.num_edges();
-    let diagram = timed(phases, "reduce", || {
-        rips_persistence_sparse(&sparse, params).map_err(|error| error.to_string())
-    })?;
-    Ok((points, diagram, Some(edges)))
-}
-
 /// The full matrix of a sparse graph: every absent pair is +inf, which the
-/// engine reads as an edge that never enters the filtration. The time and
-/// memory of this call are the memory-stratum measurement.
+/// engine reads as an edge that never enters the filtration. The cost of
+/// this call, in time and in memory, is what an entry of the memory
+/// stratum exists to show.
 fn widen_to_dense(n: usize, triplets: &[(usize, usize, f64)]) -> Result<DistanceMatrix, String> {
     let mut data = vec![f64::INFINITY; n * n.saturating_sub(1) / 2];
     for &(i, j, d) in triplets {
@@ -605,29 +521,6 @@ fn widen_to_dense(n: usize, triplets: &[(usize, usize, f64)]) -> Result<Distance
 /// runs: this is a preprocessing step, and the collapse itself is measured
 /// by the collapse benchmarks.
 fn emit_collapsed(args: &Args, path: &str) -> Result<(), String> {
-    let sparse = sparse_input(args)?;
-    let points = sparse.len();
-    let before = sparse.num_edges();
-    let collapsed =
-        collapse_sparse(&sparse, Some(args.threshold)).map_err(|e| format!("collapse: {e}"))?;
-    let after = collapsed.matrix.num_edges();
-    let (labels, isolated) = isolated_first_labels(&collapsed.matrix);
-    let rows = relabelled_edges(&collapsed.matrix, &labels);
-    write_sparse_rows(path, &rows)?;
-    println!(
-        "collapsed entry={} n={} edges_in={} edges_out={} isolated={} threshold={} kept={:.6}",
-        args.entry,
-        points,
-        before,
-        after,
-        isolated,
-        args.threshold_text,
-        kept_fraction(before, after)
-    );
-    Ok(())
-}
-
-fn sparse_input(args: &Args) -> Result<SparseDistanceMatrix, String> {
     let sparse = match read_input(&args.input, args.format, args.parse_threads)? {
         Parsed::Triplets(n, triplets) => {
             SparseDistanceMatrix::from_triplets(n, &triplets).map_err(|e| e.to_string())?
@@ -641,54 +534,62 @@ fn sparse_input(args: &Args) -> Result<SparseDistanceMatrix, String> {
             threshold_to_sparse(&dist, args.threshold)?
         }
     };
-    Ok(sparse)
-}
+    let n = sparse.len();
+    let before = sparse.num_edges();
+    let collapsed =
+        collapse_sparse(&sparse, Some(args.threshold)).map_err(|e| format!("collapse: {e}"))?;
+    let after = collapsed.matrix.num_edges();
 
-fn isolated_first_labels(sparse: &SparseDistanceMatrix) -> (Vec<usize>, usize) {
-    let mut degree = vec![0usize; sparse.len()];
-    for (u, v, _) in sparse.edges() {
+    // The sparse reader takes the vertex count from the largest index it
+    // sees. A collapse can strip every edge off the last vertices, so the
+    // reduced graph is relabelled the way benchmarks/gen_graph.py
+    // relabels: isolated vertices first, the rest in order. The barcode
+    // does not depend on the labelling.
+    let mut degree = vec![0usize; n];
+    for (u, v, _) in collapsed.matrix.edges() {
         degree[u] += 1;
         degree[v] += 1;
     }
-    let isolated = degree.iter().filter(|&&value| value == 0).count();
-    let mut labels = vec![0usize; sparse.len()];
+    let mut label = vec![0usize; n];
     let mut next = 0;
     for pass in [0usize, 1] {
-        for (vertex, &value) in degree.iter().enumerate() {
-            if (value == 0) == (pass == 0) {
-                labels[vertex] = next;
+        for (v, &deg) in degree.iter().enumerate() {
+            if (deg == 0) == (pass == 0) {
+                label[v] = next;
                 next += 1;
             }
         }
     }
-    (labels, isolated)
-}
-
-fn relabelled_edges(sparse: &SparseDistanceMatrix, labels: &[usize]) -> Vec<(usize, usize, f64)> {
-    let mut rows: Vec<(usize, usize, f64)> = sparse
+    let mut rows: Vec<(usize, usize, f64)> = collapsed
+        .matrix
         .edges()
-        .map(|(u, v, distance)| (labels[u].max(labels[v]), labels[u].min(labels[v]), distance))
+        .map(|(u, v, d)| (label[u].max(label[v]), label[u].min(label[v]), d))
         .collect();
     rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.total_cmp(&b.2)));
-    rows
-}
 
-fn write_sparse_rows(path: &str, rows: &[(usize, usize, f64)]) -> Result<(), String> {
     let file = File::create(path).map_err(|e| format!("{}: {e}", file_stem(path)))?;
     let mut out = BufWriter::new(file);
-    for (u, v, d) in rows {
+    for (u, v, d) in &rows {
         writeln!(out, "{u} {v} {d:?}").map_err(|e| e.to_string())?;
     }
     out.flush().map_err(|e| e.to_string())?;
-    Ok(())
-}
 
-fn kept_fraction(before: usize, after: usize) -> f64 {
-    if before == 0 {
-        0.0
-    } else {
-        after as f64 / before as f64
-    }
+    let isolated = degree.iter().filter(|&&d| d == 0).count();
+    println!(
+        "collapsed entry={} n={} edges_in={} edges_out={} isolated={} threshold={} kept={:.6}",
+        args.entry,
+        n,
+        before,
+        after,
+        isolated,
+        args.threshold_text,
+        if before == 0 {
+            0.0
+        } else {
+            after as f64 / before as f64
+        }
+    );
+    Ok(())
 }
 
 /// The thresholded graph of a dense matrix, as the sparse engine sees it.
@@ -732,7 +633,7 @@ fn parse_modes(text: &str) -> Result<Vec<Engine>, String> {
             other => {
                 return Err(format!(
                     "unknown mode {other}; use auto, dense, sparse, or all"
-                ))
+                ));
             }
         };
         if modes.contains(&engine) {
@@ -879,160 +780,95 @@ fn file_stem(path: &str) -> String {
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
-    let mut builder = ArgsBuilder::default();
+    let mut input = None;
+    let mut entry = None;
+    let mut threshold_text = None;
+    let mut format = Format::Points;
+    let mut max_dim = 1usize;
+    let mut modulus = 2u32;
+    let mut reps = 5usize;
+    let mut threads = 1usize;
+    let mut parse_threads = 1usize;
+    let mut mode = all_modes();
+    let mut dense_storage = DenseStorage::Auto;
+    let mut diagram_out = None;
+    let mut emit_collapsed = None;
+
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
-        if !ArgsBuilder::accepts(flag) {
-            return Err(format!("unknown argument {flag}; run with --help"));
-        }
-        let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
-        builder.set(flag, value)?;
-    }
-    builder.finish()
-}
-
-impl ArgsBuilder {
-    fn accepts(flag: &str) -> bool {
-        matches!(
-            flag,
-            "--input"
-                | "--entry"
-                | "--threshold"
-                | "--format"
-                | "--max-dim"
-                | "--modulus"
-                | "--reps"
-                | "--threads"
-                | "--parse-threads"
-                | "--mode"
-                | "--dense-storage"
-                | "--diagram-out"
-                | "--emit-collapsed"
-        )
-    }
-
-    fn set(&mut self, flag: &str, value: &str) -> Result<(), String> {
-        if self.set_identity(flag, value) || self.set_output(flag, value) {
-            return Ok(());
-        }
-        if self.set_dimensions(flag, value)? || self.set_execution(flag, value)? {
-            return Ok(());
-        }
-        if self.set_mode(flag, value)? {
-            return Ok(());
-        }
-        Err(format!("unknown argument {flag}; run with --help"))
-    }
-
-    fn set_identity(&mut self, flag: &str, value: &str) -> bool {
-        match flag {
-            "--input" => self.input = Some(value.to_string()),
-            "--entry" => self.entry = Some(value.to_string()),
-            "--threshold" => self.threshold_text = Some(value.to_string()),
-            _ => return false,
-        }
-        true
-    }
-
-    fn set_output(&mut self, flag: &str, value: &str) -> bool {
-        match flag {
-            "--diagram-out" => self.diagram_out = Some(value.to_string()),
-            "--emit-collapsed" => self.emit_collapsed = Some(value.to_string()),
-            _ => return false,
-        }
-        true
-    }
-
-    fn set_dimensions(&mut self, flag: &str, value: &str) -> Result<bool, String> {
-        match flag {
-            "--max-dim" => self.max_dim = parse_usize(value, flag)?,
-            "--modulus" => {
-                self.modulus = u32::try_from(parse_usize(value, flag)?)
-                    .map_err(|_| "--modulus is out of range".to_string())?;
+        let mut value = || {
+            it.next()
+                .cloned()
+                .ok_or_else(|| format!("{flag} needs a value"))
+        };
+        match flag.as_str() {
+            "--input" => input = Some(value()?),
+            "--entry" => entry = Some(value()?),
+            "--threshold" => threshold_text = Some(value()?),
+            "--format" => {
+                let name = value()?;
+                format = match name.as_str() {
+                    "points" => Format::Points,
+                    "lower-distance" => Format::LowerDistance,
+                    "sparse" => Format::Sparse,
+                    other => {
+                        return Err(format!(
+                            "unknown format {other}; use points, lower-distance, or sparse"
+                        ));
+                    }
+                }
             }
-            _ => return Ok(false),
+            "--max-dim" => max_dim = parse_usize(&value()?, "--max-dim")?,
+            "--modulus" => {
+                modulus = u32::try_from(parse_usize(&value()?, "--modulus")?)
+                    .map_err(|_| "--modulus is out of range".to_string())?
+            }
+            "--reps" => reps = parse_usize(&value()?, "--reps")?,
+            "--threads" => threads = parse_usize(&value()?, "--threads")?,
+            "--parse-threads" => parse_threads = parse_usize(&value()?, "--parse-threads")?,
+            "--mode" => mode = parse_modes(&value()?)?,
+            "--dense-storage" => dense_storage = parse_storage(&value()?)?,
+            "--diagram-out" => diagram_out = Some(value()?),
+            "--emit-collapsed" => emit_collapsed = Some(value()?),
+            other => return Err(format!("unknown argument {other}; run with --help")),
         }
-        Ok(true)
     }
 
-    fn set_execution(&mut self, flag: &str, value: &str) -> Result<bool, String> {
-        match flag {
-            "--reps" => self.reps = parse_usize(value, flag)?,
-            "--threads" => self.threads = parse_usize(value, flag)?,
-            "--parse-threads" => self.parse_threads = parse_usize(value, flag)?,
-            _ => return Ok(false),
-        }
-        Ok(true)
-    }
-
-    fn set_mode(&mut self, flag: &str, value: &str) -> Result<bool, String> {
-        match flag {
-            "--format" => self.format = parse_format(value)?,
-            "--mode" => self.mode = parse_modes(value)?,
-            "--dense-storage" => self.dense_storage = parse_storage(value)?,
-            _ => return Ok(false),
-        }
-        Ok(true)
-    }
-
-    fn finish(self) -> Result<Args, String> {
-        let input = self
-            .input
-            .ok_or_else(|| "--input is required".to_string())?;
-        let threshold_text = self
-            .threshold_text
-            .ok_or_else(|| "--threshold is required".to_string())?;
-        let threshold = parse_threshold(&threshold_text)?;
-        require_positive(self.reps, "--reps")?;
-        require_positive(self.threads, "--threads")?;
-        require_positive(self.parse_threads, "--parse-threads")?;
-        let entry = self.entry.unwrap_or_else(|| file_stem(&input));
-        Ok(Args {
-            input,
-            entry,
-            threshold,
-            threshold_text,
-            format: self.format,
-            max_dim: self.max_dim,
-            modulus: self.modulus,
-            reps: self.reps,
-            threads: self.threads,
-            parse_threads: self.parse_threads,
-            mode: self.mode,
-            dense_storage: self.dense_storage,
-            diagram_out: self.diagram_out,
-            emit_collapsed: self.emit_collapsed,
-        })
-    }
-}
-
-fn parse_threshold(threshold_text: &str) -> Result<f64, String> {
+    let input = input.ok_or_else(|| "--input is required".to_string())?;
+    let threshold_text = threshold_text.ok_or_else(|| "--threshold is required".to_string())?;
     let threshold: f64 = threshold_text
         .parse()
         .map_err(|_| format!("--threshold {threshold_text} is not a number"))?;
     if threshold.is_nan() || threshold < 0.0 {
         return Err(format!("--threshold {threshold_text} must be non-negative"));
     }
-    Ok(threshold)
-}
-
-fn require_positive(value: usize, flag: &str) -> Result<(), String> {
-    if value == 0 {
-        Err(format!("{flag} must be at least 1"))
-    } else {
-        Ok(())
+    if reps == 0 {
+        return Err("--reps must be at least 1".to_string());
     }
-}
-
-fn parse_format(text: &str) -> Result<Format, String> {
-    match text {
-        "points" => Ok(Format::Points),
-        "lower-distance" => Ok(Format::LowerDistance),
-        "sparse" => Ok(Format::Sparse),
-        other => Err(format!(
-            "unknown format {other}; use points, lower-distance, or sparse"
-        )),
+    if threads == 0 {
+        return Err("--threads must be at least 1".to_string());
     }
+    if parse_threads == 0 {
+        return Err("--parse-threads must be at least 1".to_string());
+    }
+    let entry = entry.unwrap_or_else(|| file_stem(&input));
+
+    Ok(Args {
+        input,
+        entry,
+        threshold,
+        threshold_text,
+        format,
+        max_dim,
+        modulus,
+        reps,
+        threads,
+        parse_threads,
+        mode,
+        dense_storage,
+        diagram_out,
+        emit_collapsed,
+    })
 }
 
 fn parse_storage(text: &str) -> Result<DenseStorage, String> {

@@ -1,0 +1,8 @@
+[package]
+name = "program-bench"
+version = "0.10.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+holos-tda = { path = "../holos-tda" }

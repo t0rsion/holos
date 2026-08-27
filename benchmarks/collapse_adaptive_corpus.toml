@@ -1,0 +1,207 @@
+# Frozen corpus for the version 3 adaptive collapse study.
+
+[meta]
+version = 1
+date = "2026-08-24"
+study = "deterministic resource-bounded score-ordered edge collapse"
+runner = "benchmarks/collapse_adaptive.sh"
+driver = "collapse-adaptive-bench"
+frozen = """
+FROZEN before the registered screen. Development used the existing
+engine_tuning_t-dim3-cube-n250 cloud with seed 5301. That cloud and every
+seed used by an earlier collapse study are excluded from both registered
+sets. The development screen rejected eager candidate repair and low-score
+ordering. The frozen implementation scores one graph per pass, selects high
+scores first, and tests every planned removal again against the current
+graph.
+"""
+sampling_rule = """
+Each entry is generated once by gen_cloud.py N COORD_DIM SEED FAMILY. Screen
+seeds start at 12011. Confirmation seeds start at 13001. No seed occurs in
+both sets. A rerun regenerates the same bytes and records their SHA-256
+digest.
+"""
+threshold_rule = """
+T = tau times the enclosing radius. The enclosing radius is the minimum over
+i of the maximum over j of the Euclidean distance from i to j. Every arm of
+an entry uses the same threshold bits.
+"""
+configurations = """
+Each entry has two counterbalanced runs. The complete run compares no
+collapse, version 1 serial collapse, version 2 rounds collapse, and both
+version 3 objectives. The budget run repeats those five arms but limits each
+version 3 arm to two predicate evaluations per input edge. Versions 1 and 2
+ignore that limit. Five timed repetitions follow an untimed exact diagram
+gate. The driver also encodes, decodes, binds, and independently verifies
+every collapse artifact.
+"""
+measures = """
+The primary quality measures are output triangles for H1 and output
+tetrahedra for H2. The primary cost measure is certified wall time, which
+includes distances, graph construction, collapse, reduction, canonical
+artifact encoding and decoding, graph binding checks, and independent replay.
+Secondary measures are collapse and reduction wall time, output edges,
+predicate evaluations, artifact bytes, and peak RSS from an isolated process
+per arm. Times are medians, IQRs, and maxima over the timed repetitions.
+"""
+decision_rule = """
+Read every entry. Do not discard an entry because one schedule loses. An arm
+is quality-positive when its target output clique count is no greater than
+both complete historical schedules. It is product-positive when its median
+certified time is no greater than version 1. A budget arm is useful when it
+removes at least half of its target input cliques and its median certified
+time is no greater than complete version 1. A family-level claim needs the
+same result at two adjacent tau values in the held-out set. Any diagram,
+artifact, counter-stability, corpus, or topology failure voids the entry.
+"""
+limits = """
+The study tests geometric Euclidean point clouds on one machine and four
+physical cores. It does not establish a universal performance ordering, a
+canonical reduced graph, representative transport, or scheduler optimality.
+The verifier checks removal safety and fixed-point metadata, not the score
+policy used to choose a safe trace.
+"""
+reps = 5
+threads = 4
+budget_per_input_edge = 2
+cpus = "0-3,12-15"
+
+[[screen]]
+id = "s-cube-t035"
+family = "cube"
+n = 500
+coord_dim = 3
+max_dim = 2
+tau = 0.35
+modulus = 2
+seed = 12011
+
+[[screen]]
+id = "s-cube-t055"
+family = "cube"
+n = 350
+coord_dim = 3
+max_dim = 2
+tau = 0.55
+modulus = 2
+seed = 12011
+
+[[screen]]
+id = "s-sphere-t035"
+family = "sphere"
+n = 500
+coord_dim = 3
+max_dim = 2
+tau = 0.35
+modulus = 2
+seed = 12013
+
+[[screen]]
+id = "s-sphere-t055"
+family = "sphere"
+n = 350
+coord_dim = 3
+max_dim = 2
+tau = 0.55
+modulus = 2
+seed = 12013
+
+[[screen]]
+id = "s-clusters-t035"
+family = "clusters"
+n = 500
+coord_dim = 3
+max_dim = 2
+tau = 0.35
+modulus = 2
+seed = 12015
+
+[[screen]]
+id = "s-torus-t055"
+family = "torus"
+n = 350
+coord_dim = 3
+max_dim = 2
+tau = 0.55
+modulus = 2
+seed = 12017
+
+[[confirm]]
+id = "k-cube-t035"
+family = "cube"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.35
+modulus = 2
+seed = 13001
+
+[[confirm]]
+id = "k-cube-t055"
+family = "cube"
+n = 420
+coord_dim = 3
+max_dim = 2
+tau = 0.55
+modulus = 2
+seed = 13001
+
+[[confirm]]
+id = "k-sphere-t035"
+family = "sphere"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.35
+modulus = 2
+seed = 13003
+
+[[confirm]]
+id = "k-sphere-t055"
+family = "sphere"
+n = 420
+coord_dim = 3
+max_dim = 2
+tau = 0.55
+modulus = 2
+seed = 13003
+
+[[confirm]]
+id = "k-clusters-t035"
+family = "clusters"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.35
+modulus = 2
+seed = 13005
+
+[[confirm]]
+id = "k-clusters-t055"
+family = "clusters"
+n = 420
+coord_dim = 3
+max_dim = 2
+tau = 0.55
+modulus = 5
+seed = 13005
+
+[[confirm]]
+id = "k-torus-t035"
+family = "torus"
+n = 600
+coord_dim = 3
+max_dim = 2
+tau = 0.35
+modulus = 2
+seed = 13007
+
+[[confirm]]
+id = "k-torus-t055"
+family = "torus"
+n = 420
+coord_dim = 3
+max_dim = 2
+tau = 0.55
+modulus = 2
+seed = 13007

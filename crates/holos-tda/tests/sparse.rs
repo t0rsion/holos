@@ -7,8 +7,8 @@ use std::process::Command;
 
 use holos_tda::oracle::rips_persistence_oracle_mod;
 use holos_tda::{
-    rips_persistence, rips_persistence_sparse, Bar, Diagram, DistanceMatrix, RipsParams,
-    SparseDistanceMatrix,
+    Bar, Diagram, DistanceMatrix, RipsParams, SparseDistanceMatrix, rips_persistence,
+    rips_persistence_sparse,
 };
 
 struct Rng(u64);

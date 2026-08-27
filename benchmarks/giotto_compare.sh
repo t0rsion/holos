@@ -29,9 +29,9 @@ usage() {
 Usage: giotto_compare.sh [-h]
 
 Compare holos against giotto-ph's ripser_parallel on identical seeded clouds
-at matched thread counts (wall time and diagram agreement), then compare
-the two products around edge collapse on one thresholded graph. Exit 0 if
-giotto-ph is not importable.
+at matched thread counts (wall time + diagram agreement), then compare the
+two products around edge collapse on one thresholded graph. Skips cleanly
+with exit 0 if giotto-ph is not importable.
 
 Environment:
   CARGO             cargo invocation (may carry a toolchain), default "cargo"

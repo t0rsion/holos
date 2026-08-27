@@ -6,7 +6,7 @@
 //! Equal bits is a stronger statement than equal numbers: it separates 0.0
 //! from -0.0 and admits no rounding.
 
-use holos_tda::{rips_persistence, DenseStorage, Diagram, DistanceMatrix, Engine, RipsParams};
+use holos_tda::{DenseStorage, Diagram, DistanceMatrix, Engine, RipsParams, rips_persistence};
 
 struct Rng(u64);
 

@@ -1,0 +1,33 @@
+[meta]
+version = 1
+date = "2026-08-25"
+
+[[screen]]
+id = "s-h1-c6-z2"
+dimension = 1
+components = 6
+modulus = 2
+
+[[screen]]
+id = "s-h2-c4-z3"
+dimension = 2
+components = 4
+modulus = 3
+
+[[confirm]]
+id = "c-h1-c12-z5"
+dimension = 1
+components = 12
+modulus = 5
+
+[[confirm]]
+id = "c-h2-c8-z3"
+dimension = 2
+components = 8
+modulus = 3
+
+[[confirm]]
+id = "c-h3-c6-z5"
+dimension = 3
+components = 6
+modulus = 5

@@ -3,7 +3,7 @@
 //! point clouds, at every dimension the rows reach.
 
 use holos_tda::{
-    rips_persistence, rips_persistence_sparse, DistanceMatrix, RipsParams, SparseDistanceMatrix,
+    DistanceMatrix, RipsParams, SparseDistanceMatrix, rips_persistence, rips_persistence_sparse,
 };
 
 struct Rng(u64);

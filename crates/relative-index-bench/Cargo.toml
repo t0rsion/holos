@@ -1,0 +1,9 @@
+[package]
+name = "relative-index-bench"
+version = "0.18.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+holos-tda = { path = "../holos-tda" }
+holos-tda-check = { path = "../holos-tda-check" }

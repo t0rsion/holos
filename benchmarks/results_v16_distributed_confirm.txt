@@ -1,0 +1,21 @@
+commit=66a51b030dcc53afaf601b4d179508d29afc256e
+corpus=v16_distributed_corpus.toml
+corpus_version=1
+corpus_sha256=5cb449e1457044d31939325817382a0587a96d54fbeca628bd3cf82c98446664
+set=confirm
+repetitions=5
+affinity=0-3,12-15
+cpu=13th Gen Intel(R) Core(TM) i9-13900KS
+platform=Linux-7.1.8-arch1-3-x86_64-with-glibc2.44
+python=3.14.7
+cargo=cargo 1.92.0 (344c4567c 2025-10-21)
+binary_sha256=e73fabfc2e69e98c73db94520aff884a045b35019f5a037b2d2ef41d00dc2be4
+source_dirty=no
+exact_decision=pass
+recovery_decision=pass
+bounded_memory_decision=pass
+compression_decision=pass
+
+format=holos-distributed-bench-v1 shards=6 gadgets=5 vertices=34 modulus=5 reps=5 shard_input_cells=168 shard_core_cells=108 shard_cancellations=30 total_shard_bytes=24978 peak_artifact_bytes=12818 object_bytes=71024 manifest_bytes=534 objects=12 clean_ns=896661 recovery_ns=275563 check_ns=822302 materialized_ns=68314 folds_reused=6 h1_bars=1
+format=holos-distributed-bench-v1 shards=12 gadgets=4 vertices=52 modulus=3 reps=5 shard_input_cells=288 shard_core_cells=192 shard_cancellations=48 total_shard_bytes=43188 peak_artifact_bytes=17790 object_bytes=163224 manifest_bytes=918 objects=24 clean_ns=2035894 recovery_ns=407876 check_ns=1843633 materialized_ns=125265 folds_reused=12 h1_bars=1
+format=holos-distributed-bench-v1 shards=16 gadgets=4 vertices=68 modulus=2 reps=5 shard_input_cells=384 shard_core_cells=256 shard_cancellations=64 total_shard_bytes=57584 peak_artifact_bytes=22462 object_bytes=255408 manifest_bytes=1174 objects=32 clean_ns=3286960 recovery_ns=561933 check_ns=2872498 materialized_ns=181427 folds_reused=16 h1_bars=1

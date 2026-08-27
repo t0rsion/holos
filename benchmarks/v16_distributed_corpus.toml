@@ -1,0 +1,33 @@
+[meta]
+version = 1
+date = "2026-08-25"
+
+[[screen]]
+id = "s-four-z2"
+shards = 4
+gadgets = 4
+modulus = 2
+
+[[screen]]
+id = "s-eight-z3"
+shards = 8
+gadgets = 3
+modulus = 3
+
+[[confirm]]
+id = "c-six-z5"
+shards = 6
+gadgets = 5
+modulus = 5
+
+[[confirm]]
+id = "c-twelve-z3"
+shards = 12
+gadgets = 4
+modulus = 3
+
+[[confirm]]
+id = "c-sixteen-z2"
+shards = 16
+gadgets = 4
+modulus = 2

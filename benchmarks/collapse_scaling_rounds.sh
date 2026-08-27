@@ -13,7 +13,8 @@
 #   none    no collapse
 # That is T + 2 configurations: four on the headline grid, six on the
 # strong-scaling probes. Their diagrams must all be identical before any
-# timing counts. The driver checks that and exits nonzero on a mismatch.
+# timing counts. The driver checks that itself, exactly, and exits nonzero on
+# a mismatch.
 #
 # Peak RSS needs one process per pipeline, because the driver's own VmHWM
 # covers every configuration before it. Two extra single-repetition runs,

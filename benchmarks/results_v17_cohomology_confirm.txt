@@ -1,0 +1,21 @@
+commit=e091d47369393c9c1a23c89eed61b870a224fc81
+corpus=v17_cohomology_corpus.toml
+corpus_version=1
+corpus_sha256=7592b08abdaf138ed759d4d0d57b3b719b453bb1f6e6c3cc8dde920f0a01c826
+set=confirm
+repetitions=5
+affinity=0-3,12-15
+cpu=13th Gen Intel(R) Core(TM) i9-13900KS
+platform=Linux-7.1.8-arch1-3-x86_64-with-glibc2.44
+python=3.14.7
+cargo=cargo 1.92.0 (344c4567c 2025-10-21)
+binary_sha256=37a1a20b815c754853a6ac710a0d17201c7fe12f8ca957f2ea631fcebc4cab2e
+source_dirty=no
+rank_decision=pass
+event_decision=pass
+intervention_decision=pass
+proof_size_decision=pass
+
+format=holos-cohomology-bench-v1 dimension=1 modulus=5 vertices=6 active_edges=4 candidates=2 reps=5 rank=1 filled_rank=0 relation_rank=0 identity_isomorphism=true threshold_events=1 event_before_rank=1 event_after_rank=0 persistence_rank=1 intervention_status=optimal edits=1 subsets_examined=2 proof_bytes=273 cohomology_ns=1890 relation_ns=2450 kinetic_ns=28128 intervention_ns=13536 checker_ns=8032 persistence_ns=643
+format=holos-cohomology-bench-v1 dimension=2 modulus=2 vertices=8 active_edges=12 candidates=2 reps=5 rank=1 filled_rank=0 relation_rank=0 identity_isomorphism=true threshold_events=1 event_before_rank=1 event_after_rank=0 persistence_rank=1 intervention_status=optimal edits=1 subsets_examined=2 proof_bytes=401 cohomology_ns=6324 relation_ns=7088 kinetic_ns=112985 intervention_ns=41107 checker_ns=28767 persistence_ns=4694
+format=holos-cohomology-bench-v1 dimension=3 modulus=5 vertices=10 active_edges=24 candidates=2 reps=5 rank=1 filled_rank=0 relation_rank=0 identity_isomorphism=true threshold_events=1 event_before_rank=1 event_after_rank=0 persistence_rank=1 intervention_status=optimal edits=1 subsets_examined=2 proof_bytes=593 cohomology_ns=29806 relation_ns=31736 kinetic_ns=503302 intervention_ns=197174 checker_ns=163536 persistence_ns=32390

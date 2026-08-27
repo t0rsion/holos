@@ -31,12 +31,13 @@ pub(crate) struct Entry {
 ///
 /// The key is the complement of the diameter bits over the payload. Every
 /// diameter is a maximum of validated distances, so it is not NaN, not
-/// negative, and has no negative zero. On those values the IEEE bit pattern
-/// read as `u64` orders as `total_cmp` does. Complementing it puts the
-/// largest diameter first, so one comparison is one integer compare.
-/// `Coeffs::pack` debug-asserts the invariant, `bits_order_matches_total_cmp`
-/// pins it, and `bit_keys::heap_traces_agree_under_both_comparators` traces
-/// cancellation against the field comparator the key replaced.
+/// negative, and has no negative zero; on those values the IEEE bit pattern
+/// read as `u64` orders as `total_cmp` does, and complementing it puts the
+/// largest diameter first. That makes one comparison one integer compare
+/// instead of a compare of two fields. `Coeffs::pack` debug-asserts the
+/// invariant, `bits_order_matches_total_cmp` pins it, and
+/// `bit_keys::the_key_order_matches_the_old_comparator` traces the whole
+/// cancellation against the field comparator it replaced.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct HeapEntry(u128);
 
@@ -49,7 +50,7 @@ impl HeapEntry {
         HeapEntry(u128::from(!entry.diameter.to_bits()) << 64 | u128::from(entry.payload))
     }
 
-    /// The [`Entry`] this key encodes. The key is a bijection.
+    /// The entry the key holds. The key is a bijection, so this is exact.
     #[inline]
     pub(crate) fn entry(self) -> Entry {
         Entry {
@@ -79,8 +80,9 @@ impl PartialOrd for HeapEntry {
 
 /// Untimed comparison counter for the working-column heap.
 ///
-/// Only a test build has it. In a non-test build `note_comparison` is empty.
-/// The count is thread-local, because the test binary runs tests on several
+/// Only a test build has it. Everywhere else `note_comparison` is empty, so
+/// the shipped comparator carries no counter code and no counter state. The
+/// count is thread-local, because the test binary runs tests on several
 /// threads at once.
 #[cfg(test)]
 pub(crate) mod counters {
@@ -156,11 +158,7 @@ pub(crate) trait Coeffs {
     #[inline]
     fn coeff(&self, e: Entry) -> u64 {
         let mask = (1u64 << self.coeff_bits()) - 1;
-        if mask == 0 {
-            1
-        } else {
-            e.payload & mask
-        }
+        if mask == 0 { 1 } else { e.payload & mask }
     }
 
     #[inline]
@@ -174,8 +172,9 @@ pub(crate) trait Coeffs {
     /// Return (-1)^k as a field element (ripser's `k & 1 ? p - 1 : 1`).
     fn sign(&self, k: usize) -> u64;
     fn mul(&self, a: u64, b: u64) -> u64;
-    /// Return `a` times (-1)^k. One operand is 1 or p - 1, so no division is
-    /// needed. `a` must be below p.
+    /// Return `a` times (-1)^k, which is [`Coeffs::mul`] of [`Coeffs::sign`]
+    /// and `a`. One operand is 1 or p - 1, so no division is needed. `a` must
+    /// be below p.
     fn mul_sign(&self, k: usize, a: u64) -> u64;
     fn neg(&self, a: u64) -> u64;
     /// Return ripser's reduction factor, -(pivot / other) in the field.
@@ -250,11 +249,7 @@ impl Coeffs for Fp {
         self.coeff_bits
     }
     fn sign(&self, k: usize) -> u64 {
-        if k & 1 == 1 {
-            self.p - 1
-        } else {
-            1
-        }
+        if k & 1 == 1 { self.p - 1 } else { 1 }
     }
     fn mul(&self, a: u64, b: u64) -> u64 {
         a * b % self.p
@@ -271,11 +266,7 @@ impl Coeffs for Fp {
         // Subtraction alone, because `a` is below p. The general `mul`
         // divides, and the reduction calls this on every cofacet it pushes.
         debug_assert!(a < self.p);
-        if a == 0 {
-            0
-        } else {
-            self.p - a
-        }
+        if a == 0 { 0 } else { self.p - a }
     }
     fn factor(&self, pivot: u64, other: u64) -> u64 {
         (self.p - pivot * self.inv[other as usize] % self.p) % self.p
@@ -327,7 +318,7 @@ mod tests {
     // The heap comparator reads diameters as bits. That is exact only for
     // the values the engine can produce: not NaN, not negative, and with no
     // negative zero. `DistanceMatrix` validates its input against those
-    // rules and normalizes -0.0. A diameter is a maximum of such values.
+    // rules and normalizes -0.0, and a diameter is a maximum of such values.
     #[test]
     fn bits_order_matches_total_cmp() {
         let values = [
@@ -355,6 +346,8 @@ mod tests {
         }
     }
 
+    // The heap pops the smallest entry, which is the largest diameter and
+    // then the smallest payload.
     #[test]
     fn heap_entry_orders_by_diameter_then_payload() {
         let mk = |diameter: f64, payload: u64| HeapEntry::new(Entry { diameter, payload });

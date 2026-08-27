@@ -1,0 +1,22 @@
+commit=655679f8e93352bd0a47148944ae101853ef367b
+corpus=v18_relative_index_corpus.toml
+corpus_version=1
+corpus_sha256=edf9f1725c91970e31446d0ca8218ee7d77b89173f5372575b94af1943b8db40
+set=confirm
+repetitions=5
+affinity=0-3,12-15
+cpu=13th Gen Intel(R) Core(TM) i9-13900KS
+platform=Linux-7.1.9-arch1-2-x86_64-with-glibc2.44
+python=3.14.7
+cargo=cargo 1.92.0 (344c4567c 2025-10-21)
+binary_sha256=0cc9ee32f4c00d3ea6657f381da4456d95c1ea17a8682ac5ec8957c2042b8cb1
+source_dirty=no
+exact_decision=pass
+locality_decision=pass
+compression_decision=pass
+update_decision=pass
+proof_decision=pass
+
+format=holos-relative-index-bench-v1 petals=48 vertices=52 edges=100 modulus=5 reps=5 nodes=55 leaves=48 separators=7 relative_input_cells=654 relative_core_cells=558 relative_cancellations=48 relative_compile_ns=8099140 materialized_compile_ns=8190427 relative_update_ns=256875 materialized_update_ns=419414 nodes_shared=51 relative_nodes_rebuilt=1 relative_nodes_composed=3 relative_snapshot_bytes=125752 materialized_snapshot_bytes=44171 relative_delta_bytes=35188 materialized_delta_bytes=14680 relative_verify_ns=2544567 materialized_verify_ns=882097 bars=53
+format=holos-relative-index-bench-v1 petals=72 vertices=76 edges=148 modulus=3 reps=5 nodes=79 leaves=72 separators=7 relative_input_cells=966 relative_core_cells=822 relative_cancellations=72 relative_compile_ns=26327221 materialized_compile_ns=26949244 relative_update_ns=416234 materialized_update_ns=676364 nodes_shared=75 relative_nodes_rebuilt=1 relative_nodes_composed=3 relative_snapshot_bytes=184936 materialized_snapshot_bytes=64979 relative_delta_bytes=50164 materialized_delta_bytes=21136 relative_verify_ns=3729480 materialized_verify_ns=1513952 bars=77
+format=holos-relative-index-bench-v1 petals=96 vertices=100 edges=196 modulus=2 reps=5 nodes=103 leaves=96 separators=7 relative_input_cells=1278 relative_core_cells=1086 relative_cancellations=96 relative_compile_ns=64554880 materialized_compile_ns=65647755 relative_update_ns=603997 materialized_update_ns=934983 nodes_shared=99 relative_nodes_rebuilt=1 relative_nodes_composed=3 relative_snapshot_bytes=244120 materialized_snapshot_bytes=85787 relative_delta_bytes=65140 materialized_delta_bytes=27592 relative_verify_ns=4759916 materialized_verify_ns=2271970 bars=101
