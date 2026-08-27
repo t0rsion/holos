@@ -14,8 +14,9 @@
 use rayon::prelude::*;
 
 use super::{
-    build_pool, finish, for_each_induced_edge, mark_dirty, prepare, test_edge, tombstone,
-    CollapseStats, CollapseTimings, CollapsedRips, Execution, Prepared, RemovalStep, Scratch,
+    build_pool, finish, for_each_induced_edge, mark_dirty, prepare, test_edge, tombstone, AdjEntry,
+    CollapseStats, CollapseTimings, CollapsedRips, EdgeRec, Execution, Prepared, RemovalStep,
+    Scratch,
 };
 use crate::distances::Distances;
 use crate::{DistanceMatrix, Result, SparseDistanceMatrix};
@@ -48,6 +49,111 @@ pub fn collapse_sparse_rounds_parallel(
 
 /// The piecewise witness segments of one removable edge.
 type Witnesses = Vec<(f64, usize)>;
+type TestResult = (Option<Witnesses>, usize);
+
+fn collect_due(edges: &[EdgeRec], dirty: &mut [bool], test_all: bool, due: &mut Vec<usize>) {
+    due.clear();
+    for (index, edge) in edges.iter().enumerate() {
+        if edge.alive && (test_all || dirty[index]) {
+            dirty[index] = false;
+            due.push(index);
+        }
+    }
+}
+
+fn test_due_edges(
+    edges: &[EdgeRec],
+    adjacency: &[Vec<AdjEntry>],
+    due: &[usize],
+    terminal: f64,
+    pool: Option<&rayon::ThreadPool>,
+    scratch: &mut Scratch,
+) -> Vec<TestResult> {
+    match pool {
+        Some(pool) => pool.install(|| {
+            due.par_iter()
+                .map_init(Scratch::default, |local, &index| {
+                    let edge = &edges[index];
+                    let witnesses =
+                        test_edge(adjacency, edge.u, edge.v, edge.value, terminal, local);
+                    (witnesses, local.cands.len())
+                })
+                .collect()
+        }),
+        None => due
+            .iter()
+            .map(|&index| {
+                let edge = &edges[index];
+                let witnesses = test_edge(adjacency, edge.u, edge.v, edge.value, terminal, scratch);
+                (witnesses, scratch.cands.len())
+            })
+            .collect(),
+    }
+}
+
+fn select_batch(
+    edges: &[EdgeRec],
+    adjacency: &[Vec<AdjEntry>],
+    due: &[usize],
+    results: &[TestResult],
+    blocked: &mut [usize],
+    round: usize,
+    scratch: &mut Scratch,
+) -> Vec<usize> {
+    let mut selected = Vec::new();
+    for (position, &index) in due.iter().enumerate() {
+        if results[position].0.is_none() || blocked[index] == round {
+            continue;
+        }
+        selected.push(position);
+        let edge = &edges[index];
+        let walked =
+            for_each_induced_edge(adjacency, edge.u, edge.v, scratch, None, |blocked_edge| {
+                blocked[blocked_edge] = round
+            });
+        debug_assert!(walked);
+    }
+    selected
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retire_batch(
+    edges: &mut [EdgeRec],
+    adjacency: &mut [Vec<AdjEntry>],
+    dirty: &mut [bool],
+    due: &[usize],
+    selected: &[usize],
+    results: &mut [TestResult],
+    round: usize,
+    scratch: &mut Scratch,
+    stats: &mut CollapseStats,
+    steps: &mut Vec<RemovalStep>,
+) -> bool {
+    let mut test_all_next = false;
+    for &position in selected {
+        let index = due[position];
+        let edge = &edges[index];
+        let (u, v, value) = (edge.u, edge.v, edge.value);
+        let witnesses = results[position]
+            .0
+            .take()
+            .expect("selected edge has witnesses");
+        stats.witness_segments += witnesses.len();
+        steps.push(RemovalStep {
+            u,
+            v,
+            value,
+            epoch: round,
+            witnesses,
+        });
+        edges[index].alive = false;
+        if !mark_dirty(adjacency, dirty, u, v, scratch) {
+            test_all_next = true;
+        }
+        tombstone(adjacency, u, v);
+    }
+    test_all_next
+}
 
 /// Build an owned pool for the call (none for one worker) and run the
 /// rounds schedule on it.
@@ -102,33 +208,9 @@ pub(crate) fn collapse_rounds_in<D: Distances + Sync>(
         // priority order. Tests are read-only on the frozen graph, and
         // the results collect in due order, so every worker count
         // produces the same result set and the same counters.
-        due.clear();
-        for idx in 0..edges.len() {
-            if edges[idx].alive && (test_all || dirty[idx]) {
-                dirty[idx] = false;
-                due.push(idx);
-            }
-        }
+        collect_due(&edges, &mut dirty, test_all, &mut due);
         stats.edge_tests += due.len();
-        let mut results: Vec<(Option<Witnesses>, usize)> = match pool {
-            Some(pool) => pool.install(|| {
-                due.par_iter()
-                    .map_init(Scratch::default, |s, &idx| {
-                        let e = &edges[idx];
-                        let w = test_edge(&adj, e.u, e.v, e.value, run.terminal, s);
-                        (w, s.cands.len())
-                    })
-                    .collect()
-            }),
-            None => due
-                .iter()
-                .map(|&idx| {
-                    let e = &edges[idx];
-                    let w = test_edge(&adj, e.u, e.v, e.value, run.terminal, &mut scratch);
-                    (w, scratch.cands.len())
-                })
-                .collect(),
-        };
+        let mut results = test_due_edges(&edges, &adj, &due, run.terminal, pool, &mut scratch);
         for &(_, c) in &results {
             stats.max_common_neighborhood = stats.max_common_neighborhood.max(c);
         }
@@ -140,20 +222,15 @@ pub(crate) fn collapse_rounds_in<D: Distances + Sync>(
         // successful edge keeps nothing: its witnesses drop with
         // `results`, and the conflicting removal's dirty marking retests
         // it next round.
-        let mut selected: Vec<usize> = Vec::new();
-        for (k, &idx) in due.iter().enumerate() {
-            if results[k].0.is_none() || blocked[idx] == round {
-                continue;
-            }
-            selected.push(k);
-            let (u, v) = (edges[idx].u, edges[idx].v);
-            // Exact, so no size limit: conflict blocking must see every
-            // induced edge, or one round could commit two conflicting
-            // removals.
-            let walked =
-                for_each_induced_edge(&adj, u, v, &mut scratch, None, |e| blocked[e] = round);
-            debug_assert!(walked);
-        }
+        let selected = select_batch(
+            &edges,
+            &adj,
+            &due,
+            &results,
+            &mut blocked,
+            round,
+            &mut scratch,
+        );
         if selected.is_empty() {
             break;
         }
@@ -161,26 +238,18 @@ pub(crate) fn collapse_rounds_in<D: Distances + Sync>(
         // Deletions run one at a time in priority order. Each edge marks
         // dirty before its own tombstone so S still sees it: the same
         // conservative cover as the serial schedule.
-        let mut test_all_next = false;
-        for &k in &selected {
-            let idx = due[k];
-            let (u, v, value) = (edges[idx].u, edges[idx].v, edges[idx].value);
-            let witnesses = results[k].0.take().expect("selected edge has witnesses");
-            stats.witness_segments += witnesses.len();
-            steps.push(RemovalStep {
-                u,
-                v,
-                value,
-                epoch: round,
-                witnesses,
-            });
-            edges[idx].alive = false;
-            if !mark_dirty(&adj, &mut dirty, u, v, &mut scratch) {
-                test_all_next = true;
-            }
-            tombstone(&mut adj, u, v);
-        }
-        test_all = test_all_next;
+        test_all = retire_batch(
+            &mut edges,
+            &mut adj,
+            &mut dirty,
+            &due,
+            &selected,
+            &mut results,
+            round,
+            &mut scratch,
+            &mut stats,
+            &mut steps,
+        );
     }
 
     finish(
