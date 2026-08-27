@@ -510,68 +510,16 @@ impl PersistenceProgram {
         let old_graph = self.graph.clone();
         let topology_events = program_topology_events(self, updated);
         if !topology_events.is_empty() {
-            let replacement = Self::compile(updated, &self.params, self.limits)?;
-            let result = replacement.result.clone();
-            let continuation = class_continuation(&old.spaces, &result.spaces);
-            let correspondence = if correspondence_mode == CorrespondenceMode::Exact {
-                crate::class_correspondences(
-                    &old_graph,
-                    &old.spaces,
-                    updated,
-                    &result.spaces,
-                    self.params.modulus,
-                )?
-            } else {
-                Vec::new()
-            };
-            let work = ProgramWork {
-                edges_checked: self.topology.len().max(replacement.topology.len()),
-                h0_edges_scanned: replacement
-                    .graph
-                    .edges()
-                    .filter(|&(_, _, value)| {
-                        value <= replacement.params.threshold.unwrap_or(f64::INFINITY)
-                    })
-                    .count(),
-                guards_checked: 0,
-                atoms_touched: replacement.states.len(),
-                atoms_reused: 0,
-                atoms_repaired: 0,
-                atoms_rebuilt: replacement.states.len(),
-                reduction_columns_reused: 0,
-                reduction_columns_reduced: replacement
-                    .states
-                    .iter()
-                    .map(|state| {
-                        state.artifact.reduction_certificate().edge_columns().len()
-                            + state
-                                .artifact
-                                .reduction_certificate()
-                                .triangle_columns()
-                                .len()
-                    })
-                    .sum(),
-                reduction_column_additions: 0,
-            };
-            *self = replacement;
-            return Ok(ProgramUpdate {
-                result,
-                mode: ProgramUpdateMode::Recompiled,
-                events: topology_events,
-                continuation,
-                correspondence,
-                work,
-            });
+            return self.recompile_update(
+                updated,
+                old,
+                old_graph,
+                correspondence_mode,
+                topology_events,
+            );
         }
 
-        let changed: BTreeSet<_> = self
-            .topology
-            .iter()
-            .copied()
-            .filter(|edge| {
-                self.graph.get(edge.u, edge.v).to_bits() != updated.get(edge.u, edge.v).to_bits()
-            })
-            .collect();
+        let changed = changed_edges(self, updated);
         let mut work = ProgramWork {
             edges_checked: self.topology.len(),
             ..ProgramWork::default()
@@ -581,85 +529,59 @@ impl PersistenceProgram {
             if !state.edges.iter().any(|edge| changed.contains(edge)) {
                 continue;
             }
-            work.atoms_touched += 1;
-            let local = local_matrix(&state.vertices, &state.edges, updated)?;
-            let violations = state.region.violations(&local);
-            work.guards_checked += state.region.guards().len();
-            let reused = if violations.is_empty() {
-                let evaluation = state.region.evaluate(&local)?;
-                reweight_explained(&local, &state.explained, &evaluation, self.params.modulus)?
-            } else {
-                for violation in &violations {
-                    events.push(ProgramEvent {
-                        kind: match violation.kind() {
-                            RegionViolationKind::VertexSetChanged => {
-                                ProgramEventKind::VertexSetChanged
-                            }
-                            RegionViolationKind::EdgeSetChanged => ProgramEventKind::EdgeSetChanged,
-                            RegionViolationKind::ThresholdCrossing => {
-                                ProgramEventKind::ThresholdCrossing
-                            }
-                            RegionViolationKind::GuardFailed => ProgramEventKind::GuardFailed,
-                        },
-                        atom: Some(state.info_index),
-                        edge: violation.first().and_then(simplex_edge),
-                        guard: violation
-                            .guard_index()
-                            .map(|index| state.region.guards()[index].kind()),
-                    });
-                }
-                None
-            };
-            if let Some(explained) = reused {
-                state.artifact = state
-                    .artifact
-                    .rebind(
-                        &state.certified_graph,
-                        &local,
-                        explained.clone(),
-                        self.limits,
-                    )
-                    .map_err(|error| Error::InvalidInput(error.to_string()))?;
-                state.certified_graph = local;
-                state.explained = explained;
-                work.atoms_reused += 1;
-            } else {
-                let repair = state
-                    .artifact
-                    .repair(&state.certified_graph, &local, self.limits)
-                    .map_err(|error| Error::InvalidInput(error.to_string()))?;
-                let repair_mode = repair.mode();
-                let repair_work = repair.work();
-                let artifact = repair.into_artifact();
-                let region = artifact
-                    .reduction_certificate()
-                    .compile_region(&local, self.limits)?;
-                state.explained = artifact.explained().clone();
-                state.artifact = artifact;
-                state.certified_graph = local;
-                state.region = region;
-                work.reduction_columns_reused += repair_work.columns_reused();
-                work.reduction_columns_reduced += repair_work.columns_reduced();
-                work.reduction_column_additions += repair_work.column_additions;
-                let event_kind = if repair_mode == crate::ReductionRepairMode::SuffixRepaired {
-                    work.atoms_repaired += 1;
-                    ProgramEventKind::ReductionSuffixRepaired
-                } else {
-                    work.atoms_rebuilt += 1;
-                    ProgramEventKind::AtomRebuilt
-                };
-                events.push(ProgramEvent {
-                    kind: event_kind,
-                    atom: Some(state.info_index),
-                    edge: state
-                        .edges
-                        .iter()
-                        .find(|edge| changed.contains(edge))
-                        .copied(),
-                    guard: None,
-                });
-            }
+            update_atom_state(
+                state,
+                updated,
+                &changed,
+                self.params.modulus,
+                self.limits,
+                &mut work,
+                &mut events,
+            )?;
         }
+        self.finish_weight_update(updated, old, old_graph, correspondence_mode, events, work)
+    }
+
+    fn recompile_update(
+        &mut self,
+        updated: &SparseDistanceMatrix,
+        old: ExplainedDiagram,
+        old_graph: SparseDistanceMatrix,
+        correspondence_mode: CorrespondenceMode,
+        events: Vec<ProgramEvent>,
+    ) -> Result<ProgramUpdate> {
+        let replacement = Self::compile(updated, &self.params, self.limits)?;
+        let result = replacement.result.clone();
+        let correspondence = update_correspondence(
+            correspondence_mode,
+            &old_graph,
+            &old.spaces,
+            updated,
+            &result.spaces,
+            self.params.modulus,
+        )?;
+        let work = recompile_work(self.topology.len(), &replacement);
+        let continuation = class_continuation(&old.spaces, &result.spaces);
+        *self = replacement;
+        Ok(ProgramUpdate {
+            result,
+            mode: ProgramUpdateMode::Recompiled,
+            events,
+            continuation,
+            correspondence,
+            work,
+        })
+    }
+
+    fn finish_weight_update(
+        &mut self,
+        updated: &SparseDistanceMatrix,
+        old: ExplainedDiagram,
+        old_graph: SparseDistanceMatrix,
+        correspondence_mode: CorrespondenceMode,
+        events: Vec<ProgramEvent>,
+        mut work: ProgramWork,
+    ) -> Result<ProgramUpdate> {
         self.graph = updated.clone();
         self.result = compose_result(updated, &self.params, &self.states)?;
         self.summary.guards = self
@@ -672,25 +594,17 @@ impl PersistenceProgram {
         self.h0_essential = h0_essential;
         work.h0_edges_scanned = scanned;
         let continuation = class_continuation(&old.spaces, &self.result.spaces);
-        let correspondence = if correspondence_mode == CorrespondenceMode::Exact {
-            crate::class_correspondences(
-                &old_graph,
-                &old.spaces,
-                updated,
-                &self.result.spaces,
-                self.params.modulus,
-            )?
-        } else {
-            Vec::new()
-        };
-        let mode = if work.atoms_rebuilt == 0 && work.atoms_repaired == 0 {
-            ProgramUpdateMode::Reused
-        } else {
-            ProgramUpdateMode::Repaired
-        };
+        let correspondence = update_correspondence(
+            correspondence_mode,
+            &old_graph,
+            &old.spaces,
+            updated,
+            &self.result.spaces,
+            self.params.modulus,
+        )?;
         Ok(ProgramUpdate {
             result: self.result.clone(),
-            mode,
+            mode: update_mode(&work),
             events,
             continuation,
             correspondence,
@@ -796,14 +710,7 @@ impl PersistenceProgram {
                 },
             ));
         }
-        let changed: BTreeSet<_> = self
-            .topology
-            .iter()
-            .copied()
-            .filter(|edge| {
-                self.graph.get(edge.u, edge.v).to_bits() != updated.get(edge.u, edge.v).to_bits()
-            })
-            .collect();
+        let changed = changed_edges(self, updated);
         let mut events = Vec::new();
         let mut work = ProgramWork {
             edges_checked: self.topology.len(),
@@ -813,62 +720,20 @@ impl PersistenceProgram {
             if !state.edges.iter().any(|edge| changed.contains(edge)) {
                 continue;
             }
-            work.atoms_touched += 1;
-            work.guards_checked += state.region.guards().len();
-            let local = local_matrix(&state.vertices, &state.edges, updated)?;
-            let violations = state.region.violations(&local);
-            let reusable = if violations.is_empty() {
-                let evaluation = state.region.evaluate(&local)?;
-                reweight_explained(&local, &state.explained, &evaluation, self.params.modulus)?
-                    .is_some()
-            } else {
-                for violation in &violations {
-                    events.push(ProgramEvent {
-                        kind: match violation.kind() {
-                            RegionViolationKind::VertexSetChanged => {
-                                ProgramEventKind::VertexSetChanged
-                            }
-                            RegionViolationKind::EdgeSetChanged => ProgramEventKind::EdgeSetChanged,
-                            RegionViolationKind::ThresholdCrossing => {
-                                ProgramEventKind::ThresholdCrossing
-                            }
-                            RegionViolationKind::GuardFailed => ProgramEventKind::GuardFailed,
-                        },
-                        atom: Some(state.info_index),
-                        edge: violation.first().and_then(simplex_edge),
-                        guard: violation
-                            .guard_index()
-                            .map(|index| state.region.guards()[index].kind()),
-                    });
-                }
-                false
-            };
-            if reusable {
-                work.atoms_reused += 1;
-            } else {
-                work.atoms_rebuilt += 1;
-                events.push(ProgramEvent {
-                    kind: ProgramEventKind::AtomRebuilt,
-                    atom: Some(state.info_index),
-                    edge: state
-                        .edges
-                        .iter()
-                        .find(|edge| changed.contains(edge))
-                        .copied(),
-                    guard: None,
-                });
-            }
+            preview_atom_state(
+                state,
+                updated,
+                &changed,
+                self.params.modulus,
+                &mut work,
+                &mut events,
+            )?;
         }
         work.h0_edges_scanned = updated
             .edges()
             .filter(|&(_, _, value)| value <= self.params.threshold.unwrap_or(f64::INFINITY))
             .count();
-        let mode = if work.atoms_rebuilt == 0 && work.atoms_repaired == 0 {
-            ProgramUpdateMode::Reused
-        } else {
-            ProgramUpdateMode::Repaired
-        };
-        Ok((mode, events, work))
+        Ok((update_mode(&work), events, work))
     }
 
     pub(crate) fn from_verified_parts(
@@ -948,6 +813,219 @@ impl PersistenceProgram {
     pub(crate) fn current_graph(&self) -> &SparseDistanceMatrix {
         &self.graph
     }
+}
+
+fn changed_edges(
+    program: &PersistenceProgram,
+    updated: &SparseDistanceMatrix,
+) -> BTreeSet<EdgeKey> {
+    program
+        .topology
+        .iter()
+        .copied()
+        .filter(|edge| {
+            program.graph.get(edge.u, edge.v).to_bits() != updated.get(edge.u, edge.v).to_bits()
+        })
+        .collect()
+}
+
+fn update_correspondence(
+    mode: CorrespondenceMode,
+    old_graph: &SparseDistanceMatrix,
+    old_spaces: &[PersistentClassSpace],
+    updated: &SparseDistanceMatrix,
+    new_spaces: &[PersistentClassSpace],
+    modulus: u32,
+) -> Result<Vec<ClassCorrespondence>> {
+    if mode == CorrespondenceMode::Omit {
+        return Ok(Vec::new());
+    }
+    crate::class_correspondences(old_graph, old_spaces, updated, new_spaces, modulus)
+}
+
+fn recompile_work(old_edges: usize, replacement: &PersistenceProgram) -> ProgramWork {
+    let threshold = replacement.params.threshold.unwrap_or(f64::INFINITY);
+    ProgramWork {
+        edges_checked: old_edges.max(replacement.topology.len()),
+        h0_edges_scanned: replacement
+            .graph
+            .edges()
+            .filter(|&(_, _, value)| value <= threshold)
+            .count(),
+        atoms_touched: replacement.states.len(),
+        atoms_rebuilt: replacement.states.len(),
+        reduction_columns_reduced: replacement
+            .states
+            .iter()
+            .map(|state| {
+                let certificate = state.artifact.reduction_certificate();
+                certificate.edge_columns().len() + certificate.triangle_columns().len()
+            })
+            .sum(),
+        ..ProgramWork::default()
+    }
+}
+
+fn update_mode(work: &ProgramWork) -> ProgramUpdateMode {
+    if work.atoms_rebuilt == 0 && work.atoms_repaired == 0 {
+        ProgramUpdateMode::Reused
+    } else {
+        ProgramUpdateMode::Repaired
+    }
+}
+
+fn violation_event(state: &ProgramAtomState, violation: &crate::RegionViolation) -> ProgramEvent {
+    let kind = match violation.kind() {
+        RegionViolationKind::VertexSetChanged => ProgramEventKind::VertexSetChanged,
+        RegionViolationKind::EdgeSetChanged => ProgramEventKind::EdgeSetChanged,
+        RegionViolationKind::ThresholdCrossing => ProgramEventKind::ThresholdCrossing,
+        RegionViolationKind::GuardFailed => ProgramEventKind::GuardFailed,
+    };
+    ProgramEvent {
+        kind,
+        atom: Some(state.info_index),
+        edge: violation.first().and_then(simplex_edge),
+        guard: violation
+            .guard_index()
+            .map(|index| state.region.guards()[index].kind()),
+    }
+}
+
+fn reusable_explanation(
+    state: &ProgramAtomState,
+    local: &SparseDistanceMatrix,
+    modulus: u32,
+    events: &mut Vec<ProgramEvent>,
+) -> Result<Option<ExplainedDiagram>> {
+    let violations = state.region.violations(local);
+    if !violations.is_empty() {
+        events.extend(
+            violations
+                .iter()
+                .map(|violation| violation_event(state, violation)),
+        );
+        return Ok(None);
+    }
+    let evaluation = state.region.evaluate(local)?;
+    reweight_explained(local, &state.explained, &evaluation, modulus)
+}
+
+fn update_atom_state(
+    state: &mut ProgramAtomState,
+    updated: &SparseDistanceMatrix,
+    changed: &BTreeSet<EdgeKey>,
+    modulus: u32,
+    limits: CertificateLimits,
+    work: &mut ProgramWork,
+    events: &mut Vec<ProgramEvent>,
+) -> Result<()> {
+    work.atoms_touched += 1;
+    work.guards_checked += state.region.guards().len();
+    let local = local_matrix(&state.vertices, &state.edges, updated)?;
+    if let Some(explained) = reusable_explanation(state, &local, modulus, events)? {
+        install_reused_atom(state, local, explained, limits)?;
+        work.atoms_reused += 1;
+        return Ok(());
+    }
+    repair_atom_state(state, local, changed, limits, work, events)
+}
+
+fn install_reused_atom(
+    state: &mut ProgramAtomState,
+    local: SparseDistanceMatrix,
+    explained: ExplainedDiagram,
+    limits: CertificateLimits,
+) -> Result<()> {
+    state.artifact = state
+        .artifact
+        .rebind(&state.certified_graph, &local, explained.clone(), limits)
+        .map_err(|error| Error::InvalidInput(error.to_string()))?;
+    state.certified_graph = local;
+    state.explained = explained;
+    Ok(())
+}
+
+fn repair_atom_state(
+    state: &mut ProgramAtomState,
+    local: SparseDistanceMatrix,
+    changed: &BTreeSet<EdgeKey>,
+    limits: CertificateLimits,
+    work: &mut ProgramWork,
+    events: &mut Vec<ProgramEvent>,
+) -> Result<()> {
+    let repair = state
+        .artifact
+        .repair(&state.certified_graph, &local, limits)
+        .map_err(|error| Error::InvalidInput(error.to_string()))?;
+    let repair_mode = repair.mode();
+    let repair_work = repair.work();
+    let artifact = repair.into_artifact();
+    let region = artifact
+        .reduction_certificate()
+        .compile_region(&local, limits)?;
+    state.explained = artifact.explained().clone();
+    state.artifact = artifact;
+    state.certified_graph = local;
+    state.region = region;
+    work.reduction_columns_reused += repair_work.columns_reused();
+    work.reduction_columns_reduced += repair_work.columns_reduced();
+    work.reduction_column_additions += repair_work.column_additions;
+    events.push(repair_event(state, changed, repair_mode, work));
+    Ok(())
+}
+
+fn repair_event(
+    state: &ProgramAtomState,
+    changed: &BTreeSet<EdgeKey>,
+    repair_mode: crate::ReductionRepairMode,
+    work: &mut ProgramWork,
+) -> ProgramEvent {
+    let kind = if repair_mode == crate::ReductionRepairMode::SuffixRepaired {
+        work.atoms_repaired += 1;
+        ProgramEventKind::ReductionSuffixRepaired
+    } else {
+        work.atoms_rebuilt += 1;
+        ProgramEventKind::AtomRebuilt
+    };
+    ProgramEvent {
+        kind,
+        atom: Some(state.info_index),
+        edge: state
+            .edges
+            .iter()
+            .find(|edge| changed.contains(edge))
+            .copied(),
+        guard: None,
+    }
+}
+
+fn preview_atom_state(
+    state: &ProgramAtomState,
+    updated: &SparseDistanceMatrix,
+    changed: &BTreeSet<EdgeKey>,
+    modulus: u32,
+    work: &mut ProgramWork,
+    events: &mut Vec<ProgramEvent>,
+) -> Result<()> {
+    work.atoms_touched += 1;
+    work.guards_checked += state.region.guards().len();
+    let local = local_matrix(&state.vertices, &state.edges, updated)?;
+    if reusable_explanation(state, &local, modulus, events)?.is_some() {
+        work.atoms_reused += 1;
+    } else {
+        work.atoms_rebuilt += 1;
+        events.push(ProgramEvent {
+            kind: ProgramEventKind::AtomRebuilt,
+            atom: Some(state.info_index),
+            edge: state
+                .edges
+                .iter()
+                .find(|edge| changed.contains(edge))
+                .copied(),
+            guard: None,
+        });
+    }
+    Ok(())
 }
 
 fn compile_atoms(
@@ -1310,124 +1388,206 @@ pub(crate) fn class_continuation(
     old: &[PersistentClassSpace],
     new: &[PersistentClassSpace],
 ) -> Vec<ClassContinuation> {
-    let mut old_terms: BTreeMap<Vec<CocycleTerm>, Vec<(usize, BasisClassId)>> = BTreeMap::new();
-    let mut new_terms: BTreeMap<Vec<CocycleTerm>, Vec<(usize, BasisClassId)>> = BTreeMap::new();
-    for (space, item) in old.iter().enumerate() {
-        for class in &item.basis {
-            old_terms
-                .entry(class.cocycle.terms.clone())
-                .or_default()
-                .push((space, class.id));
-        }
-    }
-    for (space, item) in new.iter().enumerate() {
-        for class in &item.basis {
-            new_terms
-                .entry(class.cocycle.terms.clone())
-                .or_default()
-                .push((space, class.id));
-        }
-    }
-    let mut adjacency = vec![BTreeSet::new(); old.len() + new.len()];
-    let mut transports = BTreeMap::<(usize, usize), Vec<BasisTransport>>::new();
-    for (terms, old_basis) in &old_terms {
-        let Some(new_basis) = new_terms.get(terms) else {
-            continue;
-        };
-        for &(old_space, old_id) in old_basis {
-            for &(new_space, new_id) in new_basis {
-                let new_node = old.len() + new_space;
-                adjacency[old_space].insert(new_node);
-                adjacency[new_node].insert(old_space);
-                transports
-                    .entry((old_space, new_space))
-                    .or_default()
-                    .push(BasisTransport {
-                        old: old_id,
-                        new: new_id,
-                        coefficient: 1,
-                    });
-            }
-        }
-    }
+    let old_terms = basis_terms(old);
+    let new_terms = basis_terms(new);
+    let (adjacency, transports) = continuation_graph(old.len(), new.len(), &old_terms, &new_terms);
     let mut seen = vec![false; adjacency.len()];
     let mut output = Vec::new();
     for start in 0..adjacency.len() {
         if seen[start] || adjacency[start].is_empty() {
             continue;
         }
-        let mut queue = VecDeque::from([start]);
-        seen[start] = true;
-        let mut old_nodes = Vec::new();
-        let mut new_nodes = Vec::new();
-        while let Some(node) = queue.pop_front() {
-            if node < old.len() {
-                old_nodes.push(node);
-            } else {
-                new_nodes.push(node - old.len());
-            }
-            for &next in &adjacency[node] {
-                if !seen[next] {
-                    seen[next] = true;
-                    queue.push_back(next);
-                }
-            }
-        }
-        old_nodes.sort_unstable();
-        new_nodes.sort_unstable();
-        let mut transport: Vec<BasisTransport> = Vec::new();
-        for &old_space in &old_nodes {
-            for &new_space in &new_nodes {
-                if let Some(terms) = transports.get(&(old_space, new_space)) {
-                    transport.extend(terms.iter().copied());
-                }
-            }
-        }
-        transport.sort_by_key(|term| (term.old, term.new));
-        transport.dedup();
-        let old_rank: usize = old_nodes.iter().map(|&index| old[index].basis.len()).sum();
-        let new_rank: usize = new_nodes.iter().map(|&index| new[index].basis.len()).sum();
-        let complete = transport.len() == old_rank && transport.len() == new_rank;
-        let kind = match (old_nodes.len(), new_nodes.len(), complete) {
-            (1, 1, true) => ContinuationKind::Isomorphism,
-            (1, many, true) if many > 1 => ContinuationKind::Split,
-            (many, 1, true) if many > 1 => ContinuationKind::Merge,
-            (many_old, many_new, true) if many_old > 1 && many_new > 1 => ContinuationKind::Mixing,
-            _ => ContinuationKind::Ambiguous,
-        };
-        output.push(ClassContinuation {
-            kind,
-            old_spaces: old_nodes.iter().map(|&index| old[index].id).collect(),
-            new_spaces: new_nodes.iter().map(|&index| new[index].id).collect(),
-            transport,
-        });
+        let (old_nodes, new_nodes) =
+            continuation_component(start, old.len(), &adjacency, &mut seen);
+        output.push(component_continuation(
+            old,
+            new,
+            &old_nodes,
+            &new_nodes,
+            &transports,
+        ));
     }
-    for (index, space) in old.iter().enumerate() {
-        if adjacency[index].is_empty() {
-            output.push(ClassContinuation {
-                kind: ContinuationKind::Death,
-                old_spaces: vec![space.id],
-                new_spaces: Vec::new(),
-                transport: Vec::new(),
-            });
-        }
-    }
-    for (index, space) in new.iter().enumerate() {
-        if adjacency[old.len() + index].is_empty() {
-            output.push(ClassContinuation {
-                kind: ContinuationKind::Birth,
-                old_spaces: Vec::new(),
-                new_spaces: vec![space.id],
-                transport: Vec::new(),
-            });
-        }
-    }
+    output.extend(unmatched_continuations(old, new, &adjacency));
     output.sort_by(|a, b| {
         a.old_spaces
             .cmp(&b.old_spaces)
             .then(a.new_spaces.cmp(&b.new_spaces))
     });
     output
+}
+
+type BasisTerms = BTreeMap<Vec<CocycleTerm>, Vec<(usize, BasisClassId)>>;
+type ContinuationTransports = BTreeMap<(usize, usize), Vec<BasisTransport>>;
+
+fn basis_terms(spaces: &[PersistentClassSpace]) -> BasisTerms {
+    let mut terms = BasisTerms::new();
+    for (space, item) in spaces.iter().enumerate() {
+        for class in &item.basis {
+            terms
+                .entry(class.cocycle.terms.clone())
+                .or_default()
+                .push((space, class.id));
+        }
+    }
+    terms
+}
+
+fn continuation_graph(
+    old_count: usize,
+    new_count: usize,
+    old_terms: &BasisTerms,
+    new_terms: &BasisTerms,
+) -> (Vec<BTreeSet<usize>>, ContinuationTransports) {
+    let mut adjacency = vec![BTreeSet::new(); old_count + new_count];
+    let mut transports = ContinuationTransports::new();
+    for (terms, old_basis) in old_terms {
+        let Some(new_basis) = new_terms.get(terms) else {
+            continue;
+        };
+        connect_matching_basis(
+            old_count,
+            old_basis,
+            new_basis,
+            &mut adjacency,
+            &mut transports,
+        );
+    }
+    (adjacency, transports)
+}
+
+fn connect_matching_basis(
+    old_count: usize,
+    old_basis: &[(usize, BasisClassId)],
+    new_basis: &[(usize, BasisClassId)],
+    adjacency: &mut [BTreeSet<usize>],
+    transports: &mut ContinuationTransports,
+) {
+    for &(old_space, old_id) in old_basis {
+        for &(new_space, new_id) in new_basis {
+            let new_node = old_count + new_space;
+            adjacency[old_space].insert(new_node);
+            adjacency[new_node].insert(old_space);
+            transports
+                .entry((old_space, new_space))
+                .or_default()
+                .push(BasisTransport {
+                    old: old_id,
+                    new: new_id,
+                    coefficient: 1,
+                });
+        }
+    }
+}
+
+fn continuation_component(
+    start: usize,
+    old_count: usize,
+    adjacency: &[BTreeSet<usize>],
+    seen: &mut [bool],
+) -> (Vec<usize>, Vec<usize>) {
+    let mut queue = VecDeque::from([start]);
+    seen[start] = true;
+    let mut old_nodes = Vec::new();
+    let mut new_nodes = Vec::new();
+    while let Some(node) = queue.pop_front() {
+        if node < old_count {
+            old_nodes.push(node);
+        } else {
+            new_nodes.push(node - old_count);
+        }
+        enqueue_unseen(&adjacency[node], seen, &mut queue);
+    }
+    old_nodes.sort_unstable();
+    new_nodes.sort_unstable();
+    (old_nodes, new_nodes)
+}
+
+fn enqueue_unseen(adjacency: &BTreeSet<usize>, seen: &mut [bool], queue: &mut VecDeque<usize>) {
+    for &next in adjacency {
+        if !seen[next] {
+            seen[next] = true;
+            queue.push_back(next);
+        }
+    }
+}
+
+fn component_continuation(
+    old: &[PersistentClassSpace],
+    new: &[PersistentClassSpace],
+    old_nodes: &[usize],
+    new_nodes: &[usize],
+    transports: &ContinuationTransports,
+) -> ClassContinuation {
+    let mut transport = component_transports(old_nodes, new_nodes, transports);
+    transport.sort_by_key(|term| (term.old, term.new));
+    transport.dedup();
+    let old_rank: usize = old_nodes.iter().map(|&index| old[index].basis.len()).sum();
+    let new_rank: usize = new_nodes.iter().map(|&index| new[index].basis.len()).sum();
+    let complete = transport.len() == old_rank && transport.len() == new_rank;
+    ClassContinuation {
+        kind: continuation_kind(old_nodes.len(), new_nodes.len(), complete),
+        old_spaces: old_nodes.iter().map(|&index| old[index].id).collect(),
+        new_spaces: new_nodes.iter().map(|&index| new[index].id).collect(),
+        transport,
+    }
+}
+
+fn component_transports(
+    old_nodes: &[usize],
+    new_nodes: &[usize],
+    transports: &ContinuationTransports,
+) -> Vec<BasisTransport> {
+    let mut output = Vec::new();
+    for &old_space in old_nodes {
+        for &new_space in new_nodes {
+            if let Some(terms) = transports.get(&(old_space, new_space)) {
+                output.extend(terms.iter().copied());
+            }
+        }
+    }
+    output
+}
+
+fn continuation_kind(old_count: usize, new_count: usize, complete: bool) -> ContinuationKind {
+    match (old_count, new_count, complete) {
+        (1, 1, true) => ContinuationKind::Isomorphism,
+        (1, many, true) if many > 1 => ContinuationKind::Split,
+        (many, 1, true) if many > 1 => ContinuationKind::Merge,
+        (many_old, many_new, true) if many_old > 1 && many_new > 1 => ContinuationKind::Mixing,
+        _ => ContinuationKind::Ambiguous,
+    }
+}
+
+fn unmatched_continuations(
+    old: &[PersistentClassSpace],
+    new: &[PersistentClassSpace],
+    adjacency: &[BTreeSet<usize>],
+) -> Vec<ClassContinuation> {
+    let deaths = old
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| adjacency[*index].is_empty())
+        .map(|(_, space)| unmatched_continuation(ContinuationKind::Death, space.id));
+    let births = new
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| adjacency[old.len() + *index].is_empty())
+        .map(|(_, space)| unmatched_continuation(ContinuationKind::Birth, space.id));
+    deaths.chain(births).collect()
+}
+
+fn unmatched_continuation(kind: ContinuationKind, space: IntervalGroupId) -> ClassContinuation {
+    let (old_spaces, new_spaces) = match kind {
+        ContinuationKind::Death => (vec![space], Vec::new()),
+        ContinuationKind::Birth => (Vec::new(), vec![space]),
+        _ => unreachable!("only births and deaths are unmatched"),
+    };
+    ClassContinuation {
+        kind,
+        old_spaces,
+        new_spaces,
+        transport: Vec::new(),
+    }
 }
 
 pub(crate) fn program_topology_events(
