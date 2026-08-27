@@ -3,14 +3,18 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use holos_tda::collapse::{
+    CollapsePortfolioArtifact, CollapsePortfolioDecodeLimits, CollapsePortfolioLimits,
+};
 use holos_tda::{
     CertificateLimits, DistributedInterfaceManifest, DurableInterfaceStore,
     RelativeInterfaceCertificate, RipsParams, SparseDistanceMatrix,
 };
 use holos_tda_check::{
-    IndexProofState, ProofLimits, is_cohomology_intervention, is_coverage, is_kinetic_zigzag,
-    is_relative_interface, is_synthesis, verify_cohomology_intervention, verify_coverage,
-    verify_distributed_interface, verify_kinetic_zigzag, verify_relative_interface,
+    IndexProofState, ProofLimits, is_cohomology_intervention, is_coverage,
+    is_geometry_bound_coverage, is_kinetic_zigzag, is_relative_interface, is_synthesis,
+    verify_cohomology_intervention, verify_coverage, verify_distributed_interface,
+    verify_geometry_bound_coverage, verify_kinetic_zigzag, verify_relative_interface,
     verify_synthesis,
 };
 
@@ -1144,6 +1148,76 @@ fn coverage_cli_certifies_failures_and_warns_about_geometry() {
     assert_eq!(checked.selected, 2);
     assert_eq!(checked.total_cost, Some(5));
     assert_eq!(checked.failure_budget, 1);
+}
+
+#[test]
+fn collapse_portfolio_cli_selects_and_encodes_every_schedule() {
+    let graph = TempFile::new(
+        "portfolio.spr",
+        "0 1 1\n0 2 1\n0 3 1\n1 2 1\n1 3 1\n2 3 1\n",
+    );
+    let artifact = TempFile::new("portfolio.hpor", "");
+    let out = run(&[
+        "collapse-portfolio",
+        graph.path().to_str().unwrap(),
+        artifact.path().to_str().unwrap(),
+        "--threads",
+        "2",
+    ]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(stdout(&out).contains("selected candidate"));
+    let bytes = std::fs::read(artifact.path()).unwrap();
+    let decoded = CollapsePortfolioArtifact::decode(
+        &bytes,
+        CollapsePortfolioLimits::default(),
+        CollapsePortfolioDecodeLimits::default(),
+    )
+    .unwrap();
+    let input = holos_tda::io::read_sparse_matrix(graph.path(), 1).unwrap();
+    decoded
+        .verify_sparse(&input, None, CollapsePortfolioLimits::default())
+        .unwrap();
+    assert_eq!(decoded.entries().len(), 3);
+}
+
+#[test]
+fn coverage_cli_binds_finite_states_to_planar_coordinates() {
+    let graph = TempFile::new(
+        "coverage_geometry.spr",
+        "0 1 2\n1 2 2\n2 3 2\n0 3 2\n0 4 1.4142135623730951\n1 4 1.4142135623730951\n2 4 1.4142135623730951\n3 4 1.4142135623730951\n",
+    );
+    let coordinates = TempFile::new("coverage_geometry.pts", "0 0\n2 0\n2 2\n0 2\n1 1\n");
+    let artifact = TempFile::new("coverage_geometry.hgeo", "");
+    let out = run(&[
+        "cover",
+        artifact.path().to_str().unwrap(),
+        "--state",
+        graph.path().to_str().unwrap(),
+        "--coordinates",
+        coordinates.path().to_str().unwrap(),
+        "--vertices",
+        "5",
+        "--broadcast-radius",
+        "2",
+        "--sensing-radius",
+        "2",
+        "--fence",
+        "0,1,2,3",
+        "--candidate",
+        "4",
+        "1",
+        "all",
+        "--max-activations",
+        "1",
+    ]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert!(!stderr(&out).contains("physical coverage requires"));
+    let bytes = std::fs::read(artifact.path()).unwrap();
+    assert!(is_geometry_bound_coverage(&bytes));
+    let checked = verify_geometry_bound_coverage(&bytes, ProofLimits::default()).unwrap();
+    assert_eq!(checked.vertices, 5);
+    assert_eq!(checked.pair_checks, 10);
+    assert_eq!(checked.coverage.total_cost, Some(1));
 }
 
 #[test]

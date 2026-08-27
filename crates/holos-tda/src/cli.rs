@@ -1,5 +1,8 @@
 //! The `holos` command-line interface, callable as a library function.
 
+mod coverage_geometry;
+mod portfolio;
+
 use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -24,6 +27,7 @@ use crate::{
     TopologicalSpecification, TrajectoryArtifact, TrajectoryDecodeLimits, cohomology_relation,
     cohomology_space, lift_h1_classes, rips_persistence_with_classes_sparse,
 };
+use crate::{CoverageGeometry, CoverageGeometryLimits, GeometryBoundCoverageArtifact};
 use clap::{Parser, ValueEnum};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -136,7 +140,7 @@ fn version_string() -> &'static str {
     name = "holos",
     version = version_string(),
     about = "Vietoris-Rips persistent homology over a prime field",
-    after_help = "Additional workflows:\n  holos cohomology INPUT [OTHER] --at T --homology-dim D [options]\n  holos kinetic TRAJECTORY --vertices N --start A --end B [options]\n  holos cover OUTPUT --state GRAPH --fence VERTICES --candidate V COST STATES [options]\n  holos cover-affine TRAJECTORY OUTPUT --fence VERTICES --candidate V COST STATES [options]\n  holos synthesize OUTPUT --state GRAPH --candidate U V COST [options]\n  holos synthesize-kinetic TRAJECTORY OUTPUT --candidate U V COST [options]\n  holos intervene-cohomology INPUT OUTPUT --at T --homology-dim D --target N --candidate U V COST [options]\n  holos plan-links OUTPUT --scenario GRAPH --target N --candidate U V COST [options]\n  holos interface INPUT OUTPUT [options]\n  holos merge-interfaces STORE MANIFEST RESULT SHARD [SHARD ...] [options]\n  holos index INPUT SNAPSHOT --update NEXT --record RECORD [options]\n  holos prove INPUT OUTPUT [UPDATE ...] [options]\n  holos verify-collapse INPUT ARTIFACT [options]\n  holos verify-atlas INPUT ARTIFACT [options]\n  holos verify-trajectory ARTIFACT [options]\n  holos verify-program INPUT ARTIFACT [options]\n  holos verify-program-trace ARTIFACT [options]\n  holos intervene INPUT PROGRAM OUTPUT --space N --before T [options]\n  holos verify-intervention ARTIFACT [options]"
+    after_help = "Additional workflows:\n  holos collapse-portfolio INPUT OUTPUT [options]\n  holos cohomology INPUT [OTHER] --at T --homology-dim D [options]\n  holos kinetic TRAJECTORY --vertices N --start A --end B [options]\n  holos cover OUTPUT --state GRAPH --fence VERTICES --candidate V COST STATES [options]\n  holos cover-affine TRAJECTORY OUTPUT --fence VERTICES --candidate V COST STATES [options]\n  holos synthesize OUTPUT --state GRAPH --candidate U V COST [options]\n  holos synthesize-kinetic TRAJECTORY OUTPUT --candidate U V COST [options]\n  holos intervene-cohomology INPUT OUTPUT --at T --homology-dim D --target N --candidate U V COST [options]\n  holos plan-links OUTPUT --scenario GRAPH --target N --candidate U V COST [options]\n  holos interface INPUT OUTPUT [options]\n  holos merge-interfaces STORE MANIFEST RESULT SHARD [SHARD ...] [options]\n  holos index INPUT SNAPSHOT --update NEXT --record RECORD [options]\n  holos prove INPUT OUTPUT [UPDATE ...] [options]\n  holos verify-collapse INPUT ARTIFACT [options]\n  holos verify-atlas INPUT ARTIFACT [options]\n  holos verify-trajectory ARTIFACT [options]\n  holos verify-program INPUT ARTIFACT [options]\n  holos verify-program-trace ARTIFACT [options]\n  holos intervene INPUT PROGRAM OUTPUT --space N --before T [options]\n  holos verify-intervention ARTIFACT [options]"
 )]
 struct Cli {
     /// Input file: point cloud, condensed lower-distance matrix, or sparse
@@ -754,6 +758,11 @@ struct CoverageCli {
     /// Sparse graph of possible communication edges. Repeat in state order
     #[arg(long = "state", value_name = "GRAPH", required = true)]
     states: Vec<PathBuf>,
+
+    /// Planar point file for each state. When present, the artifact checks
+    /// the fence polygon and the complete Euclidean radius graph.
+    #[arg(long = "coordinates", value_name = "POINTS")]
+    coordinates: Vec<PathBuf>,
 
     /// Shared sensor count, including inactive sensors
     #[arg(long, value_name = "N")]
@@ -2283,8 +2292,36 @@ fn run_kinetic_synthesis(cli: KineticSynthesisCli) -> crate::Result<()> {
 
 fn run_coverage(cli: CoverageCli) -> crate::Result<()> {
     let model = PlanarCoverageModel::new(cli.broadcast_radius, cli.sensing_radius)?;
-    let fence = CoverageFence::new(cli.fence)?;
+    let fence = CoverageFence::new(cli.fence.clone())?;
     let base = coverage_base(fence.vertices(), &cli.base);
+    let states = read_coverage_states(&cli, base)?;
+    let specification = CoverageSpecification::new(
+        cli.vertices,
+        model,
+        cli.modulus,
+        fence,
+        cli.failable,
+        cli.failure_budget,
+        states,
+        CoverageLimits::default(),
+    )?;
+    let actions = parse_coverage_actions(&cli.candidates, &specification)?;
+    let geometry =
+        coverage_geometry::read_coverage_geometry(&cli.coordinates, &specification, cli.threads)?;
+    write_coverage_artifact(
+        specification,
+        actions,
+        geometry,
+        cli.max_activations,
+        cli.oracle_limit,
+        cli.node_limit,
+        cli.max_artifact_bytes,
+        &cli.output,
+        "finite",
+    )
+}
+
+fn read_coverage_states(cli: &CoverageCli, base: Vec<usize>) -> crate::Result<Vec<CoverageState>> {
     let mut states = Vec::with_capacity(cli.states.len());
     for (step, path) in cli.states.iter().enumerate() {
         let parsed = io::read_sparse_matrix(path, cli.threads)?;
@@ -2305,27 +2342,7 @@ fn run_coverage(cli: CoverageCli) -> crate::Result<()> {
             cli.broadcast_radius,
         )?);
     }
-    let specification = CoverageSpecification::new(
-        cli.vertices,
-        model,
-        cli.modulus,
-        fence,
-        cli.failable,
-        cli.failure_budget,
-        states,
-        CoverageLimits::default(),
-    )?;
-    let actions = parse_coverage_actions(&cli.candidates, &specification)?;
-    write_coverage_artifact(
-        specification,
-        actions,
-        cli.max_activations,
-        cli.oracle_limit,
-        cli.node_limit,
-        cli.max_artifact_bytes,
-        &cli.output,
-        "finite",
-    )
+    Ok(states)
 }
 
 fn run_affine_coverage(cli: AffineCoverageCli) -> crate::Result<()> {
@@ -2355,6 +2372,7 @@ fn run_affine_coverage(cli: AffineCoverageCli) -> crate::Result<()> {
     write_coverage_artifact(
         specification,
         actions,
+        None,
         cli.max_activations,
         cli.oracle_limit,
         cli.node_limit,
@@ -2428,6 +2446,7 @@ fn parse_coverage_actions(
 fn write_coverage_artifact(
     specification: CoverageSpecification,
     actions: Vec<CoverageAction>,
+    geometry: Option<CoverageGeometry>,
     max_activations: usize,
     oracle_limit: usize,
     node_limit: usize,
@@ -2443,10 +2462,7 @@ fn write_coverage_artifact(
     };
     let artifact =
         CoverageSynthesisArtifact::build(specification, actions, max_activations, limits)?;
-    let bytes = artifact.encode(limits)?;
-    write_via_temporary(output, &bytes)?;
-    println!(
-        "certified {scope} relative coverage across {} states and failure budget {}: {}, {} activations, cost bounds {:?} to {:?}, {} producer topology calls, {} proof topology checks, wrote {} bytes",
+    let summary = (
         artifact.specification().states().len(),
         artifact.specification().failure_budget(),
         artifact.status(),
@@ -2455,11 +2471,43 @@ fn write_coverage_artifact(
         artifact.upper_bound_cost(),
         artifact.producer_oracle_calls(),
         artifact.proof_topology_checks(),
+    );
+    let geometry_bound = geometry.is_some();
+    let bytes = if let Some(geometry) = geometry {
+        GeometryBoundCoverageArtifact::build(
+            artifact,
+            geometry,
+            limits,
+            CoverageGeometryLimits::default(),
+        )?
+        .encode(
+            limits,
+            CoverageGeometryLimits::default(),
+            crate::GeometryBoundCoverageDecodeLimits {
+                max_bytes: max_artifact_bytes,
+            },
+        )?
+    } else {
+        artifact.encode(limits)?
+    };
+    write_via_temporary(output, &bytes)?;
+    println!(
+        "certified {scope} relative coverage across {} states and failure budget {}: {}, {} activations, cost bounds {:?} to {:?}, {} producer topology calls, {} proof topology checks, wrote {} bytes",
+        summary.0,
+        summary.1,
+        summary.2,
+        summary.3,
+        summary.4,
+        summary.5,
+        summary.6,
+        summary.7,
         bytes.len(),
     );
-    eprintln!(
-        "physical coverage requires the declared planar domain, sensor placement, fence, and communication assumptions"
-    );
+    if !geometry_bound {
+        eprintln!(
+            "physical coverage requires the declared planar domain, sensor placement, fence, and communication assumptions"
+        );
+    }
     Ok(())
 }
 
@@ -2840,6 +2888,12 @@ command_handler!(
     "cohomology"
 );
 command_handler!(kinetic_command, KineticCli, run_kinetic, "kinetic");
+command_handler!(
+    collapse_portfolio_command,
+    portfolio::CollapsePortfolioCli,
+    portfolio::run_collapse_portfolio,
+    "collapse-portfolio"
+);
 command_handler!(coverage_command, CoverageCli, run_coverage, "cover");
 command_handler!(
     affine_coverage_command,
@@ -2909,6 +2963,7 @@ command_handler!(
 );
 
 const SUBCOMMANDS: &[(&str, CommandHandler)] = &[
+    ("collapse-portfolio", collapse_portfolio_command),
     ("cohomology", cohomology_command),
     ("kinetic", kinetic_command),
     ("cover", coverage_command),
