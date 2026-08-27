@@ -11,7 +11,7 @@ use std::fmt;
 
 use sha2::{Digest, Sha256};
 
-use crate::monotone_search::{SearchLimits, SearchStatus, minimize_antitone};
+use crate::monotone_search::{SearchLimits, SearchResult, SearchStatus, minimize_antitone};
 use crate::{
     CohomologyLimits, CohomologySpace, CohomologySpaceId, CohomologySubspace, Error, KineticEdge,
     KineticEdgeKey, KineticFiltration, KineticLimits, Result, SparseDistanceMatrix,
@@ -502,6 +502,54 @@ pub struct SynthesisArtifact {
     digest: [u8; 32],
 }
 
+struct SynthesisHeader {
+    vertex_count: usize,
+    dimension: usize,
+    scale: f64,
+    modulus: u32,
+    source: SynthesisSource,
+}
+
+struct WorkLimits {
+    oracle: usize,
+    nodes: usize,
+}
+
+struct SelectionData {
+    status: SynthesisStatus,
+    selected: Vec<usize>,
+    lower_bound_cost: Option<u64>,
+    upper_bound_cost: Option<u64>,
+}
+
+struct ProducerWork {
+    oracle_calls: usize,
+    search_nodes: usize,
+    cache_hits: usize,
+}
+
+struct SearchData {
+    max_edits: usize,
+    limits: WorkLimits,
+    selection: SelectionData,
+    work: ProducerWork,
+}
+
+struct ProofData {
+    root_blockers: Vec<Vec<usize>>,
+    before_ranks: Vec<usize>,
+    after_ranks: Vec<usize>,
+    proof: Option<ProofNode>,
+    nodes: usize,
+    topology_checks: usize,
+}
+
+struct BuiltProof {
+    proof: Option<ProofNode>,
+    nodes: usize,
+    topology_checks: usize,
+}
+
 impl SynthesisArtifact {
     /// Solve a minimum-cost action problem and build its independent proof tree.
     pub fn build(
@@ -540,38 +588,18 @@ impl SynthesisArtifact {
             },
             |selected| oracle.survives(selected),
         )?;
-        let status = match search.status {
-            SearchStatus::Optimal => SynthesisStatus::Optimal,
-            SearchStatus::Infeasible => SynthesisStatus::Infeasible,
-            SearchStatus::Incomplete => SynthesisStatus::SearchIncomplete,
-        };
+        let status = synthesis_status(search.status);
         let before_ranks = oracle.target_ranks();
-        let after_ranks = if search.selected.is_empty() {
-            oracle.intersection_ranks(&[])?
-        } else {
-            oracle.intersection_ranks(&search.selected)?
-        };
-        let (proof, proof_nodes, proof_topology_checks) = match status {
-            SynthesisStatus::Optimal => {
-                let cutoff = search.upper_bound.ok_or_else(|| {
-                    Error::InvalidInput("optimal synthesis result has no cost".into())
-                })?;
-                let mut builder =
-                    ProofBuilder::new(&costs, max_edits, Some(cutoff), &oracle, limits);
-                let available = (0..actions.len()).collect();
-                let proof = builder.prove(Vec::new(), available, 0)?;
-                let checks = proof_topology_checks(&proof);
-                (Some(proof), builder.nodes, checks)
-            }
-            SynthesisStatus::Infeasible => {
-                let mut builder = ProofBuilder::new(&costs, max_edits, None, &oracle, limits);
-                let available = (0..actions.len()).collect();
-                let proof = builder.prove(Vec::new(), available, 0)?;
-                let checks = proof_topology_checks(&proof);
-                (Some(proof), builder.nodes, checks)
-            }
-            SynthesisStatus::SearchIncomplete => (None, 0, 0),
-        };
+        let after_ranks = oracle.intersection_ranks(&search.selected)?;
+        let built = build_synthesis_proof(
+            status,
+            &search,
+            &costs,
+            max_edits,
+            actions.len(),
+            &oracle,
+            limits,
+        )?;
         let mut artifact = Self {
             specification,
             actions,
@@ -588,9 +616,9 @@ impl SynthesisArtifact {
             root_blockers: search.root_blockers,
             before_ranks,
             after_ranks,
-            proof,
-            proof_nodes,
-            proof_topology_checks,
+            proof: built.proof,
+            proof_nodes: built.nodes,
+            proof_topology_checks: built.topology_checks,
             digest: [0; 32],
         };
         artifact.verify(limits)?;
@@ -607,27 +635,9 @@ impl SynthesisArtifact {
             self.node_limit,
             limits,
         )?;
-        if self.producer_oracle_calls > self.oracle_limit
-            || self.producer_search_nodes > self.node_limit
-            || self.selected.len() > self.max_edits
-            || self
-                .selected
-                .iter()
-                .any(|index| *index >= self.actions.len())
-            || self.selected.windows(2).any(|pair| pair[0] >= pair[1])
-        {
-            return Err(Error::InvalidInput(
-                "synthesis result shape or producer work is invalid".into(),
-            ));
-        }
+        verify_result_shape(self)?;
         let oracle = TopologyOracle::build(&self.specification, &self.actions, limits.cohomology)?;
-        if self.before_ranks != oracle.target_ranks()
-            || self.after_ranks != oracle.intersection_ranks(&self.selected)?
-        {
-            return Err(Error::InvalidInput(
-                "synthesis rank claims differ from exact restriction images".into(),
-            ));
-        }
+        verify_rank_claims(self, &oracle)?;
         let costs = self
             .actions
             .iter()
@@ -643,57 +653,8 @@ impl SynthesisArtifact {
             &oracle,
             limits,
         );
-        match self.status {
-            SynthesisStatus::Optimal => {
-                if !selected_feasible
-                    || self.lower_bound_cost != Some(selected_cost)
-                    || self.upper_bound_cost != Some(selected_cost)
-                {
-                    return Err(Error::InvalidInput(
-                        "optimal synthesis result has an invalid incumbent or bound".into(),
-                    ));
-                }
-                verifier.verify_root(self.proof.as_ref().ok_or_else(|| {
-                    Error::InvalidInput("optimal synthesis result has no proof tree".into())
-                })?)?;
-            }
-            SynthesisStatus::Infeasible => {
-                if !self.selected.is_empty()
-                    || self.lower_bound_cost.is_some()
-                    || self.upper_bound_cost.is_some()
-                    || selected_feasible
-                {
-                    return Err(Error::InvalidInput(
-                        "infeasible synthesis result has an incumbent or finite bound".into(),
-                    ));
-                }
-                verifier.verify_root(self.proof.as_ref().ok_or_else(|| {
-                    Error::InvalidInput("infeasible synthesis result has no proof tree".into())
-                })?)?;
-            }
-            SynthesisStatus::SearchIncomplete => {
-                if self.proof.is_some()
-                    || self.upper_bound_cost.is_some() != selected_feasible
-                    || self
-                        .upper_bound_cost
-                        .is_some_and(|cost| cost != selected_cost)
-                    || self
-                        .lower_bound_cost
-                        .zip(self.upper_bound_cost)
-                        .is_some_and(|(lower, upper)| lower > upper)
-                {
-                    return Err(Error::InvalidInput(
-                        "incomplete synthesis result has an invalid gap".into(),
-                    ));
-                }
-            }
-        }
-        if self.proof_nodes != verifier.nodes || self.proof_topology_checks != verifier.checks {
-            return Err(Error::InvalidInput(
-                "synthesis proof work differs from the checked tree".into(),
-            ));
-        }
-        Ok(())
+        verify_status_claim(self, selected_cost, selected_feasible, &mut verifier)?;
+        verify_proof_work(self, &verifier)
     }
 
     /// Finite specification bound to this result.
@@ -776,165 +737,44 @@ impl SynthesisArtifact {
 
     /// Decode and verify canonical `HOLOSSYN` version 1 bytes.
     pub fn decode(bytes: &[u8], limits: SynthesisLimits) -> Result<Self> {
-        if bytes.len() > limits.max_bytes || bytes.len() < 32 {
-            return Err(Error::InvalidInput(
-                "synthesis artifact exceeds its byte limit or is truncated".into(),
-            ));
-        }
+        validate_artifact_size(bytes, limits)?;
         let mut reader = Reader::new(bytes);
-        if reader.take(8)? != MAGIC || reader.u16()? != VERSION || reader.u8()? != F64_BITS_CODEC {
-            return Err(Error::InvalidInput("unsupported synthesis artifact".into()));
-        }
-        let vertex_count = reader.usize()?;
-        let dimension = reader.usize()?;
-        let scale = f64::from_bits(reader.u64()?);
-        let modulus = reader.u32()?;
-        let source = decode_source(&mut reader, limits)?;
-        let state_count =
-            reader.bounded_usize("state count", limits.max_states.min(FORMAT_MAX_STATES))?;
-        let mut states = Vec::with_capacity(state_count);
-        let mut target_terms = 0usize;
-        for _ in 0..state_count {
-            let scenario = reader.u64()?;
-            let step = reader.u64()?;
-            let active_edges = decode_edges(&mut reader, limits.max_edges_per_state)?;
-            let target_space = CohomologySpaceId::from_bytes(reader.array32()?);
-            let row_count = reader.bounded_usize("target row count", limits.max_terms)?;
-            let mut target = Vec::with_capacity(row_count);
-            for _ in 0..row_count {
-                let term_count = reader.bounded_usize("target row term count", limits.max_terms)?;
-                target_terms = target_terms.checked_add(term_count).ok_or_else(|| {
-                    Error::InvalidInput("synthesis target term count overflows".into())
-                })?;
-                if target_terms > limits.max_terms || term_count > reader.remaining() / 12 {
-                    return Err(Error::InvalidInput(
-                        "synthesis target terms exceed their limit or remaining bytes".into(),
-                    ));
-                }
-                let mut row = Vec::with_capacity(term_count);
-                for _ in 0..term_count {
-                    row.push(SynthesisCoordinate {
-                        basis: reader.usize()?,
-                        coefficient: reader.u32()?,
-                    });
-                }
-                target.push(row);
-            }
-            states.push(SynthesisState {
-                scenario,
-                step,
-                active_edges,
-                target_space,
-                target,
-                max_surviving_rank: reader.usize()?,
-            });
-        }
-        let action_count =
-            reader.bounded_usize("action count", limits.max_actions.min(FORMAT_MAX_ACTIONS))?;
-        let mut actions = Vec::with_capacity(action_count);
-        for _ in 0..action_count {
-            actions.push(SynthesisAction {
-                edge: KineticEdgeKey {
-                    u: reader.usize()?,
-                    v: reader.usize()?,
-                },
-                cost: reader.u64()?,
-                states: decode_indices(&mut reader, state_count, state_count)?,
-            });
-        }
-        let max_edits = reader.usize()?;
-        let oracle_limit = reader.usize()?;
-        let node_limit = reader.usize()?;
-        let status = SynthesisStatus::from_code(reader.u8()?)?;
-        let selected = decode_indices(&mut reader, action_count, action_count)?;
-        let lower_bound_cost = reader.optional_u64()?;
-        let upper_bound_cost = reader.optional_u64()?;
-        let producer_oracle_calls = reader.usize()?;
-        let producer_search_nodes = reader.usize()?;
-        let producer_cache_hits = reader.usize()?;
-        let blocker_count = reader.bounded_usize("root blocker count", limits.max_terms)?;
-        let mut root_blockers = Vec::with_capacity(blocker_count);
-        let mut proof_terms = 0usize;
-        for _ in 0..blocker_count {
-            let blocker = decode_indices(&mut reader, action_count, limits.max_terms)?;
-            proof_terms = proof_terms.checked_add(blocker.len()).ok_or_else(|| {
-                Error::InvalidInput("synthesis proof term count overflows".into())
-            })?;
-            if proof_terms > limits.max_terms {
-                return Err(Error::InvalidInput(
-                    "synthesis proof terms exceed their limit".into(),
-                ));
-            }
-            root_blockers.push(blocker);
-        }
-        let before_ranks = decode_usizes(&mut reader, state_count)?;
-        let after_ranks = decode_usizes(&mut reader, state_count)?;
-        let has_proof = reader.u8()?;
-        let mut decoded_nodes = 0usize;
-        let mut decoded_terms = proof_terms;
-        let proof = match has_proof {
-            0 => None,
-            1 => Some(decode_proof(
-                &mut reader,
-                action_count,
-                0,
-                &mut decoded_nodes,
-                &mut decoded_terms,
-                limits,
-            )?),
-            _ => {
-                return Err(Error::InvalidInput(
-                    "synthesis proof-presence flag is invalid".into(),
-                ));
-            }
-        };
-        let proof_nodes = reader.usize()?;
-        let proof_topology_checks = reader.usize()?;
-        let digest = reader.array32()?;
-        if reader.remaining() != 0 {
-            return Err(Error::InvalidInput(
-                "trailing bytes follow the synthesis artifact".into(),
-            ));
-        }
+        decode_prefix(&mut reader)?;
+        let header = decode_header(&mut reader, limits)?;
+        let states = decode_states(&mut reader, limits)?;
+        let actions = decode_actions(&mut reader, states.len(), limits)?;
+        let search = decode_search_data(&mut reader, actions.len())?;
+        let proof = decode_proof_data(&mut reader, actions.len(), states.len(), limits)?;
+        let digest = decode_trailer(&mut reader)?;
         let artifact = Self {
             specification: TopologicalSpecification {
-                vertex_count,
-                dimension,
-                scale,
-                modulus,
-                source,
+                vertex_count: header.vertex_count,
+                dimension: header.dimension,
+                scale: header.scale,
+                modulus: header.modulus,
+                source: header.source,
                 states,
             },
             actions,
-            max_edits,
-            oracle_limit,
-            node_limit,
-            status,
-            selected,
-            lower_bound_cost,
-            upper_bound_cost,
-            producer_oracle_calls,
-            producer_search_nodes,
-            producer_cache_hits,
-            root_blockers,
-            before_ranks,
-            after_ranks,
-            proof,
-            proof_nodes,
-            proof_topology_checks,
+            max_edits: search.max_edits,
+            oracle_limit: search.limits.oracle,
+            node_limit: search.limits.nodes,
+            status: search.selection.status,
+            selected: search.selection.selected,
+            lower_bound_cost: search.selection.lower_bound_cost,
+            upper_bound_cost: search.selection.upper_bound_cost,
+            producer_oracle_calls: search.work.oracle_calls,
+            producer_search_nodes: search.work.search_nodes,
+            producer_cache_hits: search.work.cache_hits,
+            root_blockers: proof.root_blockers,
+            before_ranks: proof.before_ranks,
+            after_ranks: proof.after_ranks,
+            proof: proof.proof,
+            proof_nodes: proof.nodes,
+            proof_topology_checks: proof.topology_checks,
             digest,
         };
-        if artifact.proof_nodes != decoded_nodes || artifact.compute_digest()? != artifact.digest {
-            return Err(Error::InvalidInput(
-                "synthesis proof count or digest differs from its content".into(),
-            ));
-        }
-        artifact.verify(limits)?;
-        if artifact.encode(limits)? != bytes {
-            return Err(Error::InvalidInput(
-                "synthesis artifact encoding is not canonical".into(),
-            ));
-        }
+        validate_decoded_artifact(&artifact, bytes, limits)?;
         Ok(artifact)
     }
 
@@ -948,63 +788,545 @@ impl SynthesisArtifact {
 
     fn encode_payload(&self) -> Result<Vec<u8>> {
         let mut output = Vec::new();
-        output.extend_from_slice(MAGIC);
-        output.extend_from_slice(&VERSION.to_be_bytes());
-        output.push(F64_BITS_CODEC);
-        put_usize(&mut output, self.specification.vertex_count)?;
-        put_usize(&mut output, self.specification.dimension)?;
-        output.extend_from_slice(&self.specification.scale.to_bits().to_be_bytes());
-        output.extend_from_slice(&self.specification.modulus.to_be_bytes());
-        encode_source(&mut output, &self.specification.source)?;
-        put_usize(&mut output, self.specification.states.len())?;
-        for state in &self.specification.states {
-            output.extend_from_slice(&state.scenario.to_be_bytes());
-            output.extend_from_slice(&state.step.to_be_bytes());
-            encode_edges(&mut output, &state.active_edges)?;
-            output.extend_from_slice(state.target_space.as_bytes());
-            put_usize(&mut output, state.target.len())?;
-            for row in &state.target {
-                put_usize(&mut output, row.len())?;
-                for term in row {
-                    put_usize(&mut output, term.basis)?;
-                    output.extend_from_slice(&term.coefficient.to_be_bytes());
-                }
-            }
-            put_usize(&mut output, state.max_surviving_rank)?;
-        }
-        put_usize(&mut output, self.actions.len())?;
-        for action in &self.actions {
-            put_usize(&mut output, action.edge.u)?;
-            put_usize(&mut output, action.edge.v)?;
-            output.extend_from_slice(&action.cost.to_be_bytes());
-            encode_usizes(&mut output, &action.states)?;
-        }
-        put_usize(&mut output, self.max_edits)?;
-        put_usize(&mut output, self.oracle_limit)?;
-        put_usize(&mut output, self.node_limit)?;
-        output.push(self.status.code());
-        encode_usizes(&mut output, &self.selected)?;
-        encode_optional_u64(&mut output, self.lower_bound_cost);
-        encode_optional_u64(&mut output, self.upper_bound_cost);
-        put_usize(&mut output, self.producer_oracle_calls)?;
-        put_usize(&mut output, self.producer_search_nodes)?;
-        put_usize(&mut output, self.producer_cache_hits)?;
-        put_usize(&mut output, self.root_blockers.len())?;
-        for blocker in &self.root_blockers {
-            encode_usizes(&mut output, blocker)?;
-        }
-        encode_usizes(&mut output, &self.before_ranks)?;
-        encode_usizes(&mut output, &self.after_ranks)?;
-        match &self.proof {
-            Some(proof) => {
-                output.push(1);
-                encode_proof(&mut output, proof)?;
-            }
-            None => output.push(0),
-        }
-        put_usize(&mut output, self.proof_nodes)?;
-        put_usize(&mut output, self.proof_topology_checks)?;
+        encode_prefix(&mut output);
+        encode_specification(&mut output, &self.specification)?;
+        encode_actions(&mut output, &self.actions)?;
+        encode_search_data(&mut output, self)?;
+        encode_proof_data(&mut output, self)?;
         Ok(output)
+    }
+}
+
+fn verify_result_shape(artifact: &SynthesisArtifact) -> Result<()> {
+    let invalid_selection = artifact.selected.len() > artifact.max_edits
+        || artifact
+            .selected
+            .iter()
+            .any(|index| *index >= artifact.actions.len())
+        || artifact.selected.windows(2).any(|pair| pair[0] >= pair[1]);
+    if artifact.producer_oracle_calls > artifact.oracle_limit
+        || artifact.producer_search_nodes > artifact.node_limit
+        || invalid_selection
+    {
+        Err(Error::InvalidInput(
+            "synthesis result shape or producer work is invalid".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_rank_claims(artifact: &SynthesisArtifact, oracle: &TopologyOracle<'_>) -> Result<()> {
+    if artifact.before_ranks != oracle.target_ranks()
+        || artifact.after_ranks != oracle.intersection_ranks(&artifact.selected)?
+    {
+        Err(Error::InvalidInput(
+            "synthesis rank claims differ from exact restriction images".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_status_claim(
+    artifact: &SynthesisArtifact,
+    selected_cost: u64,
+    selected_feasible: bool,
+    verifier: &mut ProofVerifier<'_>,
+) -> Result<()> {
+    match artifact.status {
+        SynthesisStatus::Optimal => {
+            verify_optimal_claim(artifact, selected_cost, selected_feasible, verifier)
+        }
+        SynthesisStatus::Infeasible => {
+            verify_infeasible_claim(artifact, selected_feasible, verifier)
+        }
+        SynthesisStatus::SearchIncomplete => {
+            verify_incomplete_claim(artifact, selected_cost, selected_feasible)
+        }
+    }
+}
+
+fn verify_optimal_claim(
+    artifact: &SynthesisArtifact,
+    selected_cost: u64,
+    selected_feasible: bool,
+    verifier: &mut ProofVerifier<'_>,
+) -> Result<()> {
+    if !selected_feasible
+        || artifact.lower_bound_cost != Some(selected_cost)
+        || artifact.upper_bound_cost != Some(selected_cost)
+    {
+        return Err(Error::InvalidInput(
+            "optimal synthesis result has an invalid incumbent or bound".into(),
+        ));
+    }
+    verifier.verify_root(required_proof(
+        artifact,
+        "optimal synthesis result has no proof tree",
+    )?)
+}
+
+fn verify_infeasible_claim(
+    artifact: &SynthesisArtifact,
+    selected_feasible: bool,
+    verifier: &mut ProofVerifier<'_>,
+) -> Result<()> {
+    if !artifact.selected.is_empty()
+        || artifact.lower_bound_cost.is_some()
+        || artifact.upper_bound_cost.is_some()
+        || selected_feasible
+    {
+        return Err(Error::InvalidInput(
+            "infeasible synthesis result has an incumbent or finite bound".into(),
+        ));
+    }
+    verifier.verify_root(required_proof(
+        artifact,
+        "infeasible synthesis result has no proof tree",
+    )?)
+}
+
+fn verify_incomplete_claim(
+    artifact: &SynthesisArtifact,
+    selected_cost: u64,
+    selected_feasible: bool,
+) -> Result<()> {
+    let invalid_gap = artifact
+        .lower_bound_cost
+        .zip(artifact.upper_bound_cost)
+        .is_some_and(|(lower, upper)| lower > upper);
+    if artifact.proof.is_some()
+        || artifact.upper_bound_cost.is_some() != selected_feasible
+        || artifact
+            .upper_bound_cost
+            .is_some_and(|cost| cost != selected_cost)
+        || invalid_gap
+    {
+        Err(Error::InvalidInput(
+            "incomplete synthesis result has an invalid gap".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn required_proof<'a>(artifact: &'a SynthesisArtifact, message: &str) -> Result<&'a ProofNode> {
+    artifact
+        .proof
+        .as_ref()
+        .ok_or_else(|| Error::InvalidInput(message.into()))
+}
+
+fn verify_proof_work(artifact: &SynthesisArtifact, verifier: &ProofVerifier<'_>) -> Result<()> {
+    if artifact.proof_nodes != verifier.nodes || artifact.proof_topology_checks != verifier.checks {
+        Err(Error::InvalidInput(
+            "synthesis proof work differs from the checked tree".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn synthesis_status(status: SearchStatus) -> SynthesisStatus {
+    match status {
+        SearchStatus::Optimal => SynthesisStatus::Optimal,
+        SearchStatus::Infeasible => SynthesisStatus::Infeasible,
+        SearchStatus::Incomplete => SynthesisStatus::SearchIncomplete,
+    }
+}
+
+fn build_synthesis_proof(
+    status: SynthesisStatus,
+    search: &SearchResult,
+    costs: &[u64],
+    max_edits: usize,
+    action_count: usize,
+    oracle: &TopologyOracle<'_>,
+    limits: SynthesisLimits,
+) -> Result<BuiltProof> {
+    if status == SynthesisStatus::SearchIncomplete {
+        return Ok(BuiltProof {
+            proof: None,
+            nodes: 0,
+            topology_checks: 0,
+        });
+    }
+    let cutoff = proof_cutoff(status, search.upper_bound)?;
+    let mut builder = ProofBuilder::new(costs, max_edits, cutoff, oracle, limits);
+    let proof = builder.prove(Vec::new(), (0..action_count).collect(), 0)?;
+    Ok(BuiltProof {
+        topology_checks: proof_topology_checks(&proof),
+        proof: Some(proof),
+        nodes: builder.nodes,
+    })
+}
+
+fn proof_cutoff(status: SynthesisStatus, upper_bound: Option<u64>) -> Result<Option<u64>> {
+    match status {
+        SynthesisStatus::Optimal => upper_bound
+            .map(Some)
+            .ok_or_else(|| Error::InvalidInput("optimal synthesis result has no cost".into())),
+        SynthesisStatus::Infeasible | SynthesisStatus::SearchIncomplete => Ok(None),
+    }
+}
+
+fn validate_artifact_size(bytes: &[u8], limits: SynthesisLimits) -> Result<()> {
+    if bytes.len() > limits.max_bytes || bytes.len() < 32 {
+        Err(Error::InvalidInput(
+            "synthesis artifact exceeds its byte limit or is truncated".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_prefix(reader: &mut Reader<'_>) -> Result<()> {
+    let magic = reader.take(8)?;
+    let version = reader.u16()?;
+    let codec = reader.u8()?;
+    if magic != MAGIC || version != VERSION || codec != F64_BITS_CODEC {
+        Err(Error::InvalidInput("unsupported synthesis artifact".into()))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_header(reader: &mut Reader<'_>, limits: SynthesisLimits) -> Result<SynthesisHeader> {
+    Ok(SynthesisHeader {
+        vertex_count: reader.bounded_usize("vertex count", limits.max_vertices)?,
+        dimension: reader.bounded_usize("dimension", limits.cohomology.max_dimension)?,
+        scale: f64::from_bits(reader.u64()?),
+        modulus: reader.u32()?,
+        source: decode_source(reader, limits)?,
+    })
+}
+
+fn decode_states(reader: &mut Reader<'_>, limits: SynthesisLimits) -> Result<Vec<SynthesisState>> {
+    let count = reader.bounded_usize("state count", limits.max_states.min(FORMAT_MAX_STATES))?;
+    let mut states = Vec::with_capacity(count);
+    let mut target_terms = 0usize;
+    for _ in 0..count {
+        states.push(decode_state(reader, &mut target_terms, limits)?);
+    }
+    Ok(states)
+}
+
+fn decode_state(
+    reader: &mut Reader<'_>,
+    target_terms: &mut usize,
+    limits: SynthesisLimits,
+) -> Result<SynthesisState> {
+    Ok(SynthesisState {
+        scenario: reader.u64()?,
+        step: reader.u64()?,
+        active_edges: decode_edges(reader, limits.max_edges_per_state)?,
+        target_space: CohomologySpaceId::from_bytes(reader.array32()?),
+        target: decode_target(reader, target_terms, limits)?,
+        max_surviving_rank: reader.usize()?,
+    })
+}
+
+fn decode_target(
+    reader: &mut Reader<'_>,
+    target_terms: &mut usize,
+    limits: SynthesisLimits,
+) -> Result<Vec<Vec<SynthesisCoordinate>>> {
+    let count = reader.bounded_usize("target row count", limits.max_terms)?;
+    let mut target = Vec::with_capacity(count);
+    for _ in 0..count {
+        target.push(decode_target_row(reader, target_terms, limits)?);
+    }
+    Ok(target)
+}
+
+fn decode_target_row(
+    reader: &mut Reader<'_>,
+    target_terms: &mut usize,
+    limits: SynthesisLimits,
+) -> Result<Vec<SynthesisCoordinate>> {
+    let count = reader.bounded_usize("target row term count", limits.max_terms)?;
+    add_proof_terms(target_terms, count, limits.max_terms, "synthesis target")?;
+    if count > reader.remaining() / 12 {
+        return Err(Error::InvalidInput(
+            "synthesis target terms exceed their limit or remaining bytes".into(),
+        ));
+    }
+    (0..count)
+        .map(|_| {
+            Ok(SynthesisCoordinate {
+                basis: reader.usize()?,
+                coefficient: reader.u32()?,
+            })
+        })
+        .collect()
+}
+
+fn decode_actions(
+    reader: &mut Reader<'_>,
+    state_count: usize,
+    limits: SynthesisLimits,
+) -> Result<Vec<SynthesisAction>> {
+    let count = reader.bounded_usize("action count", limits.max_actions.min(FORMAT_MAX_ACTIONS))?;
+    let mut actions = Vec::with_capacity(count);
+    for _ in 0..count {
+        actions.push(decode_action(reader, state_count)?);
+    }
+    Ok(actions)
+}
+
+fn decode_action(reader: &mut Reader<'_>, state_count: usize) -> Result<SynthesisAction> {
+    Ok(SynthesisAction {
+        edge: KineticEdgeKey {
+            u: reader.usize()?,
+            v: reader.usize()?,
+        },
+        cost: reader.u64()?,
+        states: decode_indices(reader, state_count, state_count)?,
+    })
+}
+
+fn decode_search_data(reader: &mut Reader<'_>, action_count: usize) -> Result<SearchData> {
+    let max_edits = reader.usize()?;
+    Ok(SearchData {
+        max_edits,
+        limits: decode_work_limits(reader)?,
+        selection: decode_selection_data(reader, action_count)?,
+        work: decode_producer_work(reader)?,
+    })
+}
+
+fn decode_work_limits(reader: &mut Reader<'_>) -> Result<WorkLimits> {
+    Ok(WorkLimits {
+        oracle: reader.usize()?,
+        nodes: reader.usize()?,
+    })
+}
+
+fn decode_selection_data(reader: &mut Reader<'_>, action_count: usize) -> Result<SelectionData> {
+    Ok(SelectionData {
+        status: SynthesisStatus::from_code(reader.u8()?)?,
+        selected: decode_indices(reader, action_count, action_count)?,
+        lower_bound_cost: reader.optional_u64()?,
+        upper_bound_cost: reader.optional_u64()?,
+    })
+}
+
+fn decode_producer_work(reader: &mut Reader<'_>) -> Result<ProducerWork> {
+    Ok(ProducerWork {
+        oracle_calls: reader.usize()?,
+        search_nodes: reader.usize()?,
+        cache_hits: reader.usize()?,
+    })
+}
+
+fn decode_proof_data(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    state_count: usize,
+    limits: SynthesisLimits,
+) -> Result<ProofData> {
+    let mut terms = 0usize;
+    let root_blockers = decode_root_blockers(reader, action_count, &mut terms, limits)?;
+    let before_ranks = decode_usizes(reader, state_count)?;
+    let after_ranks = decode_usizes(reader, state_count)?;
+    let mut nodes = 0usize;
+    let proof = decode_optional_proof(reader, action_count, &mut nodes, &mut terms, limits)?;
+    let claimed_nodes = reader.usize()?;
+    let topology_checks = reader.usize()?;
+    if claimed_nodes != nodes {
+        return Err(Error::InvalidInput(
+            "synthesis proof count or digest differs from its content".into(),
+        ));
+    }
+    Ok(ProofData {
+        root_blockers,
+        before_ranks,
+        after_ranks,
+        proof,
+        nodes,
+        topology_checks,
+    })
+}
+
+fn decode_root_blockers(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    terms: &mut usize,
+    limits: SynthesisLimits,
+) -> Result<Vec<Vec<usize>>> {
+    let count = reader.bounded_usize("root blocker count", limits.max_terms)?;
+    let mut blockers = Vec::with_capacity(count);
+    for _ in 0..count {
+        let blocker = decode_indices(reader, action_count, limits.max_terms)?;
+        add_proof_terms(terms, blocker.len(), limits.max_terms, "synthesis proof")?;
+        blockers.push(blocker);
+    }
+    Ok(blockers)
+}
+
+fn decode_optional_proof(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    nodes: &mut usize,
+    terms: &mut usize,
+    limits: SynthesisLimits,
+) -> Result<Option<ProofNode>> {
+    match reader.u8()? {
+        0 => Ok(None),
+        1 => decode_proof(reader, action_count, 0, nodes, terms, limits).map(Some),
+        _ => Err(Error::InvalidInput(
+            "synthesis proof-presence flag is invalid".into(),
+        )),
+    }
+}
+
+fn add_proof_terms(total: &mut usize, count: usize, maximum: usize, subject: &str) -> Result<()> {
+    *total = total
+        .checked_add(count)
+        .ok_or_else(|| Error::InvalidInput(format!("{subject} term count overflows")))?;
+    if *total > maximum {
+        Err(Error::InvalidInput(format!(
+            "{subject} terms exceed their limit"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_trailer(reader: &mut Reader<'_>) -> Result<[u8; 32]> {
+    let digest = reader.array32()?;
+    if reader.remaining() != 0 {
+        Err(Error::InvalidInput(
+            "trailing bytes follow the synthesis artifact".into(),
+        ))
+    } else {
+        Ok(digest)
+    }
+}
+
+fn validate_decoded_artifact(
+    artifact: &SynthesisArtifact,
+    bytes: &[u8],
+    limits: SynthesisLimits,
+) -> Result<()> {
+    if artifact.compute_digest()? != artifact.digest {
+        return Err(Error::InvalidInput(
+            "synthesis proof count or digest differs from its content".into(),
+        ));
+    }
+    artifact.verify(limits)?;
+    if artifact.encode(limits)? != bytes {
+        return Err(Error::InvalidInput(
+            "synthesis artifact encoding is not canonical".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn encode_prefix(output: &mut Vec<u8>) {
+    output.extend_from_slice(MAGIC);
+    output.extend_from_slice(&VERSION.to_be_bytes());
+    output.push(F64_BITS_CODEC);
+}
+
+fn encode_specification(
+    output: &mut Vec<u8>,
+    specification: &TopologicalSpecification,
+) -> Result<()> {
+    put_usize(output, specification.vertex_count)?;
+    put_usize(output, specification.dimension)?;
+    output.extend_from_slice(&specification.scale.to_bits().to_be_bytes());
+    output.extend_from_slice(&specification.modulus.to_be_bytes());
+    encode_source(output, &specification.source)?;
+    put_usize(output, specification.states.len())?;
+    for state in &specification.states {
+        encode_state(output, state)?;
+    }
+    Ok(())
+}
+
+fn encode_state(output: &mut Vec<u8>, state: &SynthesisState) -> Result<()> {
+    output.extend_from_slice(&state.scenario.to_be_bytes());
+    output.extend_from_slice(&state.step.to_be_bytes());
+    encode_edges(output, &state.active_edges)?;
+    output.extend_from_slice(state.target_space.as_bytes());
+    encode_target(output, &state.target)?;
+    put_usize(output, state.max_surviving_rank)
+}
+
+fn encode_target(output: &mut Vec<u8>, target: &[Vec<SynthesisCoordinate>]) -> Result<()> {
+    put_usize(output, target.len())?;
+    for row in target {
+        encode_target_row(output, row)?;
+    }
+    Ok(())
+}
+
+fn encode_target_row(output: &mut Vec<u8>, row: &[SynthesisCoordinate]) -> Result<()> {
+    put_usize(output, row.len())?;
+    for term in row {
+        put_usize(output, term.basis)?;
+        output.extend_from_slice(&term.coefficient.to_be_bytes());
+    }
+    Ok(())
+}
+
+fn encode_actions(output: &mut Vec<u8>, actions: &[SynthesisAction]) -> Result<()> {
+    put_usize(output, actions.len())?;
+    for action in actions {
+        encode_action(output, action)?;
+    }
+    Ok(())
+}
+
+fn encode_action(output: &mut Vec<u8>, action: &SynthesisAction) -> Result<()> {
+    put_usize(output, action.edge.u)?;
+    put_usize(output, action.edge.v)?;
+    output.extend_from_slice(&action.cost.to_be_bytes());
+    encode_usizes(output, &action.states)
+}
+
+fn encode_search_data(output: &mut Vec<u8>, artifact: &SynthesisArtifact) -> Result<()> {
+    put_usize(output, artifact.max_edits)?;
+    put_usize(output, artifact.oracle_limit)?;
+    put_usize(output, artifact.node_limit)?;
+    output.push(artifact.status.code());
+    encode_usizes(output, &artifact.selected)?;
+    encode_optional_u64(output, artifact.lower_bound_cost);
+    encode_optional_u64(output, artifact.upper_bound_cost);
+    put_usize(output, artifact.producer_oracle_calls)?;
+    put_usize(output, artifact.producer_search_nodes)?;
+    put_usize(output, artifact.producer_cache_hits)
+}
+
+fn encode_proof_data(output: &mut Vec<u8>, artifact: &SynthesisArtifact) -> Result<()> {
+    encode_root_blockers(output, &artifact.root_blockers)?;
+    encode_usizes(output, &artifact.before_ranks)?;
+    encode_usizes(output, &artifact.after_ranks)?;
+    encode_optional_proof(output, artifact.proof.as_ref())?;
+    put_usize(output, artifact.proof_nodes)?;
+    put_usize(output, artifact.proof_topology_checks)
+}
+
+fn encode_root_blockers(output: &mut Vec<u8>, blockers: &[Vec<usize>]) -> Result<()> {
+    put_usize(output, blockers.len())?;
+    for blocker in blockers {
+        encode_usizes(output, blocker)?;
+    }
+    Ok(())
+}
+
+fn encode_optional_proof(output: &mut Vec<u8>, proof: Option<&ProofNode>) -> Result<()> {
+    match proof {
+        Some(proof) => {
+            output.push(1);
+            encode_proof(output, proof)
+        }
+        None => {
+            output.push(0);
+            Ok(())
+        }
     }
 }
 
@@ -1163,6 +1485,24 @@ impl<'a> ProofBuilder<'a> {
         available: Vec<usize>,
         depth: usize,
     ) -> Result<ProofNode> {
+        self.record_node(depth)?;
+        let included_cost = selected_cost(self.costs, &included)?;
+        if let Some(leaf) = self.early_leaf(&included, &available, included_cost)? {
+            return Ok(leaf);
+        }
+        let blockers = self.pack_blockers(&included, &available)?;
+        if blockers.is_empty() {
+            return Err(Error::InvalidInput(
+                "synthesis proof found an unreported feasible action set".into(),
+            ));
+        }
+        if let Some(leaf) = self.blocker_leaf(&included, included_cost, &blockers)? {
+            return Ok(leaf);
+        }
+        self.branch(included, available, blockers, depth)
+    }
+
+    fn record_node(&mut self, depth: usize) -> Result<()> {
         self.nodes = self
             .nodes
             .checked_add(1)
@@ -1174,46 +1514,67 @@ impl<'a> ProofBuilder<'a> {
                 "synthesis proof tree exceeds its node or depth limit".into(),
             ));
         }
-        let included_cost = selected_cost(self.costs, &included)?;
+        Ok(())
+    }
+
+    fn early_leaf(
+        &mut self,
+        included: &[usize],
+        available: &[usize],
+        included_cost: u64,
+    ) -> Result<Option<ProofNode>> {
         if self.cutoff.is_some_and(|cutoff| included_cost >= cutoff) {
-            return Ok(ProofNode::Cost);
+            return Ok(Some(ProofNode::Cost));
         }
         if included.len() == self.max_edits {
-            if !self.check_survival(&included)? {
+            if !self.check_survival(included)? {
                 return Err(Error::InvalidInput(
                     "synthesis proof found a cheaper feasible action set".into(),
                 ));
             }
-            return Ok(ProofNode::SurvivingEditLimit);
+            return Ok(Some(ProofNode::SurvivingEditLimit));
         }
-        let maximum = merge(&included, &available);
+        let maximum = merge(included, available);
         if self.check_survival(&maximum)? {
-            return Ok(ProofNode::SurvivingMaximum);
+            return Ok(Some(ProofNode::SurvivingMaximum));
         }
-        let blockers = self.pack_blockers(&included, &available)?;
-        if blockers.is_empty() {
-            return Err(Error::InvalidInput(
-                "synthesis proof found an unreported feasible action set".into(),
-            ));
-        }
+        Ok(None)
+    }
+
+    fn blocker_leaf(
+        &mut self,
+        included: &[usize],
+        included_cost: u64,
+        blockers: &[Vec<usize>],
+    ) -> Result<Option<ProofNode>> {
         let cardinality = included.len().saturating_add(blockers.len());
         if cardinality > self.max_edits {
-            self.add_blocker_terms(&blockers)?;
-            return Ok(ProofNode::BlockerBound {
+            self.add_blocker_terms(blockers)?;
+            return Ok(Some(ProofNode::BlockerBound {
                 kind: BoundKind::Edits,
-                blockers,
-            });
+                blockers: blockers.to_vec(),
+            }));
         }
         let bound = included_cost
-            .checked_add(blocker_bound(self.costs, &blockers)?)
+            .checked_add(blocker_bound(self.costs, blockers)?)
             .ok_or_else(|| Error::InvalidInput("synthesis proof cost bound overflows".into()))?;
         if self.cutoff.is_some_and(|cutoff| bound >= cutoff) {
-            self.add_blocker_terms(&blockers)?;
-            return Ok(ProofNode::BlockerBound {
+            self.add_blocker_terms(blockers)?;
+            return Ok(Some(ProofNode::BlockerBound {
                 kind: BoundKind::Cost,
-                blockers,
-            });
+                blockers: blockers.to_vec(),
+            }));
         }
+        Ok(None)
+    }
+
+    fn branch(
+        &mut self,
+        included: Vec<usize>,
+        available: Vec<usize>,
+        blockers: Vec<Vec<usize>>,
+        depth: usize,
+    ) -> Result<ProofNode> {
         let mut blocker = blockers
             .into_iter()
             .min_by_key(|blocker| (blocker.len(), blocker_min_cost(self.costs, blocker)))
@@ -1336,6 +1697,12 @@ impl<'a> ProofVerifier<'a> {
         available: Vec<usize>,
         depth: usize,
     ) -> Result<()> {
+        self.record_node(depth)?;
+        let included_cost = selected_cost(self.costs, &included)?;
+        self.verify_node_kind(proof, included, available, included_cost, depth)
+    }
+
+    fn record_node(&mut self, depth: usize) -> Result<()> {
         self.nodes = self
             .nodes
             .checked_add(1)
@@ -1347,70 +1714,120 @@ impl<'a> ProofVerifier<'a> {
                 "synthesis proof tree exceeds its node or depth limit".into(),
             ));
         }
-        let included_cost = selected_cost(self.costs, &included)?;
+        Ok(())
+    }
+
+    fn verify_node_kind(
+        &mut self,
+        proof: &ProofNode,
+        included: Vec<usize>,
+        available: Vec<usize>,
+        included_cost: u64,
+        depth: usize,
+    ) -> Result<()> {
         match proof {
-            ProofNode::Cost => {
-                if self.cutoff.is_none_or(|cutoff| included_cost < cutoff) {
-                    return Err(Error::InvalidInput(
-                        "synthesis cost leaf does not reach the incumbent".into(),
-                    ));
-                }
-            }
-            ProofNode::SurvivingMaximum => {
-                let maximum = merge(&included, &available);
-                if !self.check_survival(&maximum)? {
-                    return Err(Error::InvalidInput(
-                        "synthesis maximal-survival leaf is feasible".into(),
-                    ));
-                }
-            }
-            ProofNode::SurvivingEditLimit => {
-                if included.len() != self.max_edits || !self.check_survival(&included)? {
-                    return Err(Error::InvalidInput(
-                        "synthesis edit-limit leaf is invalid".into(),
-                    ));
-                }
-            }
+            ProofNode::Cost => self.verify_cost_leaf(included_cost),
+            ProofNode::SurvivingMaximum => self.verify_maximum_leaf(&included, &available),
+            ProofNode::SurvivingEditLimit => self.verify_edit_leaf(&included),
             ProofNode::BlockerBound { kind, blockers } => {
-                self.verify_blockers(&included, &available, blockers)?;
-                match kind {
-                    BoundKind::Edits
-                        if included.len().saturating_add(blockers.len()) > self.max_edits => {}
-                    BoundKind::Cost
-                        if self.cutoff.is_some_and(|cutoff| {
-                            included_cost
-                                .checked_add(
-                                    blocker_bound(self.costs, blockers).unwrap_or(u64::MAX),
-                                )
-                                .is_some_and(|bound| bound >= cutoff)
-                        }) => {}
-                    _ => {
-                        return Err(Error::InvalidInput(
-                            "synthesis blocker leaf does not close its branch".into(),
-                        ));
-                    }
-                }
+                self.verify_bound_leaf(&included, &available, included_cost, *kind, blockers)
             }
             ProofNode::Branch { blocker, children } => {
-                self.verify_blockers(&included, &available, std::slice::from_ref(blocker))?;
-                if blocker.len() != children.len() {
-                    return Err(Error::InvalidInput(
-                        "synthesis branch child count differs from its blocker".into(),
-                    ));
-                }
-                let mut excluded = BTreeSet::new();
-                for (&candidate, child) in blocker.iter().zip(children) {
-                    let mut child_included = included.clone();
-                    insert_sorted(&mut child_included, candidate);
-                    let child_available = available
-                        .iter()
-                        .copied()
-                        .filter(|item| *item != candidate && !excluded.contains(item))
-                        .collect();
-                    self.verify_node(child, child_included, child_available, depth + 1)?;
-                    excluded.insert(candidate);
-                }
+                self.verify_branch(&included, &available, blocker, children, depth)
             }
+        }
+    }
+
+    fn verify_cost_leaf(&self, included_cost: u64) -> Result<()> {
+        if self.cutoff.is_none_or(|cutoff| included_cost < cutoff) {
+            Err(Error::InvalidInput(
+                "synthesis cost leaf does not reach the incumbent".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn verify_maximum_leaf(&mut self, included: &[usize], available: &[usize]) -> Result<()> {
+        if !self.check_survival(&merge(included, available))? {
+            Err(Error::InvalidInput(
+                "synthesis maximal-survival leaf is feasible".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn verify_edit_leaf(&mut self, included: &[usize]) -> Result<()> {
+        if included.len() != self.max_edits || !self.check_survival(included)? {
+            Err(Error::InvalidInput(
+                "synthesis edit-limit leaf is invalid".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn verify_bound_leaf(
+        &mut self,
+        included: &[usize],
+        available: &[usize],
+        included_cost: u64,
+        kind: BoundKind,
+        blockers: &[Vec<usize>],
+    ) -> Result<()> {
+        self.verify_blockers(included, available, blockers)?;
+        if self.bound_closes(included, included_cost, kind, blockers) {
+            Ok(())
+        } else {
+            Err(Error::InvalidInput(
+                "synthesis blocker leaf does not close its branch".into(),
+            ))
+        }
+    }
+
+    fn bound_closes(
+        &self,
+        included: &[usize],
+        included_cost: u64,
+        kind: BoundKind,
+        blockers: &[Vec<usize>],
+    ) -> bool {
+        match kind {
+            BoundKind::Edits => included.len().saturating_add(blockers.len()) > self.max_edits,
+            BoundKind::Cost => self.cutoff.is_some_and(|cutoff| {
+                included_cost
+                    .checked_add(blocker_bound(self.costs, blockers).unwrap_or(u64::MAX))
+                    .is_some_and(|bound| bound >= cutoff)
+            }),
+        }
+    }
+
+    fn verify_branch(
+        &mut self,
+        included: &[usize],
+        available: &[usize],
+        blocker: &[usize],
+        children: &[ProofNode],
+        depth: usize,
+    ) -> Result<()> {
+        self.verify_blockers(included, available, std::slice::from_ref(&blocker.to_vec()))?;
+        if blocker.len() != children.len() {
+            return Err(Error::InvalidInput(
+                "synthesis branch child count differs from its blocker".into(),
+            ));
+        }
+        let mut excluded = BTreeSet::new();
+        for (&candidate, child) in blocker.iter().zip(children) {
+            let mut child_included = included.to_vec();
+            insert_sorted(&mut child_included, candidate);
+            let child_available = available
+                .iter()
+                .copied()
+                .filter(|item| *item != candidate && !excluded.contains(item))
+                .collect();
+            self.verify_node(child, child_included, child_available, depth + 1)?;
+            excluded.insert(candidate);
         }
         Ok(())
     }
@@ -1472,6 +1889,17 @@ fn validate_problem(
     node_limit: usize,
     limits: SynthesisLimits,
 ) -> Result<()> {
+    validate_specification_envelope(specification, limits)?;
+    validate_source(specification, limits)?;
+    validate_states(specification, limits)?;
+    validate_actions(specification, actions, limits)?;
+    validate_work_limits(oracle_limit, node_limit, limits)
+}
+
+fn validate_specification_envelope(
+    specification: &TopologicalSpecification,
+    limits: SynthesisLimits,
+) -> Result<()> {
     if specification.vertex_count > limits.max_vertices
         || specification.states.len() > limits.max_states.min(FORMAT_MAX_STATES)
         || !specification.scale.is_finite()
@@ -1481,65 +1909,120 @@ fn validate_problem(
             "synthesis specification size or scale is invalid".into(),
         ));
     }
-    validate_source(specification, limits)?;
+    Ok(())
+}
+
+fn validate_states(
+    specification: &TopologicalSpecification,
+    limits: SynthesisLimits,
+) -> Result<()> {
     let mut prior = None;
     let mut terms = 0usize;
     for state in &specification.states {
-        if prior.is_some_and(|key| key >= (state.scenario, state.step)) {
-            return Err(Error::InvalidInput(
-                "synthesis states are not in canonical scenario and step order".into(),
-            ));
-        }
+        validate_state_order(prior, state)?;
         prior = Some((state.scenario, state.step));
         validate_edges(
             specification.vertex_count,
             &state.active_edges,
             limits.max_edges_per_state,
         )?;
-        for row in &state.target {
-            if row.is_empty()
-                || row.windows(2).any(|pair| pair[0].basis >= pair[1].basis)
-                || row
-                    .iter()
-                    .any(|term| term.coefficient == 0 || term.coefficient >= specification.modulus)
-            {
-                return Err(Error::InvalidInput(
-                    "synthesis target coordinates are not canonical".into(),
-                ));
-            }
-            terms = terms.checked_add(row.len()).ok_or_else(|| {
-                Error::InvalidInput("synthesis target term count overflows".into())
-            })?;
-        }
+        validate_target(&state.target, specification.modulus, &mut terms)?;
     }
     if terms > limits.max_terms {
         return Err(Error::InvalidInput(
             "synthesis target terms exceed their limit".into(),
         ));
     }
+    Ok(())
+}
+
+fn validate_state_order(prior: Option<(u64, u64)>, state: &SynthesisState) -> Result<()> {
+    if prior.is_some_and(|key| key >= (state.scenario, state.step)) {
+        Err(Error::InvalidInput(
+            "synthesis states are not in canonical scenario and step order".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_target(
+    target: &[Vec<SynthesisCoordinate>],
+    modulus: u32,
+    terms: &mut usize,
+) -> Result<()> {
+    for row in target {
+        validate_target_row(row, modulus)?;
+        *terms = terms
+            .checked_add(row.len())
+            .ok_or_else(|| Error::InvalidInput("synthesis target term count overflows".into()))?;
+    }
+    Ok(())
+}
+
+fn validate_target_row(row: &[SynthesisCoordinate], modulus: u32) -> Result<()> {
+    let invalid_coefficient = row
+        .iter()
+        .any(|term| term.coefficient == 0 || term.coefficient >= modulus);
+    if row.is_empty()
+        || row.windows(2).any(|pair| pair[0].basis >= pair[1].basis)
+        || invalid_coefficient
+    {
+        Err(Error::InvalidInput(
+            "synthesis target coordinates are not canonical".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_actions(
+    specification: &TopologicalSpecification,
+    actions: &[SynthesisAction],
+    limits: SynthesisLimits,
+) -> Result<()> {
     if actions.len() > limits.max_actions.min(FORMAT_MAX_ACTIONS)
         || actions.windows(2).any(|pair| pair[0] >= pair[1])
-        || actions.iter().any(|action| {
-            action.cost == 0
-                || action.edge.u >= action.edge.v
-                || action.edge.v >= specification.vertex_count
-                || action.states.is_empty()
-                || action
-                    .states
-                    .iter()
-                    .any(|state| *state >= specification.states.len())
-                || action.states.windows(2).any(|pair| pair[0] >= pair[1])
-        })
-        || oracle_limit == 0
+        || actions
+            .iter()
+            .any(|action| invalid_action(specification, action))
+    {
+        Err(Error::InvalidInput(
+            "synthesis actions, edit bound, or work limits are invalid".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn invalid_action(specification: &TopologicalSpecification, action: &SynthesisAction) -> bool {
+    action.cost == 0
+        || action.edge.u >= action.edge.v
+        || action.edge.v >= specification.vertex_count
+        || action.states.is_empty()
+        || action
+            .states
+            .iter()
+            .any(|state| *state >= specification.states.len())
+        || action.states.windows(2).any(|pair| pair[0] >= pair[1])
+}
+
+fn validate_work_limits(
+    oracle_limit: usize,
+    node_limit: usize,
+    limits: SynthesisLimits,
+) -> Result<()> {
+    if oracle_limit == 0
         || oracle_limit > limits.max_oracle_calls
         || node_limit == 0
         || node_limit > limits.max_search_nodes
     {
-        return Err(Error::InvalidInput(
+        Err(Error::InvalidInput(
             "synthesis actions, edit bound, or work limits are invalid".into(),
-        ));
+        ))
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 fn validate_source(
@@ -1753,25 +2236,31 @@ fn encode_proof(output: &mut Vec<u8>, proof: &ProofNode) -> Result<()> {
         ProofNode::Cost => output.push(1),
         ProofNode::SurvivingMaximum => output.push(2),
         ProofNode::SurvivingEditLimit => output.push(3),
-        ProofNode::BlockerBound { kind, blockers } => {
-            output.push(4);
-            output.push(match kind {
-                BoundKind::Cost => 1,
-                BoundKind::Edits => 2,
-            });
-            put_usize(output, blockers.len())?;
-            for blocker in blockers {
-                encode_usizes(output, blocker)?;
-            }
-        }
-        ProofNode::Branch { blocker, children } => {
-            output.push(5);
-            encode_usizes(output, blocker)?;
-            put_usize(output, children.len())?;
-            for child in children {
-                encode_proof(output, child)?;
-            }
-        }
+        ProofNode::BlockerBound { kind, blockers } => encode_bound_node(output, *kind, blockers)?,
+        ProofNode::Branch { blocker, children } => encode_branch_node(output, blocker, children)?,
+    }
+    Ok(())
+}
+
+fn encode_bound_node(output: &mut Vec<u8>, kind: BoundKind, blockers: &[Vec<usize>]) -> Result<()> {
+    output.push(4);
+    output.push(match kind {
+        BoundKind::Cost => 1,
+        BoundKind::Edits => 2,
+    });
+    encode_root_blockers(output, blockers)
+}
+
+fn encode_branch_node(
+    output: &mut Vec<u8>,
+    blocker: &[usize],
+    children: &[ProofNode],
+) -> Result<()> {
+    output.push(5);
+    encode_usizes(output, blocker)?;
+    put_usize(output, children.len())?;
+    for child in children {
+        encode_proof(output, child)?;
     }
     Ok(())
 }
@@ -1785,142 +2274,214 @@ fn decode_proof(
     terms: &mut usize,
     limits: SynthesisLimits,
 ) -> Result<ProofNode> {
-    *nodes = nodes
-        .checked_add(1)
-        .ok_or_else(|| Error::InvalidInput("synthesis proof node count overflows".into()))?;
-    if *nodes > limits.max_proof_nodes.min(FORMAT_MAX_PROOF_NODES) || depth > limits.max_proof_depth
-    {
-        return Err(Error::InvalidInput(
-            "synthesis proof tree exceeds its node or depth limit".into(),
-        ));
-    }
+    record_decoded_node(nodes, depth, limits)?;
     match reader.u8()? {
         1 => Ok(ProofNode::Cost),
         2 => Ok(ProofNode::SurvivingMaximum),
         3 => Ok(ProofNode::SurvivingEditLimit),
-        4 => {
-            let kind = match reader.u8()? {
-                1 => BoundKind::Cost,
-                2 => BoundKind::Edits,
-                _ => {
-                    return Err(Error::InvalidInput(
-                        "synthesis proof bound kind is invalid".into(),
-                    ));
-                }
-            };
-            let count = reader.bounded_usize("proof blocker count", limits.max_terms)?;
-            let mut blockers = Vec::with_capacity(count);
-            for _ in 0..count {
-                let blocker = decode_indices(reader, action_count, limits.max_terms)?;
-                *terms = terms.checked_add(blocker.len()).ok_or_else(|| {
-                    Error::InvalidInput("synthesis proof term count overflows".into())
-                })?;
-                if *terms > limits.max_terms.min(FORMAT_MAX_PROOF_TERMS) {
-                    return Err(Error::InvalidInput(
-                        "synthesis proof terms exceed their limit".into(),
-                    ));
-                }
-                blockers.push(blocker);
-            }
-            Ok(ProofNode::BlockerBound { kind, blockers })
-        }
-        5 => {
-            let blocker = decode_indices(reader, action_count, limits.max_terms)?;
-            *terms = terms.checked_add(blocker.len()).ok_or_else(|| {
-                Error::InvalidInput("synthesis proof term count overflows".into())
-            })?;
-            if *terms > limits.max_terms.min(FORMAT_MAX_PROOF_TERMS) {
-                return Err(Error::InvalidInput(
-                    "synthesis proof terms exceed their limit".into(),
-                ));
-            }
-            let child_count = reader.bounded_usize("proof child count", action_count)?;
-            if child_count != blocker.len() {
-                return Err(Error::InvalidInput(
-                    "synthesis branch child count differs from its blocker".into(),
-                ));
-            }
-            let mut children = Vec::with_capacity(child_count);
-            for _ in 0..child_count {
-                children.push(decode_proof(
-                    reader,
-                    action_count,
-                    depth + 1,
-                    nodes,
-                    terms,
-                    limits,
-                )?);
-            }
-            Ok(ProofNode::Branch { blocker, children })
-        }
+        4 => decode_bound_node(reader, action_count, terms, limits),
+        5 => decode_branch_node(reader, action_count, depth, nodes, terms, limits),
         _ => Err(Error::InvalidInput(
             "synthesis proof node kind is invalid".into(),
         )),
     }
 }
 
+fn record_decoded_node(nodes: &mut usize, depth: usize, limits: SynthesisLimits) -> Result<()> {
+    *nodes = nodes
+        .checked_add(1)
+        .ok_or_else(|| Error::InvalidInput("synthesis proof node count overflows".into()))?;
+    if *nodes > limits.max_proof_nodes.min(FORMAT_MAX_PROOF_NODES) || depth > limits.max_proof_depth
+    {
+        Err(Error::InvalidInput(
+            "synthesis proof tree exceeds its node or depth limit".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_bound_node(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    terms: &mut usize,
+    limits: SynthesisLimits,
+) -> Result<ProofNode> {
+    Ok(ProofNode::BlockerBound {
+        kind: decode_bound_kind(reader)?,
+        blockers: decode_proof_blockers(reader, action_count, terms, limits)?,
+    })
+}
+
+fn decode_bound_kind(reader: &mut Reader<'_>) -> Result<BoundKind> {
+    match reader.u8()? {
+        1 => Ok(BoundKind::Cost),
+        2 => Ok(BoundKind::Edits),
+        _ => Err(Error::InvalidInput(
+            "synthesis proof bound kind is invalid".into(),
+        )),
+    }
+}
+
+fn decode_proof_blockers(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    terms: &mut usize,
+    limits: SynthesisLimits,
+) -> Result<Vec<Vec<usize>>> {
+    let count = reader.bounded_usize("proof blocker count", limits.max_terms)?;
+    let mut blockers = Vec::with_capacity(count);
+    for _ in 0..count {
+        let blocker = decode_indices(reader, action_count, limits.max_terms)?;
+        add_proof_terms(
+            terms,
+            blocker.len(),
+            limits.max_terms.min(FORMAT_MAX_PROOF_TERMS),
+            "synthesis proof",
+        )?;
+        blockers.push(blocker);
+    }
+    Ok(blockers)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_branch_node(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    depth: usize,
+    nodes: &mut usize,
+    terms: &mut usize,
+    limits: SynthesisLimits,
+) -> Result<ProofNode> {
+    let blocker = decode_indices(reader, action_count, limits.max_terms)?;
+    add_proof_terms(
+        terms,
+        blocker.len(),
+        limits.max_terms.min(FORMAT_MAX_PROOF_TERMS),
+        "synthesis proof",
+    )?;
+    let count = reader.bounded_usize("proof child count", action_count)?;
+    if count != blocker.len() {
+        return Err(Error::InvalidInput(
+            "synthesis branch child count differs from its blocker".into(),
+        ));
+    }
+    let children =
+        decode_proof_children(reader, action_count, count, depth + 1, nodes, terms, limits)?;
+    Ok(ProofNode::Branch { blocker, children })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_proof_children(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    count: usize,
+    depth: usize,
+    nodes: &mut usize,
+    terms: &mut usize,
+    limits: SynthesisLimits,
+) -> Result<Vec<ProofNode>> {
+    let mut children = Vec::with_capacity(count);
+    for _ in 0..count {
+        children.push(decode_proof(
+            reader,
+            action_count,
+            depth,
+            nodes,
+            terms,
+            limits,
+        )?);
+    }
+    Ok(children)
+}
+
 fn encode_source(output: &mut Vec<u8>, source: &SynthesisSource) -> Result<()> {
     match source {
         SynthesisSource::Finite => output.push(0),
-        SynthesisSource::Affine {
-            scenario,
-            edges,
-            start,
-            end,
-            maximum_rank,
-        } => {
-            output.push(1);
-            output.extend_from_slice(&scenario.to_be_bytes());
-            output.extend_from_slice(&start.to_bits().to_be_bytes());
-            output.extend_from_slice(&end.to_bits().to_be_bytes());
-            put_usize(output, *maximum_rank)?;
-            put_usize(output, edges.len())?;
-            for edge in edges {
-                put_usize(output, edge.u)?;
-                put_usize(output, edge.v)?;
-                output.extend_from_slice(&edge.intercept.to_bits().to_be_bytes());
-                output.extend_from_slice(&edge.velocity.to_bits().to_be_bytes());
-            }
-        }
+        SynthesisSource::Affine { .. } => encode_affine_source(output, source)?,
     }
+    Ok(())
+}
+
+fn encode_affine_source(output: &mut Vec<u8>, source: &SynthesisSource) -> Result<()> {
+    let SynthesisSource::Affine {
+        scenario,
+        edges,
+        start,
+        end,
+        maximum_rank,
+    } = source
+    else {
+        return Ok(());
+    };
+    output.push(1);
+    output.extend_from_slice(&scenario.to_be_bytes());
+    output.extend_from_slice(&start.to_bits().to_be_bytes());
+    output.extend_from_slice(&end.to_bits().to_be_bytes());
+    put_usize(output, *maximum_rank)?;
+    put_usize(output, edges.len())?;
+    for edge in edges {
+        encode_affine_edge(output, edge)?;
+    }
+    Ok(())
+}
+
+fn encode_affine_edge(output: &mut Vec<u8>, edge: &KineticEdge) -> Result<()> {
+    put_usize(output, edge.u)?;
+    put_usize(output, edge.v)?;
+    output.extend_from_slice(&edge.intercept.to_bits().to_be_bytes());
+    output.extend_from_slice(&edge.velocity.to_bits().to_be_bytes());
     Ok(())
 }
 
 fn decode_source(reader: &mut Reader<'_>, limits: SynthesisLimits) -> Result<SynthesisSource> {
     match reader.u8()? {
         0 => Ok(SynthesisSource::Finite),
-        1 => {
-            let scenario = reader.u64()?;
-            let start = f64::from_bits(reader.u64()?);
-            let end = f64::from_bits(reader.u64()?);
-            let maximum_rank = reader.usize()?;
-            let count = reader.bounded_usize("affine edge count", limits.kinetic.max_edges)?;
-            if count > reader.remaining() / 32 {
-                return Err(Error::InvalidInput(
-                    "synthesis affine edge count exceeds the remaining bytes".into(),
-                ));
-            }
-            let mut edges = Vec::with_capacity(count);
-            for _ in 0..count {
-                edges.push(KineticEdge {
-                    u: reader.usize()?,
-                    v: reader.usize()?,
-                    intercept: f64::from_bits(reader.u64()?),
-                    velocity: f64::from_bits(reader.u64()?),
-                });
-            }
-            Ok(SynthesisSource::Affine {
-                scenario,
-                edges,
-                start,
-                end,
-                maximum_rank,
-            })
-        }
+        1 => decode_affine_source(reader, limits),
         _ => Err(Error::InvalidInput(
             "synthesis source kind is invalid".into(),
         )),
     }
+}
+
+fn decode_affine_source(
+    reader: &mut Reader<'_>,
+    limits: SynthesisLimits,
+) -> Result<SynthesisSource> {
+    let scenario = reader.u64()?;
+    let start = f64::from_bits(reader.u64()?);
+    let end = f64::from_bits(reader.u64()?);
+    let maximum_rank = reader.usize()?;
+    let edges = decode_affine_edges(reader, limits)?;
+    Ok(SynthesisSource::Affine {
+        scenario,
+        edges,
+        start,
+        end,
+        maximum_rank,
+    })
+}
+
+fn decode_affine_edges(
+    reader: &mut Reader<'_>,
+    limits: SynthesisLimits,
+) -> Result<Vec<KineticEdge>> {
+    let count = reader.bounded_usize("affine edge count", limits.kinetic.max_edges)?;
+    if count > reader.remaining() / 32 {
+        return Err(Error::InvalidInput(
+            "synthesis affine edge count exceeds the remaining bytes".into(),
+        ));
+    }
+    (0..count).map(|_| decode_affine_edge(reader)).collect()
+}
+
+fn decode_affine_edge(reader: &mut Reader<'_>) -> Result<KineticEdge> {
+    Ok(KineticEdge {
+        u: reader.usize()?,
+        v: reader.usize()?,
+        intercept: f64::from_bits(reader.u64()?),
+        velocity: f64::from_bits(reader.u64()?),
+    })
 }
 
 fn encode_edges(output: &mut Vec<u8>, edges: &[KineticEdgeKey]) -> Result<()> {
