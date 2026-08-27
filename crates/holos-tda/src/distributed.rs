@@ -173,55 +173,80 @@ impl DistributedInterfaceManifest {
 
     /// Decode one canonical bounded `HOLOSDM` version 1 manifest.
     pub fn decode(bytes: &[u8], maximum_bytes: usize) -> Result<Self, DistributedInterfaceError> {
-        if bytes.len() > maximum_bytes {
-            return Err(DistributedInterfaceError::new(
-                "manifest exceeds the byte limit",
-            ));
-        }
+        check_manifest_size(bytes.len(), maximum_bytes)?;
         let mut reader = Reader::new(bytes);
-        if reader.take(8)? != MANIFEST_MAGIC || reader.u16()? != VERSION {
-            return Err(DistributedInterfaceError::new(
-                "unsupported distributed manifest",
-            ));
-        }
-        let job = ArtifactId(reader.array32()?);
-        let max_dim = reader.usize()?;
-        let modulus = reader.u32()?;
-        let separator_vertices = decode_usizes(&mut reader)?;
-        let output_protected_vertices = decode_usizes(&mut reader)?;
-        let shards = decode_ids(&mut reader)?;
-        let folds = decode_ids(&mut reader)?;
-        let result = ArtifactId(reader.array32()?);
-        if reader.remaining() != 0 || shards.is_empty() || folds.len() != shards.len() {
-            return Err(DistributedInterfaceError::new(
-                "distributed manifest shape is invalid",
-            ));
-        }
-        require_canonical_vertices(&separator_vertices)?;
-        require_canonical_vertices(&output_protected_vertices)?;
-        let expected_job = job_id(
-            max_dim,
-            modulus,
-            &separator_vertices,
-            &output_protected_vertices,
-            &shards,
-        );
-        if expected_job != job {
-            return Err(DistributedInterfaceError::new(
-                "distributed manifest binding is invalid",
-            ));
-        }
-        Ok(Self {
-            job,
-            max_dim,
-            modulus,
-            separator_vertices,
-            output_protected_vertices,
-            shards,
-            folds,
-            result,
-        })
+        check_manifest_identity(&mut reader)?;
+        let manifest = decode_manifest_body(&mut reader)?;
+        check_manifest_shape(&manifest, reader.remaining())?;
+        check_manifest_binding(&manifest)?;
+        Ok(manifest)
     }
+}
+
+fn check_manifest_size(actual: usize, limit: usize) -> Result<(), DistributedInterfaceError> {
+    if actual > limit {
+        return Err(DistributedInterfaceError::new(
+            "manifest exceeds the byte limit",
+        ));
+    }
+    Ok(())
+}
+
+fn check_manifest_identity(reader: &mut Reader<'_>) -> Result<(), DistributedInterfaceError> {
+    if reader.take(8)? != MANIFEST_MAGIC || reader.u16()? != VERSION {
+        return Err(DistributedInterfaceError::new(
+            "unsupported distributed manifest",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_manifest_body(
+    reader: &mut Reader<'_>,
+) -> Result<DistributedInterfaceManifest, DistributedInterfaceError> {
+    Ok(DistributedInterfaceManifest {
+        job: ArtifactId(reader.array32()?),
+        max_dim: reader.usize()?,
+        modulus: reader.u32()?,
+        separator_vertices: decode_usizes(reader)?,
+        output_protected_vertices: decode_usizes(reader)?,
+        shards: decode_ids(reader)?,
+        folds: decode_ids(reader)?,
+        result: ArtifactId(reader.array32()?),
+    })
+}
+
+fn check_manifest_shape(
+    manifest: &DistributedInterfaceManifest,
+    remaining: usize,
+) -> Result<(), DistributedInterfaceError> {
+    if remaining != 0 || manifest.shards.is_empty() || manifest.folds.len() != manifest.shards.len()
+    {
+        return Err(DistributedInterfaceError::new(
+            "distributed manifest shape is invalid",
+        ));
+    }
+    require_canonical_vertices(&manifest.separator_vertices)?;
+    require_canonical_vertices(&manifest.output_protected_vertices)?;
+    Ok(())
+}
+
+fn check_manifest_binding(
+    manifest: &DistributedInterfaceManifest,
+) -> Result<(), DistributedInterfaceError> {
+    let expected = job_id(
+        manifest.max_dim,
+        manifest.modulus,
+        &manifest.separator_vertices,
+        &manifest.output_protected_vertices,
+        &manifest.shards,
+    );
+    if expected != manifest.job {
+        return Err(DistributedInterfaceError::new(
+            "distributed manifest binding is invalid",
+        ));
+    }
+    Ok(())
 }
 
 /// Completed distributed composition and its durable manifest.
@@ -253,6 +278,28 @@ impl DistributedInterfaceCommit {
 #[derive(Debug, Clone)]
 pub struct DurableInterfaceStore {
     root: PathBuf,
+}
+
+struct CommitPlan<'a> {
+    job: ArtifactId,
+    shard_ids: &'a [ArtifactId],
+    separator_vertices: Vec<usize>,
+    output_protected_vertices: Vec<usize>,
+    intermediate_protected: Vec<usize>,
+    limits: CertificateLimits,
+}
+
+struct FoldState {
+    accumulator: RelativeInterfaceCertificate,
+    folds: Vec<ArtifactId>,
+    next: usize,
+    accumulator_bytes: Vec<u8>,
+}
+
+struct PreparedCommit<'a> {
+    plan: CommitPlan<'a>,
+    first_id: ArtifactId,
+    first: RelativeInterfaceCertificate,
 }
 
 impl DurableInterfaceStore {
@@ -373,130 +420,210 @@ impl DurableInterfaceStore {
         limits: CertificateLimits,
         mut work: DistributedInterfaceWork,
     ) -> Result<DistributedInterfaceCommit, DistributedInterfaceError> {
-        let Some(first_id) = shard_ids.first().copied() else {
-            return Err(DistributedInterfaceError::new(
-                "distributed composition requires a shard",
-            ));
-        };
+        let prepared = self.prepare_commit(
+            shard_ids,
+            separator_vertices,
+            output_protected_vertices,
+            limits,
+            &mut work,
+        )?;
+        if let Some(manifest) = self.read_manifest(prepared.plan.job, limits.max_bytes)? {
+            return self.load_commit(manifest, work, limits);
+        }
+        let mut state =
+            self.resume_or_start(&prepared.plan, prepared.first_id, prepared.first, &mut work)?;
+        self.compute_folds(&prepared.plan, &mut state, &mut work)?;
+        self.finish_protection(&prepared.plan, &mut state, &mut work)?;
+        self.publish_commit(&prepared.plan, state, work)
+    }
+
+    fn prepare_commit<'a>(
+        &self,
+        shard_ids: &'a [ArtifactId],
+        separator_vertices: &[usize],
+        output_protected_vertices: &[usize],
+        limits: CertificateLimits,
+        work: &mut DistributedInterfaceWork,
+    ) -> Result<PreparedCommit<'a>, DistributedInterfaceError> {
+        let first_id = require_first_shard(shard_ids)?;
         let separator_vertices = canonical_vertices(separator_vertices)?;
         let output_protected_vertices = canonical_vertices(output_protected_vertices)?;
         let first_bytes = self.get(first_id, limits.max_bytes)?;
         work.bytes_read += first_bytes.len();
         work.peak_artifact_bytes = first_bytes.len();
-        let first = RelativeInterfaceCertificate::decode(&first_bytes, limits)
-            .map_err(|error| DistributedInterfaceError::new(error.to_string()))?;
         work.shards_loaded += 1;
+        let first = decode_certificate(&first_bytes, limits)?;
         require_separator(&first, &separator_vertices)?;
-        let job = job_id(
-            first.max_dim(),
-            first.modulus(),
-            &separator_vertices,
-            &output_protected_vertices,
-            shard_ids,
-        );
-        if let Some(manifest) = self.read_manifest(job, limits.max_bytes)? {
-            return self.load_commit(manifest, work, limits);
-        }
-
-        let progress = self.read_progress(job, limits.max_bytes)?;
-        let (mut accumulator, mut folds, start) = if let Some(progress) = progress {
-            if progress.prefix == 0 || progress.prefix > shard_ids.len() {
-                return Err(DistributedInterfaceError::new(
-                    "durable fold progress has an invalid prefix",
-                ));
-            }
-            let bytes = self.get(progress.accumulator, limits.max_bytes)?;
-            work.bytes_read += bytes.len();
-            let accumulator = RelativeInterfaceCertificate::decode(&bytes, limits)
-                .map_err(|error| DistributedInterfaceError::new(error.to_string()))?;
-            work.folds_reused = progress.prefix;
-            (accumulator, progress.folds, progress.prefix)
-        } else {
-            let folds = vec![first_id];
-            self.write_progress(
-                job,
-                &Progress {
-                    prefix: 1,
-                    accumulator: first_id,
-                    folds: folds.clone(),
-                },
-            )?;
-            (first, folds, 1)
-        };
-
-        let mut intermediate_protected = separator_vertices.clone();
-        intermediate_protected.extend(output_protected_vertices.iter().copied());
-        intermediate_protected.sort_unstable();
-        intermediate_protected.dedup();
-        let mut accumulator_bytes = accumulator
-            .encode(limits)
-            .map_err(|error| DistributedInterfaceError::new(error.to_string()))?;
-        for (position, shard_id) in shard_ids.iter().enumerate().skip(start) {
-            let bytes = self.get(*shard_id, limits.max_bytes)?;
-            work.bytes_read += bytes.len();
-            let child = RelativeInterfaceCertificate::decode(&bytes, limits)
-                .map_err(|error| DistributedInterfaceError::new(error.to_string()))?;
-            work.shards_loaded += 1;
-            require_compatible(&accumulator, &child)?;
-            require_separator(&child, &separator_vertices)?;
-            work.peak_artifact_bytes = work
-                .peak_artifact_bytes
-                .max(accumulator_bytes.len().saturating_add(bytes.len()));
-            accumulator = RelativeInterfaceCertificate::compose(
-                &[&accumulator, &child],
-                &intermediate_protected,
-                limits,
-            )
-            .map_err(|error| DistributedInterfaceError::new(error.to_string()))?;
-            accumulator_bytes = accumulator
-                .encode(limits)
-                .map_err(|error| DistributedInterfaceError::new(error.to_string()))?;
-            let (fold, written) = self.put(&accumulator_bytes)?;
-            if written {
-                work.bytes_written += accumulator_bytes.len();
-            }
-            folds.push(fold);
-            work.folds_computed += 1;
-            self.write_progress(
-                job,
-                &Progress {
-                    prefix: position + 1,
-                    accumulator: fold,
-                    folds: folds.clone(),
-                },
-            )?;
-        }
-        if accumulator.protected_vertices() != output_protected_vertices {
-            accumulator = RelativeInterfaceCertificate::compose(
-                &[&accumulator],
+        let plan = CommitPlan {
+            job: job_id(
+                first.max_dim(),
+                first.modulus(),
+                &separator_vertices,
                 &output_protected_vertices,
-                limits,
-            )
-            .map_err(|error| DistributedInterfaceError::new(error.to_string()))?;
-            accumulator_bytes = accumulator
-                .encode(limits)
-                .map_err(|error| DistributedInterfaceError::new(error.to_string()))?;
-            let (_, written) = self.put(&accumulator_bytes)?;
-            if written {
-                work.bytes_written += accumulator_bytes.len();
-            }
-        }
-        let result = ArtifactId::for_bytes(&accumulator_bytes);
-        let manifest = DistributedInterfaceManifest {
-            job,
-            max_dim: accumulator.max_dim(),
-            modulus: accumulator.modulus(),
+                shard_ids,
+            ),
+            shard_ids,
+            intermediate_protected: combined_vertices(
+                &separator_vertices,
+                &output_protected_vertices,
+            ),
             separator_vertices,
             output_protected_vertices,
-            shards: shard_ids.to_vec(),
-            folds,
-            result,
+            limits,
         };
-        let manifest_bytes = manifest.encode()?;
-        atomic_write(&self.manifest_path(job), &manifest_bytes)?;
+        Ok(PreparedCommit {
+            plan,
+            first_id,
+            first,
+        })
+    }
+
+    fn resume_or_start(
+        &self,
+        plan: &CommitPlan<'_>,
+        first_id: ArtifactId,
+        first: RelativeInterfaceCertificate,
+        work: &mut DistributedInterfaceWork,
+    ) -> Result<FoldState, DistributedInterfaceError> {
+        let Some(progress) = self.read_progress(plan.job, plan.limits.max_bytes)? else {
+            return self.start_folds(plan, first_id, first);
+        };
+        check_progress_prefix(progress.prefix, plan.shard_ids.len())?;
+        let bytes = self.get(progress.accumulator, plan.limits.max_bytes)?;
+        work.bytes_read += bytes.len();
+        work.folds_reused = progress.prefix;
+        Ok(FoldState {
+            accumulator: decode_certificate(&bytes, plan.limits)?,
+            folds: progress.folds,
+            next: progress.prefix,
+            accumulator_bytes: bytes,
+        })
+    }
+
+    fn start_folds(
+        &self,
+        plan: &CommitPlan<'_>,
+        first_id: ArtifactId,
+        first: RelativeInterfaceCertificate,
+    ) -> Result<FoldState, DistributedInterfaceError> {
+        let folds = vec![first_id];
+        self.write_progress(
+            plan.job,
+            &Progress {
+                prefix: 1,
+                accumulator: first_id,
+                folds: folds.clone(),
+            },
+        )?;
+        Ok(FoldState {
+            accumulator_bytes: encode_certificate(&first, plan.limits)?,
+            accumulator: first,
+            folds,
+            next: 1,
+        })
+    }
+
+    fn compute_folds(
+        &self,
+        plan: &CommitPlan<'_>,
+        state: &mut FoldState,
+        work: &mut DistributedInterfaceWork,
+    ) -> Result<(), DistributedInterfaceError> {
+        for (position, shard_id) in plan.shard_ids.iter().enumerate().skip(state.next) {
+            self.compute_one_fold(plan, state, work, position, *shard_id)?;
+        }
+        Ok(())
+    }
+
+    fn compute_one_fold(
+        &self,
+        plan: &CommitPlan<'_>,
+        state: &mut FoldState,
+        work: &mut DistributedInterfaceWork,
+        position: usize,
+        shard_id: ArtifactId,
+    ) -> Result<(), DistributedInterfaceError> {
+        let (child, child_bytes) = self.load_child(plan, shard_id, work)?;
+        compose_accumulator(plan, state, child, child_bytes, work)?;
+        let fold = self.store_fold(&state.accumulator_bytes, work)?;
+        state.folds.push(fold);
+        state.next = position + 1;
+        work.folds_computed += 1;
+        self.write_progress(
+            plan.job,
+            &Progress {
+                prefix: state.next,
+                accumulator: fold,
+                folds: state.folds.clone(),
+            },
+        )
+    }
+
+    fn load_child(
+        &self,
+        plan: &CommitPlan<'_>,
+        shard_id: ArtifactId,
+        work: &mut DistributedInterfaceWork,
+    ) -> Result<(RelativeInterfaceCertificate, usize), DistributedInterfaceError> {
+        let bytes = self.get(shard_id, plan.limits.max_bytes)?;
+        work.bytes_read += bytes.len();
+        work.shards_loaded += 1;
+        let child = decode_certificate(&bytes, plan.limits)?;
+        require_separator(&child, &plan.separator_vertices)?;
+        Ok((child, bytes.len()))
+    }
+
+    fn store_fold(
+        &self,
+        bytes: &[u8],
+        work: &mut DistributedInterfaceWork,
+    ) -> Result<ArtifactId, DistributedInterfaceError> {
+        let (fold, written) = self.put(bytes)?;
+        if written {
+            work.bytes_written += bytes.len();
+        }
+        Ok(fold)
+    }
+
+    fn finish_protection(
+        &self,
+        plan: &CommitPlan<'_>,
+        state: &mut FoldState,
+        work: &mut DistributedInterfaceWork,
+    ) -> Result<(), DistributedInterfaceError> {
+        if state.accumulator.protected_vertices() == plan.output_protected_vertices {
+            return Ok(());
+        }
+        state.accumulator = compose_certificates(
+            &[&state.accumulator],
+            &plan.output_protected_vertices,
+            plan.limits,
+        )?;
+        state.accumulator_bytes = encode_certificate(&state.accumulator, plan.limits)?;
+        self.store_fold(&state.accumulator_bytes, work)?;
+        Ok(())
+    }
+
+    fn publish_commit(
+        &self,
+        plan: &CommitPlan<'_>,
+        state: FoldState,
+        work: DistributedInterfaceWork,
+    ) -> Result<DistributedInterfaceCommit, DistributedInterfaceError> {
+        let manifest = DistributedInterfaceManifest {
+            job: plan.job,
+            max_dim: state.accumulator.max_dim(),
+            modulus: state.accumulator.modulus(),
+            separator_vertices: plan.separator_vertices.clone(),
+            output_protected_vertices: plan.output_protected_vertices.clone(),
+            shards: plan.shard_ids.to_vec(),
+            folds: state.folds,
+            result: ArtifactId::for_bytes(&state.accumulator_bytes),
+        };
+        atomic_write(&self.manifest_path(plan.job), &manifest.encode()?)?;
         Ok(DistributedInterfaceCommit {
             manifest,
-            certificate: accumulator,
+            certificate: state.accumulator,
             work,
         })
     }
@@ -510,51 +637,78 @@ impl DurableInterfaceStore {
         manifest: &DistributedInterfaceManifest,
         limits: CertificateLimits,
     ) -> Result<RelativeInterfaceCertificate, DistributedInterfaceError> {
-        let first_bytes = self.get(manifest.shards[0], limits.max_bytes)?;
-        let mut accumulator = RelativeInterfaceCertificate::decode(&first_bytes, limits)
-            .map_err(|error| DistributedInterfaceError::new(error.to_string()))?;
-        require_separator(&accumulator, &manifest.separator_vertices)?;
-        if ArtifactId::for_bytes(&first_bytes) != manifest.folds[0] {
-            return Err(DistributedInterfaceError::new(
-                "manifest fold chain differs from recomputation",
-            ));
-        }
-        let mut intermediate = manifest.separator_vertices.clone();
-        intermediate.extend_from_slice(&manifest.output_protected_vertices);
-        intermediate.sort_unstable();
-        intermediate.dedup();
-        for (position, shard) in manifest.shards.iter().enumerate().skip(1) {
-            let bytes = self.get(*shard, limits.max_bytes)?;
-            let child = RelativeInterfaceCertificate::decode(&bytes, limits)
-                .map_err(|error| DistributedInterfaceError::new(error.to_string()))?;
-            require_compatible(&accumulator, &child)?;
-            require_separator(&child, &manifest.separator_vertices)?;
-            accumulator = RelativeInterfaceCertificate::compose(
-                &[&accumulator, &child],
-                &intermediate,
-                limits,
-            )
-            .map_err(|error| DistributedInterfaceError::new(error.to_string()))?;
-            let bytes = accumulator
-                .encode(limits)
-                .map_err(|error| DistributedInterfaceError::new(error.to_string()))?;
-            if ArtifactId::for_bytes(&bytes) != manifest.folds[position] {
-                return Err(DistributedInterfaceError::new(
-                    "manifest fold chain differs from recomputation",
-                ));
-            }
-        }
+        let mut accumulator = self.load_manifest_start(manifest, limits)?;
+        self.replay_manifest_folds(manifest, limits, &mut accumulator)?;
         if accumulator.protected_vertices() != manifest.output_protected_vertices {
-            accumulator = RelativeInterfaceCertificate::compose(
-                &[&accumulator],
-                &manifest.output_protected_vertices,
-                limits,
-            )
-            .map_err(|error| DistributedInterfaceError::new(error.to_string()))?;
+            accumulator =
+                compose_certificates(&[&accumulator], &manifest.output_protected_vertices, limits)?;
         }
-        let encoded = accumulator
-            .encode(limits)
-            .map_err(|error| DistributedInterfaceError::new(error.to_string()))?;
+        self.check_manifest_result(manifest, &accumulator, limits)?;
+        Ok(accumulator)
+    }
+
+    fn load_manifest_start(
+        &self,
+        manifest: &DistributedInterfaceManifest,
+        limits: CertificateLimits,
+    ) -> Result<RelativeInterfaceCertificate, DistributedInterfaceError> {
+        let bytes = self.get(manifest.shards[0], limits.max_bytes)?;
+        let accumulator = decode_certificate(&bytes, limits)?;
+        require_separator(&accumulator, &manifest.separator_vertices)?;
+        check_fold_id(&bytes, manifest.folds[0])?;
+        Ok(accumulator)
+    }
+
+    fn replay_manifest_folds(
+        &self,
+        manifest: &DistributedInterfaceManifest,
+        limits: CertificateLimits,
+        accumulator: &mut RelativeInterfaceCertificate,
+    ) -> Result<(), DistributedInterfaceError> {
+        let intermediate = combined_vertices(
+            &manifest.separator_vertices,
+            &manifest.output_protected_vertices,
+        );
+        for (position, shard) in manifest.shards.iter().enumerate().skip(1) {
+            self.replay_manifest_fold(
+                manifest,
+                limits,
+                &intermediate,
+                accumulator,
+                position,
+                *shard,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn replay_manifest_fold(
+        &self,
+        manifest: &DistributedInterfaceManifest,
+        limits: CertificateLimits,
+        intermediate: &[usize],
+        accumulator: &mut RelativeInterfaceCertificate,
+        position: usize,
+        shard: ArtifactId,
+    ) -> Result<(), DistributedInterfaceError> {
+        let bytes = self.get(shard, limits.max_bytes)?;
+        let child = decode_certificate(&bytes, limits)?;
+        require_compatible(accumulator, &child)?;
+        require_separator(&child, &manifest.separator_vertices)?;
+        *accumulator = compose_certificates(&[accumulator, &child], intermediate, limits)?;
+        check_fold_id(
+            &encode_certificate(accumulator, limits)?,
+            manifest.folds[position],
+        )
+    }
+
+    fn check_manifest_result(
+        &self,
+        manifest: &DistributedInterfaceManifest,
+        accumulator: &RelativeInterfaceCertificate,
+        limits: CertificateLimits,
+    ) -> Result<(), DistributedInterfaceError> {
+        let encoded = encode_certificate(accumulator, limits)?;
         if ArtifactId::for_bytes(&encoded) != manifest.result {
             return Err(DistributedInterfaceError::new(
                 "manifest result differs from recomputation",
@@ -566,7 +720,7 @@ impl DurableInterfaceStore {
                 "stored result differs from recomputed result",
             ));
         }
-        Ok(accumulator)
+        Ok(())
     }
 
     /// Read a committed manifest by job identifier.
@@ -649,25 +803,11 @@ impl DurableInterfaceStore {
         }
         let bytes = read_bounded(&path, maximum_bytes)?;
         let mut reader = Reader::new(&bytes);
-        if reader.take(8)? != PROGRESS_MAGIC
-            || reader.u16()? != VERSION
-            || ArtifactId(reader.array32()?) != job
-        {
-            return Err(DistributedInterfaceError::new(
-                "durable fold progress has an invalid binding",
-            ));
-        }
+        check_progress_identity(&mut reader, job)?;
         let prefix = reader.usize()?;
         let accumulator = ArtifactId(reader.array32()?);
         let folds = decode_ids(&mut reader)?;
-        if reader.remaining() != 0
-            || folds.len() != prefix
-            || folds.last().copied() != Some(accumulator)
-        {
-            return Err(DistributedInterfaceError::new(
-                "durable fold progress has an invalid shape",
-            ));
-        }
+        check_progress_shape(reader.remaining(), prefix, accumulator, &folds)?;
         Ok(Some(Progress {
             prefix,
             accumulator,
@@ -680,6 +820,117 @@ struct Progress {
     prefix: usize,
     accumulator: ArtifactId,
     folds: Vec<ArtifactId>,
+}
+
+fn require_first_shard(shards: &[ArtifactId]) -> Result<ArtifactId, DistributedInterfaceError> {
+    shards
+        .first()
+        .copied()
+        .ok_or_else(|| DistributedInterfaceError::new("distributed composition requires a shard"))
+}
+
+fn check_progress_identity(
+    reader: &mut Reader<'_>,
+    job: ArtifactId,
+) -> Result<(), DistributedInterfaceError> {
+    let valid = reader.take(8)? == PROGRESS_MAGIC
+        && reader.u16()? == VERSION
+        && ArtifactId(reader.array32()?) == job;
+    if !valid {
+        return Err(DistributedInterfaceError::new(
+            "durable fold progress has an invalid binding",
+        ));
+    }
+    Ok(())
+}
+
+fn check_progress_shape(
+    remaining: usize,
+    prefix: usize,
+    accumulator: ArtifactId,
+    folds: &[ArtifactId],
+) -> Result<(), DistributedInterfaceError> {
+    if remaining != 0 || folds.len() != prefix || folds.last().copied() != Some(accumulator) {
+        return Err(DistributedInterfaceError::new(
+            "durable fold progress has an invalid shape",
+        ));
+    }
+    Ok(())
+}
+
+fn combined_vertices(left: &[usize], right: &[usize]) -> Vec<usize> {
+    let mut combined = left.to_vec();
+    combined.extend_from_slice(right);
+    combined.sort_unstable();
+    combined.dedup();
+    combined
+}
+
+fn check_progress_prefix(
+    prefix: usize,
+    shard_count: usize,
+) -> Result<(), DistributedInterfaceError> {
+    if prefix == 0 || prefix > shard_count {
+        return Err(DistributedInterfaceError::new(
+            "durable fold progress has an invalid prefix",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_certificate(
+    bytes: &[u8],
+    limits: CertificateLimits,
+) -> Result<RelativeInterfaceCertificate, DistributedInterfaceError> {
+    RelativeInterfaceCertificate::decode(bytes, limits)
+        .map_err(|error| DistributedInterfaceError::new(error.to_string()))
+}
+
+fn encode_certificate(
+    certificate: &RelativeInterfaceCertificate,
+    limits: CertificateLimits,
+) -> Result<Vec<u8>, DistributedInterfaceError> {
+    certificate
+        .encode(limits)
+        .map_err(|error| DistributedInterfaceError::new(error.to_string()))
+}
+
+fn compose_certificates(
+    children: &[&RelativeInterfaceCertificate],
+    protected_vertices: &[usize],
+    limits: CertificateLimits,
+) -> Result<RelativeInterfaceCertificate, DistributedInterfaceError> {
+    RelativeInterfaceCertificate::compose(children, protected_vertices, limits)
+        .map_err(|error| DistributedInterfaceError::new(error.to_string()))
+}
+
+fn compose_accumulator(
+    plan: &CommitPlan<'_>,
+    state: &mut FoldState,
+    child: RelativeInterfaceCertificate,
+    child_bytes: usize,
+    work: &mut DistributedInterfaceWork,
+) -> Result<(), DistributedInterfaceError> {
+    require_compatible(&state.accumulator, &child)?;
+    work.peak_artifact_bytes = work
+        .peak_artifact_bytes
+        .max(state.accumulator_bytes.len().saturating_add(child_bytes));
+    state.accumulator = compose_certificates(
+        &[&state.accumulator, &child],
+        &plan.intermediate_protected,
+        plan.limits,
+    )?;
+    state.accumulator_bytes = encode_certificate(&state.accumulator, plan.limits)?;
+    Ok(())
+}
+
+fn check_fold_id(bytes: &[u8], expected: ArtifactId) -> Result<(), DistributedInterfaceError> {
+    if ArtifactId::for_bytes(bytes) != expected {
+        return Err(DistributedInterfaceError::new(
+            "manifest fold chain differs from recomputation",
+        ));
+    }
+    Ok(())
 }
 
 fn require_separator(
@@ -770,50 +1021,76 @@ fn read_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>, DistributedInter
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), DistributedInterfaceError> {
     for nonce in 0..100u32 {
-        let temporary = temporary_path(path, nonce);
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary);
-        let mut file = match file {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(DistributedInterfaceError::new(format!(
-                    "create {}: {error}",
-                    temporary.display()
-                )));
-            }
+        let Some((temporary, mut file)) = reserve_temporary(path, nonce)? else {
+            continue;
         };
-        file.write_all(bytes)
-            .and_then(|_| file.sync_all())
-            .map_err(|error| DistributedInterfaceError::new(format!("write object: {error}")))?;
-        match fs::rename(&temporary, path) {
-            Ok(()) => {
-                sync_parent(path)?;
-                return Ok(());
-            }
-            Err(error) if path.is_file() => {
-                let _ = fs::remove_file(&temporary);
-                let existing = read_bounded(path, bytes.len())?;
-                if existing == bytes {
-                    return Ok(());
-                }
-                return Err(DistributedInterfaceError::new(
-                    "atomic destination contains different bytes",
-                ));
-            }
-            Err(error) => {
-                let _ = fs::remove_file(&temporary);
-                return Err(DistributedInterfaceError::new(format!(
-                    "publish {}: {error}",
-                    path.display()
-                )));
-            }
+        write_temporary(&mut file, bytes)?;
+        if publish_temporary(&temporary, path, bytes)? {
+            return Ok(());
         }
     }
     Err(DistributedInterfaceError::new(
         "cannot reserve an atomic temporary path",
+    ))
+}
+
+fn reserve_temporary(
+    path: &Path,
+    nonce: u32,
+) -> Result<Option<(PathBuf, File)>, DistributedInterfaceError> {
+    let temporary = temporary_path(path, nonce);
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+    {
+        Ok(file) => Ok(Some((temporary, file))),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(error) => Err(DistributedInterfaceError::new(format!(
+            "create {}: {error}",
+            temporary.display()
+        ))),
+    }
+}
+
+fn write_temporary(file: &mut File, bytes: &[u8]) -> Result<(), DistributedInterfaceError> {
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| DistributedInterfaceError::new(format!("write object: {error}")))
+}
+
+fn publish_temporary(
+    temporary: &Path,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<bool, DistributedInterfaceError> {
+    match fs::rename(temporary, path) {
+        Ok(()) => {
+            sync_parent(path)?;
+            Ok(true)
+        }
+        Err(_) if path.is_file() => check_existing_destination(temporary, path, bytes),
+        Err(error) => {
+            let _ = fs::remove_file(temporary);
+            Err(DistributedInterfaceError::new(format!(
+                "publish {}: {error}",
+                path.display()
+            )))
+        }
+    }
+}
+
+fn check_existing_destination(
+    temporary: &Path,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<bool, DistributedInterfaceError> {
+    let _ = fs::remove_file(temporary);
+    if read_bounded(path, bytes.len())? == bytes {
+        return Ok(true);
+    }
+    Err(DistributedInterfaceError::new(
+        "atomic destination contains different bytes",
     ))
 }
 
