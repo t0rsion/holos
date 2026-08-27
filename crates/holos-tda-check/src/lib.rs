@@ -236,21 +236,8 @@ impl AtomProof {
     }
 
     fn check_shape(&self, modulus: u32) -> Result<(), ProofError> {
-        if self.vertices.len() < 3
-            || !self.vertices.windows(2).all(|pair| pair[0] < pair[1])
-            || self.edges.len() < self.vertices.len()
-            || !self.edges.windows(2).all(|pair| pair[0] < pair[1])
-        {
-            return Err(ProofError::new("reduction node scope is not canonical"));
-        }
-        for &[u, v] in &self.edges {
-            if u >= v
-                || self.vertices.binary_search(&u).is_err()
-                || self.vertices.binary_search(&v).is_err()
-            {
-                return Err(ProofError::new("reduction node has an invalid edge"));
-            }
-        }
+        check_node_scope(&self.vertices, &self.edges)?;
+        check_node_edges(&self.vertices, &self.edges)?;
         if modulus != u32::MAX {
             check_columns(&self.edge_columns, modulus)?;
             check_columns(&self.triangle_columns, modulus)?;
@@ -404,28 +391,14 @@ impl ProofBundle {
             )));
         }
         let mut reader = Reader::new(bytes);
-        if reader.take(8)? != MAGIC {
-            return Err(ProofError::new("wrong magic bytes"));
-        }
-        if reader.u16()? != VERSION {
-            return Err(ProofError::new("unsupported wire version"));
-        }
-        if reader.u8()? != F64_BITS_CODEC {
-            return Err(ProofError::new("unsupported scalar codec"));
-        }
+        decode_bundle_prefix(&mut reader)?;
         let modulus = reader.u32()?;
         let threshold = reader.optional_f64()?;
         let node_count = reader.bounded_usize("node count", limits.max_nodes)?;
         let snapshot_count = reader.bounded_usize("snapshot count", limits.max_snapshots)?;
         let mut totals = DecodeTotals::default();
-        let mut nodes = Vec::with_capacity(node_count);
-        for _ in 0..node_count {
-            nodes.push(decode_node(&mut reader, limits, modulus, &mut totals)?);
-        }
-        let mut snapshots = Vec::with_capacity(snapshot_count);
-        for _ in 0..snapshot_count {
-            snapshots.push(decode_snapshot(&mut reader, limits, &mut totals)?);
-        }
+        let nodes = decode_nodes(&mut reader, node_count, limits, modulus, &mut totals)?;
+        let snapshots = decode_snapshots(&mut reader, snapshot_count, limits, &mut totals)?;
         if reader.remaining() != 0 {
             return Err(ProofError::new(format!(
                 "{} trailing bytes after the envelope",
@@ -436,39 +409,79 @@ impl ProofBundle {
     }
 
     fn check_shape(&self) -> Result<(), ProofError> {
-        if !is_prime(self.modulus as u64) || self.modulus as u64 >= MODULUS_LIMIT {
-            return Err(ProofError::new(format!(
-                "modulus must be a prime below {MODULUS_LIMIT}, got {}",
-                self.modulus
-            )));
-        }
+        check_modulus(self.modulus)?;
         checked_threshold(self.threshold)?;
         if self.snapshots.is_empty() {
             return Err(ProofError::new("proof has no snapshots"));
         }
-        let mut digests = BTreeSet::new();
-        for node in &self.nodes {
-            node.check_shape(self.modulus)?;
-            if node.compute_digest() != node.digest || !digests.insert(node.digest) {
-                return Err(ProofError::new(
-                    "reduction-node digest is wrong or duplicated",
-                ));
-            }
-        }
-        for snapshot in &self.snapshots {
-            snapshot.check_shape()?;
-            if snapshot
-                .atom_refs
-                .iter()
-                .any(|digest| !digests.contains(digest))
-            {
-                return Err(ProofError::new(
-                    "snapshot references an unknown reduction node",
-                ));
-            }
-        }
+        let digests = check_bundle_nodes(&self.nodes, self.modulus)?;
+        check_bundle_snapshots(&self.snapshots, &digests)?;
         Ok(())
     }
+}
+
+fn check_node_scope(vertices: &[usize], edges: &[[usize; 2]]) -> Result<(), ProofError> {
+    if vertices.len() < 3
+        || vertices.windows(2).any(|pair| pair[0] >= pair[1])
+        || edges.len() < vertices.len()
+        || edges.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        Err(ProofError::new("reduction node scope is not canonical"))
+    } else {
+        Ok(())
+    }
+}
+
+fn check_node_edges(vertices: &[usize], edges: &[[usize; 2]]) -> Result<(), ProofError> {
+    if edges.iter().any(|&[u, v]| {
+        u >= v || vertices.binary_search(&u).is_err() || vertices.binary_search(&v).is_err()
+    }) {
+        Err(ProofError::new("reduction node has an invalid edge"))
+    } else {
+        Ok(())
+    }
+}
+
+fn check_modulus(modulus: u32) -> Result<(), ProofError> {
+    if !is_prime(u64::from(modulus)) || u64::from(modulus) >= MODULUS_LIMIT {
+        Err(ProofError::new(format!(
+            "modulus must be a prime below {MODULUS_LIMIT}, got {modulus}"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn check_bundle_nodes(nodes: &[AtomProof], modulus: u32) -> Result<BTreeSet<[u8; 32]>, ProofError> {
+    let mut digests = BTreeSet::new();
+    for node in nodes {
+        node.check_shape(modulus)?;
+        if node.compute_digest() != node.digest || !digests.insert(node.digest) {
+            return Err(ProofError::new(
+                "reduction-node digest is wrong or duplicated",
+            ));
+        }
+    }
+    Ok(digests)
+}
+
+fn check_bundle_snapshots(
+    snapshots: &[SnapshotProof],
+    digests: &BTreeSet<[u8; 32]>,
+) -> Result<(), ProofError> {
+    for snapshot in snapshots {
+        snapshot.check_shape()?;
+        if snapshot
+            .atom_refs
+            .iter()
+            .any(|digest| !digests.contains(digest))
+        {
+            return Err(ProofError::new(
+                "snapshot references an unknown reduction node",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Counts derived after complete solver-independent verification.
@@ -492,87 +505,200 @@ impl ProofBundle {
     /// Verify every snapshot without calling a persistence solver.
     pub fn verify(&self) -> Result<VerifiedProof, ProofError> {
         self.check_shape()?;
-        let node_table: BTreeMap<_, _> =
-            self.nodes.iter().map(|node| (node.digest, node)).collect();
-        let mut reused_references = 0usize;
-        let mut cached_references = 0usize;
-        let mut previous = BTreeSet::new();
-        let mut edge_columns_checked = 0usize;
-        let mut triangle_columns_checked = 0usize;
-        let mut checked_reductions = BTreeMap::<([u8; 32], Vec<u64>), Vec<ProofBar>>::new();
+        let mut verifier = BundleVerifier::new(self);
         for (snapshot_index, snapshot) in self.snapshots.iter().enumerate() {
-            let graph = Graph::new(snapshot.vertex_count, &snapshot.edges)?;
-            let blocks = program_blocks(&graph, self.threshold)?;
-            let cyclic: Vec<_> = blocks
-                .into_iter()
-                .filter(|block| block.edges.len() >= block.vertices.len())
-                .collect();
-            if cyclic.len() != snapshot.atom_refs.len() {
-                return Err(ProofError::new(format!(
-                    "snapshot {snapshot_index} has {} cyclic atoms but {} references",
-                    cyclic.len(),
-                    snapshot.atom_refs.len()
-                )));
-            }
-            let mut diagram = h0_diagram(&graph, self.threshold)?;
-            for (position, (block, digest)) in cyclic.iter().zip(&snapshot.atom_refs).enumerate() {
-                let node = node_table[digest];
-                if node.vertices != block.vertices || node.edges != block.edges {
-                    return Err(ProofError::new(format!(
-                        "snapshot {snapshot_index} atom {position} differs from the checked decomposition"
-                    )));
-                }
-                let local = graph.local(&node.vertices, &node.edges)?;
-                let key = (
-                    node.digest,
-                    local
-                        .edges
-                        .iter()
-                        .map(|edge| edge.value.to_bits())
-                        .collect(),
-                );
-                let h1 = if let Some(checked) = checked_reductions.get(&key) {
-                    cached_references += 1;
-                    checked.clone()
-                } else {
-                    let checked = check_reduction(
-                        &local,
-                        self.threshold,
-                        self.modulus,
-                        &node.edge_columns,
-                        &node.triangle_columns,
-                    )?;
-                    edge_columns_checked += node.edge_columns.len();
-                    triangle_columns_checked += node.triangle_columns.len();
-                    let h1: Vec<_> = checked
-                        .diagram
-                        .into_iter()
-                        .filter(|bar| bar.dimension == 1)
-                        .collect();
-                    checked_reductions.insert(key, h1.clone());
-                    h1
-                };
-                diagram.extend(h1);
-            }
-            canonicalize_diagram(&mut diagram);
-            if !diagrams_equal(&diagram, &snapshot.diagram) {
-                return Err(ProofError::new(format!(
-                    "snapshot {snapshot_index} diagram differs from the checked composition"
-                )));
-            }
-            let current: BTreeSet<_> = snapshot.atom_refs.iter().copied().collect();
-            reused_references += current.intersection(&previous).count();
-            previous = current;
+            verifier.verify_snapshot(snapshot_index, snapshot)?;
         }
-        Ok(VerifiedProof {
-            snapshots: self.snapshots.len(),
-            unique_nodes: self.nodes.len(),
-            reused_references,
-            cached_references,
-            edge_columns_checked,
-            triangle_columns_checked,
-        })
+        Ok(verifier.summary())
     }
+}
+
+type ReductionCache = BTreeMap<([u8; 32], Vec<u64>), Vec<ProofBar>>;
+
+struct BundleVerifier<'a> {
+    bundle: &'a ProofBundle,
+    nodes: BTreeMap<[u8; 32], &'a AtomProof>,
+    previous: BTreeSet<[u8; 32]>,
+    reductions: ReductionCache,
+    reused_references: usize,
+    cached_references: usize,
+    edge_columns_checked: usize,
+    triangle_columns_checked: usize,
+}
+
+impl<'a> BundleVerifier<'a> {
+    fn new(bundle: &'a ProofBundle) -> Self {
+        Self {
+            bundle,
+            nodes: bundle
+                .nodes
+                .iter()
+                .map(|node| (node.digest, node))
+                .collect(),
+            previous: BTreeSet::new(),
+            reductions: BTreeMap::new(),
+            reused_references: 0,
+            cached_references: 0,
+            edge_columns_checked: 0,
+            triangle_columns_checked: 0,
+        }
+    }
+
+    fn verify_snapshot(
+        &mut self,
+        snapshot_index: usize,
+        snapshot: &SnapshotProof,
+    ) -> Result<(), ProofError> {
+        let graph = Graph::new(snapshot.vertex_count, &snapshot.edges)?;
+        let cyclic = program_blocks(&graph, self.bundle.threshold)?
+            .into_iter()
+            .filter(|block| block.edges.len() >= block.vertices.len())
+            .collect::<Vec<_>>();
+        verify_atom_count(snapshot_index, snapshot, cyclic.len())?;
+        let mut diagram = h0_diagram(&graph, self.bundle.threshold)?;
+        for (position, (block, digest)) in cyclic.iter().zip(&snapshot.atom_refs).enumerate() {
+            diagram.extend(self.verify_atom(snapshot_index, position, &graph, block, digest)?);
+        }
+        canonicalize_diagram(&mut diagram);
+        verify_snapshot_diagram(snapshot_index, &diagram, &snapshot.diagram)?;
+        self.record_reuse(&snapshot.atom_refs);
+        Ok(())
+    }
+
+    fn verify_atom(
+        &mut self,
+        snapshot: usize,
+        position: usize,
+        graph: &Graph,
+        block: &Block,
+        digest: &[u8; 32],
+    ) -> Result<Vec<ProofBar>, ProofError> {
+        let node = self.nodes[digest];
+        if node.vertices != block.vertices || node.edges != block.edges {
+            return Err(ProofError::new(format!(
+                "snapshot {snapshot} atom {position} differs from the checked decomposition"
+            )));
+        }
+        let local = graph.local(&node.vertices, &node.edges)?;
+        self.h1_for_node(node, &local)
+    }
+
+    fn h1_for_node(
+        &mut self,
+        node: &AtomProof,
+        local: &Graph,
+    ) -> Result<Vec<ProofBar>, ProofError> {
+        let key = (
+            node.digest,
+            local
+                .edges
+                .iter()
+                .map(|edge| edge.value.to_bits())
+                .collect(),
+        );
+        if let Some(checked) = self.reductions.get(&key) {
+            self.cached_references += 1;
+            return Ok(checked.clone());
+        }
+        let checked = check_reduction(
+            local,
+            self.bundle.threshold,
+            self.bundle.modulus,
+            &node.edge_columns,
+            &node.triangle_columns,
+        )?;
+        self.edge_columns_checked += node.edge_columns.len();
+        self.triangle_columns_checked += node.triangle_columns.len();
+        let h1 = checked
+            .diagram
+            .into_iter()
+            .filter(|bar| bar.dimension == 1)
+            .collect::<Vec<_>>();
+        self.reductions.insert(key, h1.clone());
+        Ok(h1)
+    }
+
+    fn record_reuse(&mut self, references: &[[u8; 32]]) {
+        let current = references.iter().copied().collect::<BTreeSet<_>>();
+        self.reused_references += current.intersection(&self.previous).count();
+        self.previous = current;
+    }
+
+    fn summary(&self) -> VerifiedProof {
+        VerifiedProof {
+            snapshots: self.bundle.snapshots.len(),
+            unique_nodes: self.bundle.nodes.len(),
+            reused_references: self.reused_references,
+            cached_references: self.cached_references,
+            edge_columns_checked: self.edge_columns_checked,
+            triangle_columns_checked: self.triangle_columns_checked,
+        }
+    }
+}
+
+fn verify_atom_count(
+    snapshot_index: usize,
+    snapshot: &SnapshotProof,
+    actual: usize,
+) -> Result<(), ProofError> {
+    if actual != snapshot.atom_refs.len() {
+        Err(ProofError::new(format!(
+            "snapshot {snapshot_index} has {actual} cyclic atoms but {} references",
+            snapshot.atom_refs.len()
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_snapshot_diagram(
+    snapshot_index: usize,
+    checked: &[ProofBar],
+    claimed: &[ProofBar],
+) -> Result<(), ProofError> {
+    if diagrams_equal(checked, claimed) {
+        Ok(())
+    } else {
+        Err(ProofError::new(format!(
+            "snapshot {snapshot_index} diagram differs from the checked composition"
+        )))
+    }
+}
+
+fn decode_bundle_prefix(reader: &mut Reader<'_>) -> Result<(), ProofError> {
+    if reader.take(8)? != MAGIC {
+        return Err(ProofError::new("wrong magic bytes"));
+    }
+    if reader.u16()? != VERSION {
+        return Err(ProofError::new("unsupported wire version"));
+    }
+    if reader.u8()? != F64_BITS_CODEC {
+        return Err(ProofError::new("unsupported scalar codec"));
+    }
+    Ok(())
+}
+
+fn decode_nodes(
+    reader: &mut Reader<'_>,
+    count: usize,
+    limits: ProofLimits,
+    modulus: u32,
+    totals: &mut DecodeTotals,
+) -> Result<Vec<AtomProof>, ProofError> {
+    (0..count)
+        .map(|_| decode_node(reader, limits, modulus, totals))
+        .collect()
+}
+
+fn decode_snapshots(
+    reader: &mut Reader<'_>,
+    count: usize,
+    limits: ProofLimits,
+    totals: &mut DecodeTotals,
+) -> Result<Vec<SnapshotProof>, ProofError> {
+    (0..count)
+        .map(|_| decode_snapshot(reader, limits, totals))
+        .collect()
 }
 
 fn encode_node(output: &mut Vec<u8>, node: &AtomProof) -> Result<(), ProofError> {
@@ -581,13 +707,8 @@ fn encode_node(output: &mut Vec<u8>, node: &AtomProof) -> Result<(), ProofError>
     put_usize(output, node.edges.len())?;
     put_usize(output, node.edge_columns.len())?;
     put_usize(output, node.triangle_columns.len())?;
-    for &vertex in &node.vertices {
-        put_usize(output, vertex)?;
-    }
-    for &[u, v] in &node.edges {
-        put_usize(output, u)?;
-        put_usize(output, v)?;
-    }
+    encode_usizes(output, &node.vertices)?;
+    encode_edge_keys(output, &node.edges)?;
     encode_columns(output, &node.edge_columns)?;
     encode_columns(output, &node.triangle_columns)?;
     Ok(())
@@ -609,15 +730,40 @@ fn encode_snapshot(output: &mut Vec<u8>, snapshot: &SnapshotProof) -> Result<(),
     put_usize(output, snapshot.edges.len())?;
     put_usize(output, snapshot.atom_refs.len())?;
     put_usize(output, snapshot.diagram.len())?;
-    for edge in &snapshot.edges {
+    encode_proof_edges(output, &snapshot.edges)?;
+    for digest in &snapshot.atom_refs {
+        output.extend_from_slice(digest);
+    }
+    encode_bars(output, &snapshot.diagram)?;
+    Ok(())
+}
+
+fn encode_usizes(output: &mut Vec<u8>, values: &[usize]) -> Result<(), ProofError> {
+    for &value in values {
+        put_usize(output, value)?;
+    }
+    Ok(())
+}
+
+fn encode_edge_keys(output: &mut Vec<u8>, edges: &[[usize; 2]]) -> Result<(), ProofError> {
+    for &[u, v] in edges {
+        put_usize(output, u)?;
+        put_usize(output, v)?;
+    }
+    Ok(())
+}
+
+fn encode_proof_edges(output: &mut Vec<u8>, edges: &[ProofEdge]) -> Result<(), ProofError> {
+    for edge in edges {
         put_usize(output, edge.u)?;
         put_usize(output, edge.v)?;
         put_u64(output, edge.value.to_bits());
     }
-    for digest in &snapshot.atom_refs {
-        output.extend_from_slice(digest);
-    }
-    for bar in &snapshot.diagram {
+    Ok(())
+}
+
+fn encode_bars(output: &mut Vec<u8>, bars: &[ProofBar]) -> Result<(), ProofError> {
+    for bar in bars {
         put_usize(output, bar.dimension)?;
         put_u64(output, bar.birth.to_bits());
         put_u64(output, bar.death.to_bits());
@@ -635,52 +781,107 @@ struct DecodeTotals {
     bars: usize,
 }
 
+struct NodeHeader {
+    digest: [u8; 32],
+    vertices: usize,
+    edges: usize,
+    edge_columns: usize,
+    triangle_columns: usize,
+}
+
+struct SnapshotHeader {
+    vertices: usize,
+    edges: usize,
+    references: usize,
+    bars: usize,
+}
+
 fn decode_node(
     reader: &mut Reader<'_>,
     limits: ProofLimits,
     modulus: u32,
     totals: &mut DecodeTotals,
 ) -> Result<AtomProof, ProofError> {
-    let digest = reader.array32()?;
-    let vertex_count = reader.bounded_usize("node vertex count", limits.max_vertices)?;
-    let edge_count = reader.usize()?;
-    let edge_column_count = reader.usize()?;
-    let triangle_column_count = reader.usize()?;
-    totals.vertices = bounded_sum(
-        totals.vertices,
-        vertex_count,
-        limits.max_vertices.saturating_mul(limits.max_nodes),
-        "node vertices",
-    )?;
-    totals.edges = bounded_sum(totals.edges, edge_count, limits.max_edges, "node edges")?;
-    totals.triangles = bounded_sum(
-        totals.triangles,
-        triangle_column_count,
-        limits.max_triangles,
-        "triangle columns",
-    )?;
-    let mut vertices = Vec::with_capacity(vertex_count);
-    for _ in 0..vertex_count {
-        vertices.push(reader.usize()?);
-    }
-    let mut edges = Vec::with_capacity(edge_count);
-    for _ in 0..edge_count {
-        edges.push([reader.usize()?, reader.usize()?]);
-    }
+    let header = decode_node_header(reader, limits)?;
+    record_node_totals(totals, &header, limits)?;
+    let vertices = decode_usizes(reader, header.vertices)?;
+    let edges = decode_edge_keys(reader, header.edges)?;
     let edge_columns = decode_columns(
         reader,
-        edge_column_count,
+        header.edge_columns,
         modulus,
         limits.max_terms,
         &mut totals.terms,
     )?;
     let triangle_columns = decode_columns(
         reader,
-        triangle_column_count,
+        header.triangle_columns,
         modulus,
         limits.max_terms,
         &mut totals.terms,
     )?;
+    finish_node(
+        header.digest,
+        vertices,
+        edges,
+        edge_columns,
+        triangle_columns,
+        modulus,
+    )
+}
+
+fn decode_node_header(
+    reader: &mut Reader<'_>,
+    limits: ProofLimits,
+) -> Result<NodeHeader, ProofError> {
+    Ok(NodeHeader {
+        digest: reader.array32()?,
+        vertices: reader.bounded_usize("node vertex count", limits.max_vertices)?,
+        edges: reader.usize()?,
+        edge_columns: reader.usize()?,
+        triangle_columns: reader.usize()?,
+    })
+}
+
+fn record_node_totals(
+    totals: &mut DecodeTotals,
+    header: &NodeHeader,
+    limits: ProofLimits,
+) -> Result<(), ProofError> {
+    totals.vertices = bounded_sum(
+        totals.vertices,
+        header.vertices,
+        limits.max_vertices.saturating_mul(limits.max_nodes),
+        "node vertices",
+    )?;
+    totals.edges = bounded_sum(totals.edges, header.edges, limits.max_edges, "node edges")?;
+    totals.triangles = bounded_sum(
+        totals.triangles,
+        header.triangle_columns,
+        limits.max_triangles,
+        "triangle columns",
+    )?;
+    Ok(())
+}
+
+fn decode_usizes(reader: &mut Reader<'_>, count: usize) -> Result<Vec<usize>, ProofError> {
+    (0..count).map(|_| reader.usize()).collect()
+}
+
+fn decode_edge_keys(reader: &mut Reader<'_>, count: usize) -> Result<Vec<[usize; 2]>, ProofError> {
+    (0..count)
+        .map(|_| Ok([reader.usize()?, reader.usize()?]))
+        .collect()
+}
+
+fn finish_node(
+    digest: [u8; 32],
+    vertices: Vec<usize>,
+    edges: Vec<[usize; 2]>,
+    edge_columns: Vec<ProofColumn>,
+    triangle_columns: Vec<ProofColumn>,
+    modulus: u32,
+) -> Result<AtomProof, ProofError> {
     let node = AtomProof {
         digest,
         vertices,
@@ -724,39 +925,71 @@ fn decode_snapshot(
     limits: ProofLimits,
     totals: &mut DecodeTotals,
 ) -> Result<SnapshotProof, ProofError> {
-    let vertex_count = reader.bounded_usize("snapshot vertex count", limits.max_vertices)?;
-    let edge_count = reader.usize()?;
-    let reference_count = reader.usize()?;
-    let bar_count = reader.usize()?;
-    totals.edges = bounded_sum(totals.edges, edge_count, limits.max_edges, "snapshot edges")?;
+    let header = decode_snapshot_header(reader, limits)?;
+    record_snapshot_totals(totals, &header, limits)?;
+    let edges = decode_proof_edges(reader, header.edges)?;
+    let atom_refs = (0..header.references)
+        .map(|_| reader.array32())
+        .collect::<Result<Vec<_>, _>>()?;
+    let diagram = decode_bars(reader, header.bars)?;
+    SnapshotProof::new(header.vertices, edges, atom_refs, diagram)
+}
+
+fn decode_snapshot_header(
+    reader: &mut Reader<'_>,
+    limits: ProofLimits,
+) -> Result<SnapshotHeader, ProofError> {
+    Ok(SnapshotHeader {
+        vertices: reader.bounded_usize("snapshot vertex count", limits.max_vertices)?,
+        edges: reader.usize()?,
+        references: reader.usize()?,
+        bars: reader.usize()?,
+    })
+}
+
+fn record_snapshot_totals(
+    totals: &mut DecodeTotals,
+    header: &SnapshotHeader,
+    limits: ProofLimits,
+) -> Result<(), ProofError> {
+    totals.edges = bounded_sum(
+        totals.edges,
+        header.edges,
+        limits.max_edges,
+        "snapshot edges",
+    )?;
     totals.references = bounded_sum(
         totals.references,
-        reference_count,
+        header.references,
         limits.max_references,
         "node references",
     )?;
-    totals.bars = bounded_sum(totals.bars, bar_count, limits.max_bars, "diagram bars")?;
-    let mut edges = Vec::with_capacity(edge_count);
-    for _ in 0..edge_count {
-        edges.push(ProofEdge {
-            u: reader.usize()?,
-            v: reader.usize()?,
-            value: f64::from_bits(reader.u64()?),
-        });
-    }
-    let mut atom_refs = Vec::with_capacity(reference_count);
-    for _ in 0..reference_count {
-        atom_refs.push(reader.array32()?);
-    }
-    let mut diagram = Vec::with_capacity(bar_count);
-    for _ in 0..bar_count {
-        diagram.push(ProofBar {
-            dimension: reader.usize()?,
-            birth: f64::from_bits(reader.u64()?),
-            death: f64::from_bits(reader.u64()?),
-        });
-    }
-    SnapshotProof::new(vertex_count, edges, atom_refs, diagram)
+    totals.bars = bounded_sum(totals.bars, header.bars, limits.max_bars, "diagram bars")?;
+    Ok(())
+}
+
+fn decode_proof_edges(reader: &mut Reader<'_>, count: usize) -> Result<Vec<ProofEdge>, ProofError> {
+    (0..count)
+        .map(|_| {
+            Ok(ProofEdge {
+                u: reader.usize()?,
+                v: reader.usize()?,
+                value: f64::from_bits(reader.u64()?),
+            })
+        })
+        .collect()
+}
+
+fn decode_bars(reader: &mut Reader<'_>, count: usize) -> Result<Vec<ProofBar>, ProofError> {
+    (0..count)
+        .map(|_| {
+            Ok(ProofBar {
+                dimension: reader.usize()?,
+                birth: f64::from_bits(reader.u64()?),
+                death: f64::from_bits(reader.u64()?),
+            })
+        })
+        .collect()
 }
 
 fn digest_columns(hash: &mut Sha256, columns: &[ProofColumn]) {
@@ -877,71 +1110,116 @@ fn program_blocks(graph: &Graph, threshold: Option<f64>) -> Result<Vec<Block>, P
 }
 
 fn biconnected_edge_blocks(adjacency: &[Vec<(usize, usize)>]) -> Vec<Vec<usize>> {
-    let n = adjacency.len();
-    let unseen = usize::MAX;
-    let mut discovered = vec![unseen; n];
-    let mut low = vec![0usize; n];
-    let mut next = vec![0usize; n];
-    let mut parent_edge = vec![unseen; n];
-    let mut time = 0usize;
-    let mut path = Vec::new();
-    let mut edge_stack = Vec::new();
-    let mut blocks = Vec::new();
-    for root in 0..n {
-        if discovered[root] != unseen || adjacency[root].is_empty() {
-            continue;
+    BiconnectedSearch::new(adjacency).run()
+}
+
+struct BiconnectedSearch<'a> {
+    adjacency: &'a [Vec<(usize, usize)>],
+    discovered: Vec<usize>,
+    low: Vec<usize>,
+    next: Vec<usize>,
+    parent_edge: Vec<usize>,
+    time: usize,
+    path: Vec<usize>,
+    edge_stack: Vec<usize>,
+    blocks: Vec<Vec<usize>>,
+}
+
+impl<'a> BiconnectedSearch<'a> {
+    fn new(adjacency: &'a [Vec<(usize, usize)>]) -> Self {
+        let vertices = adjacency.len();
+        Self {
+            adjacency,
+            discovered: vec![usize::MAX; vertices],
+            low: vec![0; vertices],
+            next: vec![0; vertices],
+            parent_edge: vec![usize::MAX; vertices],
+            time: 0,
+            path: Vec::new(),
+            edge_stack: Vec::new(),
+            blocks: Vec::new(),
         }
-        discovered[root] = time;
-        low[root] = time;
-        time += 1;
-        path.push(root);
-        while let Some(&vertex) = path.last() {
-            if next[vertex] < adjacency[vertex].len() {
-                let (neighbor, edge) = adjacency[vertex][next[vertex]];
-                next[vertex] += 1;
-                if discovered[neighbor] == unseen {
-                    parent_edge[neighbor] = edge;
-                    edge_stack.push(edge);
-                    discovered[neighbor] = time;
-                    low[neighbor] = time;
-                    time += 1;
-                    path.push(neighbor);
-                } else if edge != parent_edge[vertex] && discovered[neighbor] < discovered[vertex] {
-                    low[vertex] = low[vertex].min(discovered[neighbor]);
-                    edge_stack.push(edge);
-                }
-                continue;
+    }
+
+    fn run(mut self) -> Vec<Vec<usize>> {
+        for root in 0..self.adjacency.len() {
+            if self.discovered[root] == usize::MAX && !self.adjacency[root].is_empty() {
+                self.start_root(root);
+                self.walk();
             }
-            path.pop();
-            let edge = parent_edge[vertex];
-            if edge == unseen {
-                if !edge_stack.is_empty() {
-                    blocks.push(std::mem::take(&mut edge_stack));
-                }
-                continue;
-            }
-            let parent = adjacency[vertex]
-                .iter()
-                .find_map(|&(neighbor, candidate)| (candidate == edge).then_some(neighbor))
-                .expect("a tree edge has its parent endpoint");
-            low[parent] = low[parent].min(low[vertex]);
-            if low[vertex] >= discovered[parent] {
-                let mut block = Vec::new();
-                while let Some(candidate) = edge_stack.pop() {
-                    block.push(candidate);
-                    if candidate == edge {
-                        break;
-                    }
-                }
-                blocks.push(block);
+        }
+        for block in &mut self.blocks {
+            block.sort_unstable();
+        }
+        self.blocks.sort_unstable();
+        self.blocks
+    }
+
+    fn start_root(&mut self, root: usize) {
+        self.discovered[root] = self.time;
+        self.low[root] = self.time;
+        self.time += 1;
+        self.path.push(root);
+    }
+
+    fn walk(&mut self) {
+        while let Some(&vertex) = self.path.last() {
+            if self.next[vertex] < self.adjacency[vertex].len() {
+                let (neighbor, edge) = self.adjacency[vertex][self.next[vertex]];
+                self.next[vertex] += 1;
+                self.visit_edge(vertex, neighbor, edge);
+            } else {
+                self.path.pop();
+                self.finish_vertex(vertex);
             }
         }
     }
-    for block in &mut blocks {
-        block.sort_unstable();
+
+    fn visit_edge(&mut self, vertex: usize, neighbor: usize, edge: usize) {
+        if self.discovered[neighbor] == usize::MAX {
+            self.parent_edge[neighbor] = edge;
+            self.edge_stack.push(edge);
+            self.discovered[neighbor] = self.time;
+            self.low[neighbor] = self.time;
+            self.time += 1;
+            self.path.push(neighbor);
+        } else if edge != self.parent_edge[vertex]
+            && self.discovered[neighbor] < self.discovered[vertex]
+        {
+            self.low[vertex] = self.low[vertex].min(self.discovered[neighbor]);
+            self.edge_stack.push(edge);
+        }
     }
-    blocks.sort_unstable();
-    blocks
+
+    fn finish_vertex(&mut self, vertex: usize) {
+        let edge = self.parent_edge[vertex];
+        if edge == usize::MAX {
+            if !self.edge_stack.is_empty() {
+                self.blocks.push(std::mem::take(&mut self.edge_stack));
+            }
+            return;
+        }
+        let parent = self.adjacency[vertex]
+            .iter()
+            .find_map(|&(neighbor, candidate)| (candidate == edge).then_some(neighbor))
+            .expect("a tree edge has its parent endpoint");
+        self.low[parent] = self.low[parent].min(self.low[vertex]);
+        if self.low[vertex] >= self.discovered[parent] {
+            let block = self.pop_block(edge);
+            self.blocks.push(block);
+        }
+    }
+
+    fn pop_block(&mut self, terminal: usize) -> Vec<usize> {
+        let mut block = Vec::new();
+        while let Some(candidate) = self.edge_stack.pop() {
+            block.push(candidate);
+            if candidate == terminal {
+                break;
+            }
+        }
+        block
+    }
 }
 
 struct SeparatorSearch<'a> {
@@ -1091,59 +1369,14 @@ struct FilteredComplex {
 impl FilteredComplex {
     fn build(graph: &Graph, threshold: Option<f64>) -> Result<Self, ProofError> {
         let threshold = checked_threshold(threshold)?;
-        let mut edges: Vec<_> = graph
-            .edges
-            .iter()
-            .filter(|edge| edge.value <= threshold)
-            .map(|edge| FilteredEdge {
-                vertices: [edge.u, edge.v],
-                value: edge.value,
-            })
-            .collect();
-        edges.sort_by(|left, right| {
-            left.value
-                .total_cmp(&right.value)
-                .then_with(|| edge_rank(right.vertices).cmp(&edge_rank(left.vertices)))
-        });
-        let edge_rows: BTreeMap<_, _> = edges
+        let edges = filtered_edges(graph, threshold);
+        let edge_rows = edges
             .iter()
             .enumerate()
             .map(|(position, edge)| ((edge.vertices[0], edge.vertices[1]), position))
             .collect();
-        let mut upper = vec![Vec::new(); graph.vertex_count];
-        for edge in &edges {
-            upper[edge.vertices[0]].push(edge.vertices[1]);
-        }
-        for neighbors in &mut upper {
-            neighbors.sort_unstable();
-        }
-        let mut triangles = Vec::new();
-        for u in 0..graph.vertex_count {
-            for &v in &upper[u] {
-                let mut left = upper[u].partition_point(|&vertex| vertex <= v);
-                let mut right = upper[v].partition_point(|&vertex| vertex <= v);
-                while left < upper[u].len() && right < upper[v].len() {
-                    match upper[u][left].cmp(&upper[v][right]) {
-                        std::cmp::Ordering::Less => left += 1,
-                        std::cmp::Ordering::Greater => right += 1,
-                        std::cmp::Ordering::Equal => {
-                            let w = upper[u][left];
-                            triangles.push(FilteredTriangle {
-                                vertices: [u, v, w],
-                                value: graph.get(u, v).max(graph.get(u, w)).max(graph.get(v, w)),
-                            });
-                            left += 1;
-                            right += 1;
-                        }
-                    }
-                }
-            }
-        }
-        triangles.sort_by(|left, right| {
-            left.value
-                .total_cmp(&right.value)
-                .then_with(|| triangle_rank(right.vertices).cmp(&triangle_rank(left.vertices)))
-        });
+        let upper = upper_neighbors(graph.vertex_count, &edges);
+        let triangles = filtered_triangles(graph, &upper);
         Ok(Self {
             vertex_count: graph.vertex_count,
             edges,
@@ -1178,6 +1411,76 @@ impl FilteredComplex {
                 column
             })
             .collect()
+    }
+}
+
+fn filtered_edges(graph: &Graph, threshold: f64) -> Vec<FilteredEdge> {
+    let mut edges = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.value <= threshold)
+        .map(|edge| FilteredEdge {
+            vertices: [edge.u, edge.v],
+            value: edge.value,
+        })
+        .collect::<Vec<_>>();
+    edges.sort_by(|left, right| {
+        left.value
+            .total_cmp(&right.value)
+            .then_with(|| edge_rank(right.vertices).cmp(&edge_rank(left.vertices)))
+    });
+    edges
+}
+
+fn upper_neighbors(vertex_count: usize, edges: &[FilteredEdge]) -> Vec<Vec<usize>> {
+    let mut upper = vec![Vec::new(); vertex_count];
+    for edge in edges {
+        upper[edge.vertices[0]].push(edge.vertices[1]);
+    }
+    for neighbors in &mut upper {
+        neighbors.sort_unstable();
+    }
+    upper
+}
+
+fn filtered_triangles(graph: &Graph, upper: &[Vec<usize>]) -> Vec<FilteredTriangle> {
+    let mut triangles = Vec::new();
+    for u in 0..graph.vertex_count {
+        for &v in &upper[u] {
+            append_common_triangles(&mut triangles, graph, upper, u, v);
+        }
+    }
+    triangles.sort_by(|left, right| {
+        left.value
+            .total_cmp(&right.value)
+            .then_with(|| triangle_rank(right.vertices).cmp(&triangle_rank(left.vertices)))
+    });
+    triangles
+}
+
+fn append_common_triangles(
+    triangles: &mut Vec<FilteredTriangle>,
+    graph: &Graph,
+    upper: &[Vec<usize>],
+    u: usize,
+    v: usize,
+) {
+    let mut left = upper[u].partition_point(|&vertex| vertex <= v);
+    let mut right = upper[v].partition_point(|&vertex| vertex <= v);
+    while left < upper[u].len() && right < upper[v].len() {
+        match upper[u][left].cmp(&upper[v][right]) {
+            std::cmp::Ordering::Less => left += 1,
+            std::cmp::Ordering::Greater => right += 1,
+            std::cmp::Ordering::Equal => {
+                let w = upper[u][left];
+                triangles.push(FilteredTriangle {
+                    vertices: [u, v, w],
+                    value: graph.get(u, v).max(graph.get(u, w)).max(graph.get(v, w)),
+                });
+                left += 1;
+                right += 1;
+            }
+        }
     }
 }
 
@@ -1237,6 +1540,17 @@ fn check_reduction(
         modulus,
         "triangle",
     )?;
+    let mut diagram = h0_from_reduction(&complex, &reduced_edges);
+    diagram.extend(h1_from_reduction(
+        &complex,
+        &reduced_edges,
+        &reduced_triangles,
+    ));
+    canonicalize_diagram(&mut diagram);
+    Ok(CheckedReduction { diagram })
+}
+
+fn h0_from_reduction(complex: &FilteredComplex, reduced_edges: &[SparseColumn]) -> Vec<ProofBar> {
     let mut diagram = Vec::new();
     let mut killed_vertices = vec![false; complex.vertex_count];
     for (position, reduced) in reduced_edges.iter().enumerate() {
@@ -1262,6 +1576,15 @@ fn check_reduction(
                 death: f64::INFINITY,
             }),
     );
+    diagram
+}
+
+fn h1_from_reduction(
+    complex: &FilteredComplex,
+    reduced_edges: &[SparseColumn],
+    reduced_triangles: &[SparseColumn],
+) -> Vec<ProofBar> {
+    let mut diagram = Vec::new();
     let mut deaths = BTreeMap::new();
     for (position, reduced) in reduced_triangles.iter().enumerate() {
         if let Some((pivot, _)) = reduced.pivot() {
@@ -1282,8 +1605,7 @@ fn check_reduction(
             });
         }
     }
-    canonicalize_diagram(&mut diagram);
-    Ok(CheckedReduction { diagram })
+    diagram
 }
 
 fn check_matrix(
