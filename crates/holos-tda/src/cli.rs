@@ -1212,51 +1212,83 @@ fn explain_sparse(
     cli: &Cli,
 ) -> crate::Result<ExplainedDiagram> {
     if let Some(path) = &cli.program {
-        if cli.collapse_edges {
-            let collapsed = collapse_for_explain(matrix, params)?;
-            write_collapse_artifact(&collapsed, cli.collapse_certificate.as_deref())?;
-        }
-        let (artifact, program) =
-            ProgramArtifact::compile(matrix, params, CertificateLimits::default())
-                .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
-        if let Some(path) = &cli.representatives {
-            write_representatives(path, program.result())?;
-        }
-        let explained = program.result().clone();
-        let bytes = artifact
-            .encode()
-            .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
-        write_via_temporary(path, &bytes)?;
-        eprintln!(
-            "persistence program: wrote {} bytes and {} cyclic atoms to {}",
-            bytes.len(),
-            artifact.atoms().len(),
-            path.display()
-        );
-        return Ok(explained);
+        return explain_with_program(matrix, params, cli, path);
     }
     if let Some(path) = &cli.atlas {
-        if cli.collapse_edges {
-            let collapsed = collapse_for_explain(matrix, params)?;
-            write_collapse_artifact(&collapsed, cli.collapse_certificate.as_deref())?;
-        }
-        let artifact = AtlasArtifact::build(matrix, params, CertificateLimits::default())
-            .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
-        if let Some(path) = &cli.representatives {
-            write_representatives(path, artifact.explained())?;
-        }
-        let explained = artifact.explained().clone();
-        let bytes = artifact
-            .encode()
-            .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
-        write_via_temporary(path, &bytes)?;
-        eprintln!(
-            "persistence atlas: wrote {} bytes to {}",
-            bytes.len(),
-            path.display()
-        );
-        return Ok(explained);
+        return explain_with_atlas(matrix, params, cli, path);
     }
+    explain_direct(matrix, params, cli)
+}
+
+fn record_explain_collapse(
+    matrix: &SparseDistanceMatrix,
+    params: &RipsParams,
+    cli: &Cli,
+) -> crate::Result<()> {
+    if cli.collapse_edges {
+        let collapsed = collapse_for_explain(matrix, params)?;
+        write_collapse_artifact(&collapsed, cli.collapse_certificate.as_deref())?;
+    }
+    Ok(())
+}
+
+fn explain_with_program(
+    matrix: &SparseDistanceMatrix,
+    params: &RipsParams,
+    cli: &Cli,
+    path: &Path,
+) -> crate::Result<ExplainedDiagram> {
+    record_explain_collapse(matrix, params, cli)?;
+    let (artifact, program) =
+        ProgramArtifact::compile(matrix, params, CertificateLimits::default())
+            .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
+    if let Some(path) = &cli.representatives {
+        write_representatives(path, program.result())?;
+    }
+    let explained = program.result().clone();
+    let bytes = artifact
+        .encode()
+        .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
+    write_via_temporary(path, &bytes)?;
+    eprintln!(
+        "persistence program: wrote {} bytes and {} cyclic atoms to {}",
+        bytes.len(),
+        artifact.atoms().len(),
+        path.display()
+    );
+    Ok(explained)
+}
+
+fn explain_with_atlas(
+    matrix: &SparseDistanceMatrix,
+    params: &RipsParams,
+    cli: &Cli,
+    path: &Path,
+) -> crate::Result<ExplainedDiagram> {
+    record_explain_collapse(matrix, params, cli)?;
+    let artifact = AtlasArtifact::build(matrix, params, CertificateLimits::default())
+        .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
+    if let Some(path) = &cli.representatives {
+        write_representatives(path, artifact.explained())?;
+    }
+    let explained = artifact.explained().clone();
+    let bytes = artifact
+        .encode()
+        .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
+    write_via_temporary(path, &bytes)?;
+    eprintln!(
+        "persistence atlas: wrote {} bytes to {}",
+        bytes.len(),
+        path.display()
+    );
+    Ok(explained)
+}
+
+fn explain_direct(
+    matrix: &SparseDistanceMatrix,
+    params: &RipsParams,
+    cli: &Cli,
+) -> crate::Result<ExplainedDiagram> {
     let explained = if cli.collapse_edges {
         let collapsed = collapse_for_explain(matrix, params)?;
         write_collapse_artifact(&collapsed, cli.collapse_certificate.as_deref())?;
@@ -1332,6 +1364,19 @@ fn write_representatives(path: &Path, explained: &ExplainedDiagram) -> crate::Re
 
 fn run(cli: Cli) -> crate::Result<()> {
     let format = cli.format.unwrap_or_else(|| infer_format(&cli.input));
+    let params = compute_params(&cli);
+    validate_compute_options(&cli)?;
+    let explain = explain_enabled(&cli);
+    let (mut diagram, n_points) = match format {
+        InputFormat::Sparse => compute_sparse_input(&cli, &params, explain)?,
+        InputFormat::PointCloud => compute_point_input(&cli, &params, explain)?,
+        InputFormat::LowerDistance => compute_lower_input(&cli, &params, explain)?,
+    };
+    diagram.canonicalize();
+    write_cli_diagram(&cli, &diagram, n_points)
+}
+
+fn compute_params(cli: &Cli) -> RipsParams {
     let adaptive_collapse = AdaptiveCollapseParams {
         objective: cli
             .collapse_objective
@@ -1343,7 +1388,7 @@ fn run(cli: Cli) -> crate::Result<()> {
             }),
         work_limit: cli.collapse_work_limit,
     };
-    let params = RipsParams {
+    RipsParams {
         max_dim: cli.dim,
         // None lets the library apply the input's own default.
         threshold: cli.threshold,
@@ -1359,7 +1404,15 @@ fn run(cli: Cli) -> crate::Result<()> {
         engine: cli.engine.into(),
         dense_storage: cli.dense_storage.into(),
         factorization: cli.factorization.into(),
-    };
+    }
+}
+
+fn validate_compute_options(cli: &Cli) -> crate::Result<()> {
+    validate_collapse_options(cli)?;
+    validate_explain_options(cli)
+}
+
+fn validate_collapse_options(cli: &Cli) -> crate::Result<()> {
     if cli.collapse_schedule.is_some() && !cli.collapse_edges {
         return Err(crate::Error::InvalidInput(
             "--collapse-schedule requires --collapse-edges".into(),
@@ -1378,12 +1431,16 @@ fn run(cli: Cli) -> crate::Result<()> {
                 .into(),
         ));
     }
+    Ok(())
+}
+
+fn validate_explain_options(cli: &Cli) -> crate::Result<()> {
     if cli.atlas.is_some() && cli.program.is_some() {
         return Err(crate::Error::InvalidInput(
             "--atlas and --program cannot be used together".into(),
         ));
     }
-    let explain = cli.representatives.is_some() || cli.atlas.is_some() || cli.program.is_some();
+    let explain = explain_enabled(cli);
     if explain && cli.dim < 1 {
         return Err(crate::Error::InvalidInput(
             "--representatives, --atlas, and --program require --dim of at least 1".into(),
@@ -1394,106 +1451,125 @@ fn run(cli: Cli) -> crate::Result<()> {
             "--atlas and --program require --dim 1".into(),
         ));
     }
-    let (mut diagram, n_points) = match format {
-        InputFormat::Sparse => {
-            let dist = io::read_sparse_matrix(&cli.input, params.threads)?;
-            match cli.threshold {
-                Some(t) => eprintln!(
-                    "{} points, {} edges, threshold {t}",
-                    dist.len(),
-                    dist.num_edges()
-                ),
-                None => eprintln!(
-                    "{} points, {} edges, no threshold (all listed edges)",
-                    dist.len(),
-                    dist.num_edges()
-                ),
-            }
-            let n = dist.len();
-            let diagram = if explain {
-                explain_sparse(&dist, &params, &cli)?.diagram
-            } else if cli.collapse_edges {
-                crate::collapse_and_solve(&dist, &params, |collapsed| {
-                    write_collapse_artifact(collapsed, cli.collapse_certificate.as_deref())
-                })?
-            } else {
-                crate::rips_persistence_sparse(&dist, &params)?
-            };
-            (diagram, n)
-        }
-        InputFormat::PointCloud => {
-            let points = io::read_point_cloud(&cli.input, params.threads)?;
-            if let Some(threshold) = cli.threshold {
-                let built = PointCloudGraph::build(
-                    &points,
-                    PointCloudParams::new(threshold).with_threads(params.threads),
-                )?;
-                let dist = built.matrix();
-                eprintln!(
-                    "{} points, {} edges, threshold {threshold}, {:?} point construction",
-                    dist.len(),
-                    dist.num_edges(),
-                    built.stats().strategy
-                );
-                let n = dist.len();
-                let diagram = if explain {
-                    explain_sparse(dist, &params, &cli)?.diagram
-                } else if cli.collapse_edges {
-                    crate::collapse_and_solve(dist, &params, |collapsed| {
-                        write_collapse_artifact(collapsed, cli.collapse_certificate.as_deref())
-                    })?
-                } else {
-                    crate::rips_persistence_sparse(dist, &params)?
-                };
-                (diagram, n)
-            } else {
-                let dist = DistanceMatrix::from_points(&points)?;
-                eprintln!(
-                    "{} points, threshold {} (enclosing radius)",
-                    dist.len(),
-                    dist.enclosing_radius()
-                );
-                let n = dist.len();
-                let diagram = if explain {
-                    let threshold = dist.enclosing_radius();
-                    let sparse = dist.to_sparse_at(threshold)?;
-                    explain_sparse(&sparse, &params, &cli)?.diagram
-                } else if cli.collapse_edges {
-                    crate::collapse_and_solve(&dist, &params, |collapsed| {
-                        write_collapse_artifact(collapsed, cli.collapse_certificate.as_deref())
-                    })?
-                } else {
-                    crate::rips_persistence(&dist, &params)?
-                };
-                (diagram, n)
-            }
-        }
-        InputFormat::LowerDistance => {
-            let dist = io::read_lower_distance_matrix(&cli.input, params.threads)?;
-            match cli.threshold {
-                Some(t) => eprintln!("{} points, threshold {t}", dist.len()),
-                None => eprintln!(
-                    "{} points, threshold {} (enclosing radius)",
-                    dist.len(),
-                    dist.enclosing_radius()
-                ),
-            }
-            let n = dist.len();
-            let diagram = if explain {
-                let threshold = cli.threshold.unwrap_or_else(|| dist.enclosing_radius());
-                let sparse = dist.to_sparse_at(threshold)?;
-                explain_sparse(&sparse, &params, &cli)?.diagram
-            } else if cli.collapse_edges {
-                crate::collapse_and_solve(&dist, &params, |collapsed| {
-                    write_collapse_artifact(collapsed, cli.collapse_certificate.as_deref())
-                })?
-            } else {
-                crate::rips_persistence(&dist, &params)?
-            };
-            (diagram, n)
-        }
+    Ok(())
+}
+
+fn explain_enabled(cli: &Cli) -> bool {
+    cli.representatives.is_some() || cli.atlas.is_some() || cli.program.is_some()
+}
+
+fn compute_sparse_input(
+    cli: &Cli,
+    params: &RipsParams,
+    explain: bool,
+) -> crate::Result<(crate::Diagram, usize)> {
+    let matrix = io::read_sparse_matrix(&cli.input, params.threads)?;
+    report_sparse_input(&matrix, cli.threshold);
+    let diagram = compute_sparse_matrix(&matrix, params, cli, explain)?;
+    Ok((diagram, matrix.len()))
+}
+
+fn report_sparse_input(matrix: &SparseDistanceMatrix, threshold: Option<f64>) {
+    match threshold {
+        Some(value) => eprintln!(
+            "{} points, {} edges, threshold {value}",
+            matrix.len(),
+            matrix.num_edges()
+        ),
+        None => eprintln!(
+            "{} points, {} edges, no threshold (all listed edges)",
+            matrix.len(),
+            matrix.num_edges()
+        ),
+    }
+}
+
+fn compute_sparse_matrix(
+    matrix: &SparseDistanceMatrix,
+    params: &RipsParams,
+    cli: &Cli,
+    explain: bool,
+) -> crate::Result<crate::Diagram> {
+    if explain {
+        return Ok(explain_sparse(matrix, params, cli)?.diagram);
+    }
+    if cli.collapse_edges {
+        return crate::collapse_and_solve(matrix, params, |collapsed| {
+            write_collapse_artifact(collapsed, cli.collapse_certificate.as_deref())
+        });
+    }
+    crate::rips_persistence_sparse(matrix, params)
+}
+
+fn compute_point_input(
+    cli: &Cli,
+    params: &RipsParams,
+    explain: bool,
+) -> crate::Result<(crate::Diagram, usize)> {
+    let points = io::read_point_cloud(&cli.input, params.threads)?;
+    let Some(threshold) = cli.threshold else {
+        let matrix = DistanceMatrix::from_points(&points)?;
+        report_dense_input(&matrix, None);
+        let diagram = compute_dense_matrix(&matrix, params, cli, explain)?;
+        return Ok((diagram, matrix.len()));
     };
-    diagram.canonicalize();
+    let built = PointCloudGraph::build(
+        &points,
+        PointCloudParams::new(threshold).with_threads(params.threads),
+    )?;
+    let matrix = built.matrix();
+    eprintln!(
+        "{} points, {} edges, threshold {threshold}, {:?} point construction",
+        matrix.len(),
+        matrix.num_edges(),
+        built.stats().strategy
+    );
+    let diagram = compute_sparse_matrix(matrix, params, cli, explain)?;
+    Ok((diagram, matrix.len()))
+}
+
+fn compute_lower_input(
+    cli: &Cli,
+    params: &RipsParams,
+    explain: bool,
+) -> crate::Result<(crate::Diagram, usize)> {
+    let matrix = io::read_lower_distance_matrix(&cli.input, params.threads)?;
+    report_dense_input(&matrix, cli.threshold);
+    let diagram = compute_dense_matrix(&matrix, params, cli, explain)?;
+    Ok((diagram, matrix.len()))
+}
+
+fn report_dense_input(matrix: &DistanceMatrix, threshold: Option<f64>) {
+    match threshold {
+        Some(value) => eprintln!("{} points, threshold {value}", matrix.len()),
+        None => eprintln!(
+            "{} points, threshold {} (enclosing radius)",
+            matrix.len(),
+            matrix.enclosing_radius()
+        ),
+    }
+}
+
+fn compute_dense_matrix(
+    matrix: &DistanceMatrix,
+    params: &RipsParams,
+    cli: &Cli,
+    explain: bool,
+) -> crate::Result<crate::Diagram> {
+    if explain {
+        let threshold = cli.threshold.unwrap_or_else(|| matrix.enclosing_radius());
+        let sparse = matrix.to_sparse_at(threshold)?;
+        return Ok(explain_sparse(&sparse, params, cli)?.diagram);
+    }
+    if cli.collapse_edges {
+        return crate::collapse_and_solve(matrix, params, |collapsed| {
+            write_collapse_artifact(collapsed, cli.collapse_certificate.as_deref())
+        });
+    }
+    crate::rips_persistence(matrix, params)
+}
+
+fn write_cli_diagram(cli: &Cli, diagram: &crate::Diagram, n_points: usize) -> crate::Result<()> {
     let output = match cli.output {
         DiagramFormat::Ripser => OutputFormat::Ripser,
         DiagramFormat::Csv => OutputFormat::Csv,
@@ -1504,75 +1580,37 @@ fn run(cli: Cli) -> crate::Result<()> {
     let mut out = std::io::BufWriter::with_capacity(1 << 16, stdout.lock());
     io::write_diagram(
         &mut out,
-        &diagram,
+        diagram,
         output,
         cli.dim.min(n_points.saturating_sub(1)),
     )?;
-    out.flush().map_err(|e| crate::Error::Io(e.to_string()))
+    out.flush()
+        .map_err(|error| crate::Error::Io(error.to_string()))
 }
 
 fn run_verify(cli: VerifyCli) -> crate::Result<()> {
-    use std::io::Read;
-
-    let file = std::fs::File::open(&cli.artifact).map_err(|error| {
-        crate::Error::Io(format!(
-            "cannot open collapse artifact {}: {error}",
-            cli.artifact.display()
-        ))
-    })?;
-    let read_limit = u64::try_from(cli.max_artifact_bytes)
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    let mut bytes = Vec::new();
-    file.take(read_limit)
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
-            crate::Error::Io(format!(
-                "cannot read collapse artifact {}: {error}",
-                cli.artifact.display()
-            ))
-        })?;
-    if bytes.len() > cli.max_artifact_bytes {
-        return Err(crate::Error::InvalidInput(format!(
-            "collapse artifact has {} bytes, above the limit {}",
-            bytes.len(),
-            cli.max_artifact_bytes
-        )));
-    }
+    let bytes = read_bounded_artifact(&cli.artifact, cli.max_artifact_bytes, "collapse artifact")?;
     let limits = DecodeLimits {
         max_bytes: cli.max_artifact_bytes,
         ..DecodeLimits::default()
     };
     let artifact = CollapseArtifact::decode(&bytes, limits)
         .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
+    verify_collapse_input(&cli, &artifact)?;
+    report_verified_collapse(&artifact);
+    Ok(())
+}
+
+fn verify_collapse_input(cli: &VerifyCli, artifact: &CollapseArtifact) -> crate::Result<()> {
     let format = cli.format.unwrap_or_else(|| infer_format(&cli.input));
     match format {
-        InputFormat::Sparse => {
-            let dist = io::read_sparse_matrix(&cli.input, cli.threads.max(1))?;
-            verify_sparse_artifact(&dist, cli.threshold, &artifact)
-                .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
-        }
-        InputFormat::PointCloud => {
-            let points = io::read_point_cloud(&cli.input, cli.threads.max(1))?;
-            if let Some(threshold) = cli.threshold {
-                let graph = PointCloudGraph::build(
-                    &points,
-                    PointCloudParams::new(threshold).with_threads(cli.threads),
-                )?;
-                verify_sparse_artifact(graph.matrix(), Some(threshold), &artifact)
-                    .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
-            } else {
-                let dist = DistanceMatrix::from_points(&points)?;
-                verify_dense_artifact(&dist, None, &artifact)
-                    .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
-            }
-        }
-        InputFormat::LowerDistance => {
-            let dist = io::read_lower_distance_matrix(&cli.input, cli.threads.max(1))?;
-            verify_dense_artifact(&dist, cli.threshold, &artifact)
-                .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
-        }
+        InputFormat::Sparse => verify_sparse_collapse_input(cli, artifact),
+        InputFormat::PointCloud => verify_point_collapse_input(cli, artifact),
+        InputFormat::LowerDistance => verify_lower_collapse_input(cli, artifact),
     }
+}
+
+fn report_verified_collapse(artifact: &CollapseArtifact) {
     let completeness = match artifact.certificate().completeness() {
         CollapseCompleteness::CompleteFixedPoint => "complete fixed point",
         CollapseCompleteness::BudgetLimited => "budget-limited partial collapse",
@@ -1582,7 +1620,33 @@ fn run_verify(cli: VerifyCli) -> crate::Result<()> {
         artifact.certificate().algorithm_version(),
         artifact.certificate().steps().len()
     );
-    Ok(())
+}
+
+fn verify_sparse_collapse_input(cli: &VerifyCli, artifact: &CollapseArtifact) -> crate::Result<()> {
+    let matrix = io::read_sparse_matrix(&cli.input, cli.threads.max(1))?;
+    verify_sparse_artifact(&matrix, cli.threshold, artifact)
+        .map_err(|error| crate::Error::InvalidInput(error.to_string()))
+}
+
+fn verify_point_collapse_input(cli: &VerifyCli, artifact: &CollapseArtifact) -> crate::Result<()> {
+    let points = io::read_point_cloud(&cli.input, cli.threads.max(1))?;
+    if let Some(threshold) = cli.threshold {
+        let graph = PointCloudGraph::build(
+            &points,
+            PointCloudParams::new(threshold).with_threads(cli.threads),
+        )?;
+        return verify_sparse_artifact(graph.matrix(), Some(threshold), artifact)
+            .map_err(|error| crate::Error::InvalidInput(error.to_string()));
+    }
+    let matrix = DistanceMatrix::from_points(&points)?;
+    verify_dense_artifact(&matrix, None, artifact)
+        .map_err(|error| crate::Error::InvalidInput(error.to_string()))
+}
+
+fn verify_lower_collapse_input(cli: &VerifyCli, artifact: &CollapseArtifact) -> crate::Result<()> {
+    let matrix = io::read_lower_distance_matrix(&cli.input, cli.threads.max(1))?;
+    verify_dense_artifact(&matrix, cli.threshold, artifact)
+        .map_err(|error| crate::Error::InvalidInput(error.to_string()))
 }
 
 fn read_bounded_artifact(path: &Path, maximum: usize, label: &str) -> crate::Result<Vec<u8>> {
@@ -1667,13 +1731,7 @@ fn run_prove(cli: ProveCli) -> crate::Result<()> {
 }
 
 fn run_index(cli: IndexCli) -> crate::Result<()> {
-    if cli.update.len() != cli.record.len() {
-        return Err(crate::Error::InvalidInput(format!(
-            "--update occurs {} times but --record occurs {} times",
-            cli.update.len(),
-            cli.record.len()
-        )));
-    }
+    validate_index_paths(&cli)?;
     let threads = cli.threads.max(1);
     let initial = read_proof_input(&cli.input, cli.format, threads, cli.threshold)?;
     let params = RipsParams {
@@ -1704,16 +1762,50 @@ fn run_index(cli: IndexCli) -> crate::Result<()> {
         .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
     write_via_temporary(&cli.snapshot, &encoded)?;
     let snapshot_summary = snapshot.summary();
-    let mut changed_nodes = 0usize;
-    let mut edge_changes = 0usize;
-    let mut cold_records = 0usize;
+    let work = write_index_updates(&cli, threads, &mut stream)?;
+    println!(
+        "wrote one initial checkpoint through dimension {} with {} interfaces and {} records with {} changed interfaces, {} edge changes, and {} envelope checkpoints",
+        cli.dim,
+        snapshot_summary.nodes,
+        cli.record.len(),
+        work.changed_nodes,
+        work.edge_changes,
+        work.cold_records
+    );
+    Ok(())
+}
+
+fn validate_index_paths(cli: &IndexCli) -> crate::Result<()> {
+    if cli.update.len() != cli.record.len() {
+        return Err(crate::Error::InvalidInput(format!(
+            "--update occurs {} times but --record occurs {} times",
+            cli.update.len(),
+            cli.record.len()
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct IndexCliWork {
+    changed_nodes: usize,
+    edge_changes: usize,
+    cold_records: usize,
+}
+
+fn write_index_updates(
+    cli: &IndexCli,
+    threads: usize,
+    stream: &mut IndexStream,
+) -> crate::Result<IndexCliWork> {
+    let mut work = IndexCliWork::default();
     for (input, output) in cli.update.iter().zip(&cli.record) {
         let graph = read_proof_input(input, cli.format, threads, cli.threshold)?;
         let step = stream.apply_graph(&graph, CorrespondenceMode::Omit)?;
         let summary = match &step.proof {
             IndexStreamProof::Delta(proof) => proof.summary(),
             IndexStreamProof::Snapshot(proof) => {
-                cold_records += 1;
+                work.cold_records += 1;
                 proof.summary()
             }
         };
@@ -1722,19 +1814,10 @@ fn run_index(cli: IndexCli) -> crate::Result<()> {
             .encode()
             .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
         write_via_temporary(output, &bytes)?;
-        changed_nodes += summary.nodes;
-        edge_changes += summary.edge_changes;
+        work.changed_nodes += summary.nodes;
+        work.edge_changes += summary.edge_changes;
     }
-    println!(
-        "wrote one initial checkpoint through dimension {} with {} interfaces and {} records with {} changed interfaces, {} edge changes, and {} envelope checkpoints",
-        cli.dim,
-        snapshot_summary.nodes,
-        cli.record.len(),
-        changed_nodes,
-        edge_changes,
-        cold_records
-    );
-    Ok(())
+    Ok(work)
 }
 
 fn run_interface(cli: InterfaceCli) -> crate::Result<()> {
@@ -1905,6 +1988,14 @@ fn run_kinetic(cli: KineticCli) -> crate::Result<()> {
         KineticLimits::default(),
     )?;
     let schedule = trajectory.events(cli.scale)?;
+    report_kinetic_schedule(&schedule);
+    if let (Some(dimension), Some(scale)) = (cli.dimension, cli.scale) {
+        run_kinetic_cohomology(&cli, &trajectory, dimension, scale)?;
+    }
+    Ok(())
+}
+
+fn report_kinetic_schedule(schedule: &crate::KineticSchedule) {
     println!(
         "certified {} isolated events and {} persistent ties on [{}, {}]",
         schedule.events.len(),
@@ -1924,49 +2015,62 @@ fn run_kinetic(cli: KineticCli) -> crate::Result<()> {
             event.time, event.lower, event.upper, kinds
         );
     }
-    if let (Some(dimension), Some(scale)) = (cli.dimension, cli.scale) {
-        let relations = trajectory.cohomology_events(
+}
+
+fn run_kinetic_cohomology(
+    cli: &KineticCli,
+    trajectory: &KineticFiltration,
+    dimension: usize,
+    scale: f64,
+) -> crate::Result<()> {
+    let relations =
+        trajectory.cohomology_events(dimension, scale, cli.modulus, CohomologyLimits::default())?;
+    for event in relations {
+        println!(
+            "H{} event {}: rank {} to {}, relation rank {}",
             dimension,
-            scale,
-            cli.modulus,
-            CohomologyLimits::default(),
-        )?;
-        for event in relations {
-            println!(
-                "H{} event {}: rank {} to {}, relation rank {}",
-                dimension,
-                event.event.time,
-                event.before_rank,
-                event.after_rank,
-                event.relation.relation_rank
-            );
-        }
-        if let Some(output) = cli.zigzag {
-            let limits = KineticZigzagArtifactLimits {
-                max_bytes: cli.max_artifact_bytes,
-                ..KineticZigzagArtifactLimits::default()
-            };
-            let (artifact, zigzag) =
-                KineticZigzagArtifact::build(&trajectory, dimension, scale, cli.modulus, limits)?;
-            let bytes = artifact.encode(limits)?;
-            write_via_temporary(&output, &bytes)?;
-            let summary = artifact.summary();
-            println!(
-                "wrote H{} kinetic zigzag with {} nodes, {} arrows, {} interval spaces, {} interval copies, and {} bytes",
-                dimension,
-                summary.nodes,
-                summary.arrows,
-                summary.intervals,
-                summary.interval_copies,
-                bytes.len()
-            );
-            for interval in zigzag.barcode.intervals {
-                println!(
-                    "zigzag [{}..={}] multiplicity {} id {}",
-                    interval.start, interval.end, interval.multiplicity, interval.id
-                );
-            }
-        }
+            event.event.time,
+            event.before_rank,
+            event.after_rank,
+            event.relation.relation_rank
+        );
+    }
+    if let Some(output) = &cli.zigzag {
+        write_kinetic_zigzag(cli, trajectory, dimension, scale, output)?;
+    }
+    Ok(())
+}
+
+fn write_kinetic_zigzag(
+    cli: &KineticCli,
+    trajectory: &KineticFiltration,
+    dimension: usize,
+    scale: f64,
+    output: &Path,
+) -> crate::Result<()> {
+    let limits = KineticZigzagArtifactLimits {
+        max_bytes: cli.max_artifact_bytes,
+        ..KineticZigzagArtifactLimits::default()
+    };
+    let (artifact, zigzag) =
+        KineticZigzagArtifact::build(trajectory, dimension, scale, cli.modulus, limits)?;
+    let bytes = artifact.encode(limits)?;
+    write_via_temporary(output, &bytes)?;
+    let summary = artifact.summary();
+    println!(
+        "wrote H{} kinetic zigzag with {} nodes, {} arrows, {} interval spaces, {} interval copies, and {} bytes",
+        dimension,
+        summary.nodes,
+        summary.arrows,
+        summary.intervals,
+        summary.interval_copies,
+        bytes.len()
+    );
+    for interval in zigzag.barcode.intervals {
+        println!(
+            "zigzag [{}..={}] multiplicity {} id {}",
+            interval.start, interval.end, interval.multiplicity, interval.id
+        );
     }
     Ok(())
 }
@@ -2063,39 +2167,7 @@ fn run_link_plan(cli: LinkPlanCli) -> crate::Result<()> {
 
 fn run_synthesis(cli: SynthesisCli) -> crate::Result<()> {
     let declared_states = cli.states.len();
-    let mut states = Vec::new();
-    for (step, path) in cli.states.iter().enumerate() {
-        let parsed = io::read_sparse_matrix(path, cli.threads)?;
-        if parsed.len() > cli.vertices {
-            return Err(crate::Error::InvalidInput(format!(
-                "state {} uses a vertex above --vertices {}",
-                path.display(),
-                cli.vertices
-            )));
-        }
-        let graph =
-            SparseDistanceMatrix::from_triplets(cli.vertices, &parsed.edges().collect::<Vec<_>>())?;
-        let space = cohomology_space(
-            &graph,
-            cli.dimension,
-            cli.scale,
-            cli.modulus,
-            CohomologyLimits::default(),
-        )?;
-        if space.rank() <= cli.max_rank {
-            continue;
-        }
-        let target = space.full_subspace();
-        states.push(SynthesisState::from_subspace(
-            0,
-            step as u64,
-            &graph,
-            cli.scale,
-            &space,
-            &target,
-            cli.max_rank,
-        )?);
-    }
+    let states = synthesis_states(&cli)?;
     let specification =
         TopologicalSpecification::new(cli.vertices, cli.dimension, cli.scale, cli.modulus, states);
     let actions = parse_synthesis_actions(&cli.candidates, &specification)?;
@@ -2121,6 +2193,49 @@ fn run_synthesis(cli: SynthesisCli) -> crate::Result<()> {
         bytes.len(),
     );
     Ok(())
+}
+
+fn synthesis_states(cli: &SynthesisCli) -> crate::Result<Vec<SynthesisState>> {
+    let mut states = Vec::new();
+    for (step, path) in cli.states.iter().enumerate() {
+        let graph = read_synthesis_state(path, cli.vertices, cli.threads)?;
+        let space = cohomology_space(
+            &graph,
+            cli.dimension,
+            cli.scale,
+            cli.modulus,
+            CohomologyLimits::default(),
+        )?;
+        if space.rank() <= cli.max_rank {
+            continue;
+        }
+        let target = space.full_subspace();
+        states.push(SynthesisState::from_subspace(
+            0,
+            step as u64,
+            &graph,
+            cli.scale,
+            &space,
+            &target,
+            cli.max_rank,
+        )?);
+    }
+    Ok(states)
+}
+
+fn read_synthesis_state(
+    path: &Path,
+    vertices: usize,
+    threads: usize,
+) -> crate::Result<SparseDistanceMatrix> {
+    let parsed = io::read_sparse_matrix(path, threads)?;
+    if parsed.len() > vertices {
+        return Err(crate::Error::InvalidInput(format!(
+            "state {} uses a vertex above --vertices {vertices}",
+            path.display()
+        )));
+    }
+    SparseDistanceMatrix::from_triplets(vertices, &parsed.edges().collect::<Vec<_>>())
 }
 
 fn run_kinetic_synthesis(cli: KineticSynthesisCli) -> crate::Result<()> {
@@ -2550,28 +2665,11 @@ fn run_verify_program_trace(cli: VerifyProgramTraceCli) -> crate::Result<()> {
 }
 
 fn run_intervene(cli: InterveneCli) -> crate::Result<()> {
-    if cli.budget == 0 {
-        return Err(crate::Error::InvalidInput(
-            "--budget must be at least 1 when an output artifact is requested".into(),
-        ));
-    }
-    let bytes = read_bounded_artifact(&cli.program, cli.max_artifact_bytes, "persistence program")?;
-    let limits = certificate_limits(cli.max_artifact_bytes);
-    let artifact = ProgramArtifact::decode(&bytes, program_limits(cli.max_artifact_bytes), limits)
-        .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
-    let matrix = read_proof_input(&cli.input, cli.format, cli.threads, artifact.threshold())?;
-    let program = artifact
-        .verify(&matrix, limits)
-        .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
-    let target = program.result().spaces.get(cli.space).ok_or_else(|| {
-        crate::Error::InvalidInput(format!(
-            "H1 class-space index {} is out of range for {} spaces",
-            cli.space,
-            program.result().spaces.len()
-        ))
-    })?;
+    validate_intervention_budget(cli.budget)?;
+    let program = read_intervention_program(&cli)?;
+    let target = intervention_target(&program, cli.space)?;
     let intervention =
-        program.kill_h1_before(target.id, cli.before, InterventionBudget::new(cli.budget))?;
+        program.kill_h1_before(target, cli.before, InterventionBudget::new(cli.budget))?;
     let proof = intervention.artifact.ok_or_else(|| {
         crate::Error::InvalidInput(
             "the candidate budget ended without a certified intervention".into(),
@@ -2593,6 +2691,44 @@ fn run_intervene(cli: InterveneCli) -> crate::Result<()> {
         cli.output.display()
     );
     Ok(())
+}
+
+fn validate_intervention_budget(budget: usize) -> crate::Result<()> {
+    if budget == 0 {
+        return Err(crate::Error::InvalidInput(
+            "--budget must be at least 1 when an output artifact is requested".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn read_intervention_program(cli: &InterveneCli) -> crate::Result<crate::PersistenceProgram> {
+    let bytes = read_bounded_artifact(&cli.program, cli.max_artifact_bytes, "persistence program")?;
+    let limits = certificate_limits(cli.max_artifact_bytes);
+    let artifact = ProgramArtifact::decode(&bytes, program_limits(cli.max_artifact_bytes), limits)
+        .map_err(|error| crate::Error::InvalidInput(error.to_string()))?;
+    let matrix = read_proof_input(&cli.input, cli.format, cli.threads, artifact.threshold())?;
+    artifact
+        .verify(&matrix, limits)
+        .map_err(|error| crate::Error::InvalidInput(error.to_string()))
+}
+
+fn intervention_target(
+    program: &crate::PersistenceProgram,
+    space: usize,
+) -> crate::Result<crate::IntervalGroupId> {
+    program
+        .result()
+        .spaces
+        .get(space)
+        .map(|target| target.id)
+        .ok_or_else(|| {
+            crate::Error::InvalidInput(format!(
+                "H1 class-space index {} is out of range for {} spaces",
+                space,
+                program.result().spaces.len()
+            ))
+        })
 }
 
 fn run_verify_intervention(cli: VerifyInterventionCli) -> crate::Result<()> {
@@ -2636,402 +2772,160 @@ where
     T: Into<std::ffi::OsString> + Clone,
 {
     let argv: Vec<std::ffi::OsString> = argv.into_iter().map(Into::into).collect();
-    if argv.get(1).is_some_and(|arg| arg == "cohomology") {
-        let mut sub_argv = Vec::with_capacity(argv.len() - 1);
-        sub_argv.push(std::ffi::OsString::from("holos cohomology"));
-        sub_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match CohomologyCli::try_parse_from(sub_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_cohomology(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
+    let handler = subcommand_handler(argv.get(1).map(std::ffi::OsString::as_os_str));
+    match handler {
+        Some(handler) => handler(argv),
+        None => run_main_command(argv),
     }
-    if argv.get(1).is_some_and(|arg| arg == "kinetic") {
-        let mut sub_argv = Vec::with_capacity(argv.len() - 1);
-        sub_argv.push(std::ffi::OsString::from("holos kinetic"));
-        sub_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match KineticCli::try_parse_from(sub_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_kinetic(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "cover") {
-        let mut sub_argv = Vec::with_capacity(argv.len() - 1);
-        sub_argv.push(std::ffi::OsString::from("holos cover"));
-        sub_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match CoverageCli::try_parse_from(sub_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_coverage(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "cover-affine") {
-        let mut sub_argv = Vec::with_capacity(argv.len() - 1);
-        sub_argv.push(std::ffi::OsString::from("holos cover-affine"));
-        sub_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match AffineCoverageCli::try_parse_from(sub_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_affine_coverage(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "synthesize") {
-        let mut sub_argv = Vec::with_capacity(argv.len() - 1);
-        sub_argv.push(std::ffi::OsString::from("holos synthesize"));
-        sub_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match SynthesisCli::try_parse_from(sub_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_synthesis(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "synthesize-kinetic") {
-        let mut sub_argv = Vec::with_capacity(argv.len() - 1);
-        sub_argv.push(std::ffi::OsString::from("holos synthesize-kinetic"));
-        sub_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match KineticSynthesisCli::try_parse_from(sub_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_kinetic_synthesis(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "intervene-cohomology") {
-        let mut sub_argv = Vec::with_capacity(argv.len() - 1);
-        sub_argv.push(std::ffi::OsString::from("holos intervene-cohomology"));
-        sub_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match CohomologyInterventionCli::try_parse_from(sub_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_cohomology_intervention(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "plan-links") {
-        let mut sub_argv = Vec::with_capacity(argv.len() - 1);
-        sub_argv.push(std::ffi::OsString::from("holos plan-links"));
-        sub_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match LinkPlanCli::try_parse_from(sub_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_link_plan(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "merge-interfaces") {
-        let mut sub_argv = Vec::with_capacity(argv.len() - 1);
-        sub_argv.push(std::ffi::OsString::from("holos merge-interfaces"));
-        sub_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match MergeInterfacesCli::try_parse_from(sub_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_merge_interfaces(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "interface") {
-        let mut sub_argv = Vec::with_capacity(argv.len() - 1);
-        sub_argv.push(std::ffi::OsString::from("holos interface"));
-        sub_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match InterfaceCli::try_parse_from(sub_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_interface(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "index") {
-        let mut sub_argv = Vec::with_capacity(argv.len() - 1);
-        sub_argv.push(std::ffi::OsString::from("holos index"));
-        sub_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match IndexCli::try_parse_from(sub_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_index(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "prove") {
-        let mut sub_argv = Vec::with_capacity(argv.len() - 1);
-        sub_argv.push(std::ffi::OsString::from("holos prove"));
-        sub_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match ProveCli::try_parse_from(sub_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_prove(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "verify-program") {
-        let mut sub_argv = Vec::with_capacity(argv.len() - 1);
-        sub_argv.push(std::ffi::OsString::from("holos verify-program"));
-        sub_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match VerifyProgramCli::try_parse_from(sub_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_verify_program(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "verify-program-trace") {
-        let mut sub_argv = Vec::with_capacity(argv.len() - 1);
-        sub_argv.push(std::ffi::OsString::from("holos verify-program-trace"));
-        sub_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match VerifyProgramTraceCli::try_parse_from(sub_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_verify_program_trace(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "intervene") {
-        let mut sub_argv = Vec::with_capacity(argv.len() - 1);
-        sub_argv.push(std::ffi::OsString::from("holos intervene"));
-        sub_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match InterveneCli::try_parse_from(sub_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_intervene(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "verify-intervention") {
-        let mut sub_argv = Vec::with_capacity(argv.len() - 1);
-        sub_argv.push(std::ffi::OsString::from("holos verify-intervention"));
-        sub_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match VerifyInterventionCli::try_parse_from(sub_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_verify_intervention(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "verify-atlas") {
-        let mut verify_argv = Vec::with_capacity(argv.len() - 1);
-        verify_argv.push(std::ffi::OsString::from("holos verify-atlas"));
-        verify_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match VerifyAtlasCli::try_parse_from(verify_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_verify_atlas(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "verify-trajectory") {
-        let mut verify_argv = Vec::with_capacity(argv.len() - 1);
-        verify_argv.push(std::ffi::OsString::from("holos verify-trajectory"));
-        verify_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match VerifyTrajectoryCli::try_parse_from(verify_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_verify_trajectory(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
-    if argv.get(1).is_some_and(|arg| arg == "verify-collapse") {
-        let mut verify_argv = Vec::with_capacity(argv.len() - 1);
-        verify_argv.push(std::ffi::OsString::from("holos verify-collapse"));
-        verify_argv.extend(argv.iter().skip(2).cloned());
-        let cli = match VerifyCli::try_parse_from(verify_argv) {
-            Ok(cli) => cli,
-            Err(error) => {
-                let code = error.exit_code();
-                let _ = error.print();
-                return code;
-            }
-        };
-        return match run_verify(cli) {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("holos: {error}");
-                1
-            }
-        };
-    }
+}
 
-    let cli = match Cli::try_parse_from(argv) {
-        Ok(cli) => cli,
-        Err(e) => {
-            // clap handles --help and --version here. Both arrive as
-            // "errors" with exit code 0 and preformatted output.
-            let code = e.exit_code();
-            let _ = e.print();
-            return code;
-        }
-    };
-    match run(cli) {
+type CommandHandler = fn(Vec<std::ffi::OsString>) -> i32;
+
+fn subcommand_handler(command: Option<&std::ffi::OsStr>) -> Option<CommandHandler> {
+    let command = command?;
+    SUBCOMMANDS
+        .iter()
+        .find_map(|(name, handler)| (command == std::ffi::OsStr::new(name)).then_some(*handler))
+}
+
+fn parse_command<C: Parser>(
+    argv: Vec<std::ffi::OsString>,
+    command: &str,
+    run: fn(C) -> crate::Result<()>,
+) -> i32 {
+    let mut command_argv = Vec::with_capacity(argv.len().saturating_sub(1));
+    command_argv.push(std::ffi::OsString::from(format!("holos {command}")));
+    command_argv.extend(argv.into_iter().skip(2));
+    match C::try_parse_from(command_argv) {
+        Ok(cli) => finish_command(run(cli)),
+        Err(error) => print_parse_error(error),
+    }
+}
+
+fn run_main_command(argv: Vec<std::ffi::OsString>) -> i32 {
+    match Cli::try_parse_from(argv) {
+        Ok(cli) => finish_command(run(cli)),
+        Err(error) => print_parse_error(error),
+    }
+}
+
+fn finish_command(result: crate::Result<()>) -> i32 {
+    match result {
         Ok(()) => 0,
-        Err(e) => {
-            eprintln!("holos: {e}");
+        Err(error) => {
+            eprintln!("holos: {error}");
             1
         }
     }
 }
+
+fn print_parse_error(error: clap::Error) -> i32 {
+    let code = error.exit_code();
+    let _ = error.print();
+    code
+}
+
+macro_rules! command_handler {
+    ($handler:ident, $parser:ty, $run:path, $command:literal) => {
+        fn $handler(argv: Vec<std::ffi::OsString>) -> i32 {
+            parse_command::<$parser>(argv, $command, $run)
+        }
+    };
+}
+
+command_handler!(
+    cohomology_command,
+    CohomologyCli,
+    run_cohomology,
+    "cohomology"
+);
+command_handler!(kinetic_command, KineticCli, run_kinetic, "kinetic");
+command_handler!(coverage_command, CoverageCli, run_coverage, "cover");
+command_handler!(
+    affine_coverage_command,
+    AffineCoverageCli,
+    run_affine_coverage,
+    "cover-affine"
+);
+command_handler!(synthesis_command, SynthesisCli, run_synthesis, "synthesize");
+command_handler!(
+    kinetic_synthesis_command,
+    KineticSynthesisCli,
+    run_kinetic_synthesis,
+    "synthesize-kinetic"
+);
+command_handler!(
+    cohomology_intervention_command,
+    CohomologyInterventionCli,
+    run_cohomology_intervention,
+    "intervene-cohomology"
+);
+command_handler!(link_plan_command, LinkPlanCli, run_link_plan, "plan-links");
+command_handler!(
+    merge_interfaces_command,
+    MergeInterfacesCli,
+    run_merge_interfaces,
+    "merge-interfaces"
+);
+command_handler!(interface_command, InterfaceCli, run_interface, "interface");
+command_handler!(index_command, IndexCli, run_index, "index");
+command_handler!(prove_command, ProveCli, run_prove, "prove");
+command_handler!(
+    verify_program_command,
+    VerifyProgramCli,
+    run_verify_program,
+    "verify-program"
+);
+command_handler!(
+    verify_program_trace_command,
+    VerifyProgramTraceCli,
+    run_verify_program_trace,
+    "verify-program-trace"
+);
+command_handler!(intervene_command, InterveneCli, run_intervene, "intervene");
+command_handler!(
+    verify_intervention_command,
+    VerifyInterventionCli,
+    run_verify_intervention,
+    "verify-intervention"
+);
+command_handler!(
+    verify_atlas_command,
+    VerifyAtlasCli,
+    run_verify_atlas,
+    "verify-atlas"
+);
+command_handler!(
+    verify_trajectory_command,
+    VerifyTrajectoryCli,
+    run_verify_trajectory,
+    "verify-trajectory"
+);
+command_handler!(
+    verify_collapse_command,
+    VerifyCli,
+    run_verify,
+    "verify-collapse"
+);
+
+const SUBCOMMANDS: &[(&str, CommandHandler)] = &[
+    ("cohomology", cohomology_command),
+    ("kinetic", kinetic_command),
+    ("cover", coverage_command),
+    ("cover-affine", affine_coverage_command),
+    ("synthesize", synthesis_command),
+    ("synthesize-kinetic", kinetic_synthesis_command),
+    ("intervene-cohomology", cohomology_intervention_command),
+    ("plan-links", link_plan_command),
+    ("merge-interfaces", merge_interfaces_command),
+    ("interface", interface_command),
+    ("index", index_command),
+    ("prove", prove_command),
+    ("verify-program", verify_program_command),
+    ("verify-program-trace", verify_program_trace_command),
+    ("intervene", intervene_command),
+    ("verify-intervention", verify_intervention_command),
+    ("verify-atlas", verify_atlas_command),
+    ("verify-trajectory", verify_trajectory_command),
+    ("verify-collapse", verify_collapse_command),
+];
