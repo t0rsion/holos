@@ -568,6 +568,250 @@ pub struct ReductionCertificate {
     diagram: Diagram,
 }
 
+type CertificateResult<T> = std::result::Result<T, CertificateError>;
+
+fn build_checked_reductions(
+    input: &SparseDistanceMatrix,
+    modulus: u32,
+    threshold: f64,
+    limits: CertificateLimits,
+) -> CertificateResult<(Vec<ChangeColumn>, Vec<ChangeColumn>, Diagram)> {
+    let complex = FilteredComplex::build(input, threshold, limits)?;
+    let edge_columns = reduce_with_basis(&complex.edge_boundaries(modulus), modulus, limits)?;
+    let triangle_columns =
+        reduce_with_basis(&complex.triangle_boundaries(modulus), modulus, limits)?;
+    let checked = check_reductions(&complex, modulus, &edge_columns, &triangle_columns, limits)?;
+    Ok((edge_columns, triangle_columns, checked.diagram))
+}
+
+fn check_compute_diagram(
+    input: &SparseDistanceMatrix,
+    params: &RipsParams,
+    checked: &Diagram,
+) -> CertificateResult<()> {
+    let computed = rips_persistence_sparse(input, params)
+        .map_err(|error| CertificateError::new(error.to_string()))?;
+    if !diagram_bits_equal(&computed, checked) {
+        return Err(CertificateError::new(format!(
+            "reference certificate diagram differs from the compute engine: expected {:?}, got {:?}",
+            computed.bars, checked.bars
+        )));
+    }
+    Ok(())
+}
+
+struct DimensionRepair {
+    columns: Vec<ChangeColumn>,
+    prefix: usize,
+    additions: usize,
+}
+
+fn complex_edges(complex: &FilteredComplex) -> Vec<[usize; 2]> {
+    complex
+        .edges
+        .iter()
+        .map(|simplex| simplex.vertices)
+        .collect()
+}
+
+fn complex_triangles(complex: &FilteredComplex) -> Vec<[usize; 3]> {
+    complex
+        .triangles
+        .iter()
+        .map(|simplex| simplex.vertices)
+        .collect()
+}
+
+fn check_update_topology(
+    current: &SparseDistanceMatrix,
+    updated: &SparseDistanceMatrix,
+    operation: &str,
+) -> CertificateResult<()> {
+    if current.len() != updated.len() {
+        return Err(CertificateError::new(format!(
+            "reduction {operation} requires an unchanged vertex set"
+        )));
+    }
+    let current_topology: Vec<_> = current.edges().map(|(u, v, _)| [u, v]).collect();
+    let updated_topology: Vec<_> = updated.edges().map(|(u, v, _)| [u, v]).collect();
+    if current_topology != updated_topology {
+        return Err(CertificateError::new(format!(
+            "reduction {operation} requires an unchanged listed edge set"
+        )));
+    }
+    Ok(())
+}
+
+fn check_update_contract(
+    current: &SparseDistanceMatrix,
+    updated: &SparseDistanceMatrix,
+    threshold: f64,
+    operation: &str,
+) -> CertificateResult<()> {
+    check_update_topology(current, updated, operation)?;
+    let current_active: Vec<_> = current
+        .edges()
+        .map(|(_, _, value)| value <= threshold)
+        .collect();
+    let updated_active: Vec<_> = updated
+        .edges()
+        .map(|(_, _, value)| value <= threshold)
+        .collect();
+    if current_active != updated_active {
+        return Err(CertificateError::new(format!(
+            "reduction {operation} requires unchanged threshold membership"
+        )));
+    }
+    Ok(())
+}
+
+fn repair_dimension<const N: usize>(
+    old_simplices: &[[usize; N]],
+    new_simplices: &[[usize; N]],
+    old_columns: &[ChangeColumn],
+    boundaries: &[SparseColumn],
+    modulus: u32,
+    limits: CertificateLimits,
+) -> CertificateResult<DimensionRepair> {
+    let candidates = reindexed_prefix_candidates(old_simplices, new_simplices, old_columns)?;
+    let prefix = valid_reduction_prefix_len(boundaries, &candidates, modulus, limits)?;
+    let (columns, additions) =
+        reduce_with_prefix(boundaries, &candidates[..prefix], modulus, limits)?;
+    Ok(DimensionRepair {
+        columns,
+        prefix,
+        additions,
+    })
+}
+
+fn repair_mode(work: ReductionRepairWork) -> ReductionRepairMode {
+    if work.columns_reduced() == 0 {
+        ReductionRepairMode::Reused
+    } else if work.columns_reused() == 0 {
+        ReductionRepairMode::Rebuilt
+    } else {
+        ReductionRepairMode::SuffixRepaired
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RecordCounts {
+    edges: usize,
+    triangles: usize,
+    bars: usize,
+}
+
+struct DecodedHeader {
+    vertex_count: usize,
+    threshold: Option<f64>,
+    modulus: u32,
+    graph_digest: [u8; 32],
+    counts: RecordCounts,
+}
+
+fn check_envelope_size(bytes: &[u8], limits: CertificateLimits) -> CertificateResult<()> {
+    if bytes.len() > limits.max_bytes {
+        return Err(CertificateError::new(format!(
+            "{} bytes exceed the limit {}",
+            bytes.len(),
+            limits.max_bytes
+        )));
+    }
+    Ok(())
+}
+
+fn check_wire_preamble(reader: &mut Reader<'_>) -> CertificateResult<()> {
+    if reader.take(8)? != MAGIC {
+        return Err(CertificateError::new("wrong magic bytes"));
+    }
+    let version = reader.u16()?;
+    if version != WIRE_VERSION {
+        return Err(CertificateError::new(format!(
+            "unsupported wire version {version}"
+        )));
+    }
+    let codec = reader.u8()?;
+    if codec != F64_BITS_CODEC {
+        return Err(CertificateError::new(format!(
+            "unsupported scalar codec {codec}"
+        )));
+    }
+    Ok(())
+}
+
+fn decode_record_counts(
+    reader: &mut Reader<'_>,
+    limits: CertificateLimits,
+) -> CertificateResult<RecordCounts> {
+    Ok(RecordCounts {
+        edges: reader.bounded_usize("edge column count", limits.max_edges)?,
+        triangles: reader.bounded_usize("triangle column count", limits.max_triangles)?,
+        bars: reader.bounded_usize("bar count", limits.max_bars)?,
+    })
+}
+
+fn decode_header(
+    reader: &mut Reader<'_>,
+    limits: CertificateLimits,
+) -> CertificateResult<DecodedHeader> {
+    check_wire_preamble(reader)?;
+    let modulus = reader.u32()?;
+    let vertex_count = reader.bounded_usize("vertex count", limits.max_vertices)?;
+    let threshold = reader.optional_f64()?;
+    let counts = decode_record_counts(reader, limits)?;
+    let graph_digest = reader.array32()?;
+    Ok(DecodedHeader {
+        vertex_count,
+        threshold,
+        modulus,
+        graph_digest,
+        counts,
+    })
+}
+
+fn check_minimum_record_bytes(reader: &Reader<'_>, counts: RecordCounts) -> CertificateResult<()> {
+    let minimum = counts
+        .edges
+        .checked_add(counts.triangles)
+        .and_then(|count| count.checked_mul(20))
+        .and_then(|bytes| {
+            counts
+                .bars
+                .checked_mul(24)
+                .and_then(|bars| bytes.checked_add(bars))
+        })
+        .ok_or_else(|| CertificateError::new("minimum record bytes overflow usize"))?;
+    if minimum > reader.remaining() {
+        return Err(CertificateError::new(format!(
+            "record counts need at least {minimum} bytes, only {} remain",
+            reader.remaining()
+        )));
+    }
+    Ok(())
+}
+
+fn decode_bars(reader: &mut Reader<'_>, count: usize) -> CertificateResult<Vec<Bar>> {
+    let mut bars = Vec::with_capacity(count);
+    for _ in 0..count {
+        bars.push(Bar {
+            dim: reader.usize()?,
+            birth: f64::from_bits(reader.u64()?),
+            death: f64::from_bits(reader.u64()?),
+        });
+    }
+    Ok(bars)
+}
+
+fn check_no_trailing_bytes(reader: &Reader<'_>) -> CertificateResult<()> {
+    if reader.remaining() != 0 {
+        return Err(CertificateError::new(format!(
+            "{} trailing bytes after the envelope",
+            reader.remaining()
+        )));
+    }
+    Ok(())
+}
+
 impl ReductionCertificate {
     /// Produce an exact H0 and H1 reduction certificate.
     ///
@@ -581,26 +825,9 @@ impl ReductionCertificate {
     ) -> std::result::Result<Self, CertificateError> {
         validate_header(input, params.max_dim, params.modulus, limits)?;
         let threshold = checked_threshold(params.threshold)?;
-        let complex = FilteredComplex::build(input, threshold, limits)?;
-        let edge_boundaries = complex.edge_boundaries(params.modulus);
-        let triangle_boundaries = complex.triangle_boundaries(params.modulus);
-        let edge_columns = reduce_with_basis(&edge_boundaries, params.modulus, limits)?;
-        let triangle_columns = reduce_with_basis(&triangle_boundaries, params.modulus, limits)?;
-        let checked = check_reductions(
-            &complex,
-            params.modulus,
-            &edge_columns,
-            &triangle_columns,
-            limits,
-        )?;
-        let computed = rips_persistence_sparse(input, params)
-            .map_err(|error| CertificateError::new(error.to_string()))?;
-        if !diagram_bits_equal(&computed, &checked.diagram) {
-            return Err(CertificateError::new(format!(
-                "reference certificate diagram differs from the compute engine: expected {:?}, got {:?}",
-                computed.bars, checked.diagram.bars
-            )));
-        }
+        let (edge_columns, triangle_columns, diagram) =
+            build_checked_reductions(input, params.modulus, threshold, limits)?;
+        check_compute_diagram(input, params, &diagram)?;
         Ok(Self {
             vertex_count: input.len(),
             threshold: params.threshold,
@@ -608,7 +835,7 @@ impl ReductionCertificate {
             graph_digest: graph_digest(input, threshold),
             edge_columns,
             triangle_columns,
-            diagram: checked.diagram,
+            diagram,
         })
     }
 
@@ -627,88 +854,30 @@ impl ReductionCertificate {
         limits: CertificateLimits,
     ) -> std::result::Result<ReductionRepair, CertificateError> {
         let (old_complex, _) = self.verify_parts(current, limits)?;
-        if current.len() != updated.len() {
-            return Err(CertificateError::new(
-                "reduction repair requires an unchanged vertex set",
-            ));
-        }
-        let current_topology: Vec<_> = current.edges().map(|(u, v, _)| [u, v]).collect();
-        let updated_topology: Vec<_> = updated.edges().map(|(u, v, _)| [u, v]).collect();
-        if current_topology != updated_topology {
-            return Err(CertificateError::new(
-                "reduction repair requires an unchanged listed edge set",
-            ));
-        }
         let threshold = checked_threshold(self.threshold)?;
-        let current_active: Vec<_> = current
-            .edges()
-            .map(|(_, _, value)| value <= threshold)
-            .collect();
-        let updated_active: Vec<_> = updated
-            .edges()
-            .map(|(_, _, value)| value <= threshold)
-            .collect();
-        if current_active != updated_active {
-            return Err(CertificateError::new(
-                "reduction repair requires unchanged threshold membership",
-            ));
-        }
-
+        check_update_contract(current, updated, threshold, "repair")?;
         let new_complex = FilteredComplex::build(updated, threshold, limits)?;
-        let edge_boundaries = new_complex.edge_boundaries(self.modulus);
-        let edge_candidates = reindexed_prefix_candidates(
-            &old_complex
-                .edges
-                .iter()
-                .map(|simplex| simplex.vertices)
-                .collect::<Vec<_>>(),
-            &new_complex
-                .edges
-                .iter()
-                .map(|simplex| simplex.vertices)
-                .collect::<Vec<_>>(),
+        let edge_repair = repair_dimension(
+            &complex_edges(&old_complex),
+            &complex_edges(&new_complex),
             &self.edge_columns,
-        )?;
-        let edge_prefix =
-            valid_reduction_prefix_len(&edge_boundaries, &edge_candidates, self.modulus, limits)?;
-        let (edge_columns, edge_additions) = reduce_with_prefix(
-            &edge_boundaries,
-            &edge_candidates[..edge_prefix],
+            &new_complex.edge_boundaries(self.modulus),
             self.modulus,
             limits,
         )?;
-
-        let triangle_boundaries = new_complex.triangle_boundaries(self.modulus);
-        let triangle_candidates = reindexed_prefix_candidates(
-            &old_complex
-                .triangles
-                .iter()
-                .map(|simplex| simplex.vertices)
-                .collect::<Vec<_>>(),
-            &new_complex
-                .triangles
-                .iter()
-                .map(|simplex| simplex.vertices)
-                .collect::<Vec<_>>(),
+        let triangle_repair = repair_dimension(
+            &complex_triangles(&old_complex),
+            &complex_triangles(&new_complex),
             &self.triangle_columns,
-        )?;
-        let triangle_prefix = valid_reduction_prefix_len(
-            &triangle_boundaries,
-            &triangle_candidates,
-            self.modulus,
-            limits,
-        )?;
-        let (triangle_columns, triangle_additions) = reduce_with_prefix(
-            &triangle_boundaries,
-            &triangle_candidates[..triangle_prefix],
+            &new_complex.triangle_boundaries(self.modulus),
             self.modulus,
             limits,
         )?;
         let checked = check_reductions(
             &new_complex,
             self.modulus,
-            &edge_columns,
-            &triangle_columns,
+            &edge_repair.columns,
+            &triangle_repair.columns,
             limits,
         )?;
         let certificate = Self {
@@ -716,27 +885,20 @@ impl ReductionCertificate {
             threshold: self.threshold,
             modulus: self.modulus,
             graph_digest: graph_digest(updated, threshold),
-            edge_columns,
-            triangle_columns,
+            edge_columns: edge_repair.columns,
+            triangle_columns: triangle_repair.columns,
             diagram: checked.diagram,
         };
         let work = ReductionRepairWork {
-            edge_columns_reused: edge_prefix,
-            edge_columns_reduced: new_complex.edges.len() - edge_prefix,
-            triangle_columns_reused: triangle_prefix,
-            triangle_columns_reduced: new_complex.triangles.len() - triangle_prefix,
-            column_additions: edge_additions + triangle_additions,
-        };
-        let mode = if work.columns_reduced() == 0 {
-            ReductionRepairMode::Reused
-        } else if work.columns_reused() == 0 {
-            ReductionRepairMode::Rebuilt
-        } else {
-            ReductionRepairMode::SuffixRepaired
+            edge_columns_reused: edge_repair.prefix,
+            edge_columns_reduced: new_complex.edges.len() - edge_repair.prefix,
+            triangle_columns_reused: triangle_repair.prefix,
+            triangle_columns_reduced: new_complex.triangles.len() - triangle_repair.prefix,
+            column_additions: edge_repair.additions + triangle_repair.additions,
         };
         Ok(ReductionRepair {
             certificate,
-            mode,
+            mode: repair_mode(work),
             work,
         })
     }
@@ -753,19 +915,8 @@ impl ReductionCertificate {
         limits: CertificateLimits,
     ) -> std::result::Result<Self, CertificateError> {
         let (old_complex, _) = self.verify_parts(current, limits)?;
-        if current.len() != updated.len() {
-            return Err(CertificateError::new(
-                "reduction reindexing requires an unchanged vertex set",
-            ));
-        }
-        let current_topology: Vec<_> = current.edges().map(|(u, v, _)| [u, v]).collect();
-        let updated_topology: Vec<_> = updated.edges().map(|(u, v, _)| [u, v]).collect();
-        if current_topology != updated_topology {
-            return Err(CertificateError::new(
-                "reduction reindexing requires an unchanged listed edge set",
-            ));
-        }
         let threshold = checked_threshold(self.threshold)?;
+        check_update_topology(current, updated, "reindexing")?;
         let new_complex = FilteredComplex::build(updated, threshold, limits)?;
         if old_complex.edges.len() != new_complex.edges.len()
             || old_complex.triangles.len() != new_complex.triangles.len()
@@ -775,29 +926,13 @@ impl ReductionCertificate {
             ));
         }
         let edge_columns = reindex_change_columns(
-            &old_complex
-                .edges
-                .iter()
-                .map(|simplex| simplex.vertices)
-                .collect::<Vec<_>>(),
-            &new_complex
-                .edges
-                .iter()
-                .map(|simplex| simplex.vertices)
-                .collect::<Vec<_>>(),
+            &complex_edges(&old_complex),
+            &complex_edges(&new_complex),
             &self.edge_columns,
         )?;
         let triangle_columns = reindex_change_columns(
-            &old_complex
-                .triangles
-                .iter()
-                .map(|simplex| simplex.vertices)
-                .collect::<Vec<_>>(),
-            &new_complex
-                .triangles
-                .iter()
-                .map(|simplex| simplex.vertices)
-                .collect::<Vec<_>>(),
+            &complex_triangles(&old_complex),
+            &complex_triangles(&new_complex),
             &self.triangle_columns,
         )?;
         let checked = check_reductions(
@@ -886,85 +1021,32 @@ impl ReductionCertificate {
         bytes: &[u8],
         limits: CertificateLimits,
     ) -> std::result::Result<Self, CertificateError> {
-        if bytes.len() > limits.max_bytes {
-            return Err(CertificateError::new(format!(
-                "{} bytes exceed the limit {}",
-                bytes.len(),
-                limits.max_bytes
-            )));
-        }
+        check_envelope_size(bytes, limits)?;
         let mut reader = Reader::new(bytes);
-        if reader.take(8)? != MAGIC {
-            return Err(CertificateError::new("wrong magic bytes"));
-        }
-        let version = reader.u16()?;
-        if version != WIRE_VERSION {
-            return Err(CertificateError::new(format!(
-                "unsupported wire version {version}"
-            )));
-        }
-        let codec = reader.u8()?;
-        if codec != F64_BITS_CODEC {
-            return Err(CertificateError::new(format!(
-                "unsupported scalar codec {codec}"
-            )));
-        }
-        let modulus = reader.u32()?;
-        let vertex_count = reader.bounded_usize("vertex count", limits.max_vertices)?;
-        let threshold = reader.optional_f64()?;
-        let edge_count = reader.bounded_usize("edge column count", limits.max_edges)?;
-        let triangle_count = reader.bounded_usize("triangle column count", limits.max_triangles)?;
-        let bar_count = reader.bounded_usize("bar count", limits.max_bars)?;
-        let graph_digest = reader.array32()?;
-        let minimum = edge_count
-            .checked_add(triangle_count)
-            .and_then(|count| count.checked_mul(20))
-            .and_then(|bytes| {
-                bar_count
-                    .checked_mul(24)
-                    .and_then(|bars| bytes.checked_add(bars))
-            })
-            .ok_or_else(|| CertificateError::new("minimum record bytes overflow usize"))?;
-        if minimum > reader.remaining() {
-            return Err(CertificateError::new(format!(
-                "record counts need at least {minimum} bytes, only {} remain",
-                reader.remaining()
-            )));
-        }
+        let header = decode_header(&mut reader, limits)?;
+        check_minimum_record_bytes(&reader, header.counts)?;
         let mut total_terms = 0usize;
         let edge_columns = decode_columns(
             &mut reader,
-            edge_count,
-            modulus,
+            header.counts.edges,
+            header.modulus,
             limits.max_terms,
             &mut total_terms,
         )?;
         let triangle_columns = decode_columns(
             &mut reader,
-            triangle_count,
-            modulus,
+            header.counts.triangles,
+            header.modulus,
             limits.max_terms,
             &mut total_terms,
         )?;
-        let mut bars = Vec::with_capacity(bar_count);
-        for _ in 0..bar_count {
-            bars.push(Bar {
-                dim: reader.usize()?,
-                birth: f64::from_bits(reader.u64()?),
-                death: f64::from_bits(reader.u64()?),
-            });
-        }
-        if reader.remaining() != 0 {
-            return Err(CertificateError::new(format!(
-                "{} trailing bytes after the envelope",
-                reader.remaining()
-            )));
-        }
+        let bars = decode_bars(&mut reader, header.counts.bars)?;
+        check_no_trailing_bytes(&reader)?;
         let certificate = Self {
-            vertex_count,
-            threshold,
-            modulus,
-            graph_digest,
+            vertex_count: header.vertex_count,
+            threshold: header.threshold,
+            modulus: header.modulus,
+            graph_digest: header.graph_digest,
             edge_columns,
             triangle_columns,
             diagram: Diagram { bars },
@@ -1158,6 +1240,26 @@ impl ReductionCertificate {
         &self,
         limits: CertificateLimits,
     ) -> std::result::Result<(), CertificateError> {
+        self.check_envelope_header(limits)?;
+        let mut total_terms = 0usize;
+        check_change_columns(
+            "edge",
+            &self.edge_columns,
+            self.modulus,
+            limits.max_terms,
+            &mut total_terms,
+        )?;
+        check_change_columns(
+            "triangle",
+            &self.triangle_columns,
+            self.modulus,
+            limits.max_terms,
+            &mut total_terms,
+        )?;
+        check_bars(&self.diagram, limits.max_bars)
+    }
+
+    fn check_envelope_header(&self, limits: CertificateLimits) -> CertificateResult<()> {
         if self.vertex_count > limits.max_vertices {
             return Err(CertificateError::new(format!(
                 "{} vertices exceed the limit {}",
@@ -1185,51 +1287,42 @@ impl ReductionCertificate {
                 limits.max_triangles
             )));
         }
-        let mut total_terms = 0usize;
-        check_change_columns(
-            "edge",
-            &self.edge_columns,
-            self.modulus,
-            limits.max_terms,
-            &mut total_terms,
-        )?;
-        check_change_columns(
-            "triangle",
-            &self.triangle_columns,
-            self.modulus,
-            limits.max_terms,
-            &mut total_terms,
-        )?;
-        if self.diagram.bars.len() > limits.max_bars {
-            return Err(CertificateError::new(format!(
-                "{} bars exceed the limit {}",
-                self.diagram.bars.len(),
-                limits.max_bars
-            )));
-        }
-        for (index, bar) in self.diagram.bars.iter().enumerate() {
-            if bar.dim > 1
-                || bar.birth.is_nan()
-                || !bar.birth.is_finite()
-                || bar.birth < 0.0
-                || bar.death.is_nan()
-                || bar.death < 0.0
-                || bar.death <= bar.birth
-                || (bar.birth == 0.0 && bar.birth.to_bits() != 0)
-                || (bar.death == 0.0 && bar.death.to_bits() != 0)
-            {
-                return Err(CertificateError::new(format!(
-                    "bar {index} is not canonical"
-                )));
-            }
-        }
-        let mut canonical = self.diagram.clone();
-        canonical.canonicalize();
-        if !diagram_bits_equal(&canonical, &self.diagram) {
-            return Err(CertificateError::new("bars are not in canonical order"));
-        }
         Ok(())
     }
+}
+
+fn check_bars(diagram: &Diagram, max_bars: usize) -> CertificateResult<()> {
+    if diagram.bars.len() > max_bars {
+        return Err(CertificateError::new(format!(
+            "{} bars exceed the limit {max_bars}",
+            diagram.bars.len()
+        )));
+    }
+    for (index, bar) in diagram.bars.iter().enumerate() {
+        if !canonical_bar(bar) {
+            return Err(CertificateError::new(format!(
+                "bar {index} is not canonical"
+            )));
+        }
+    }
+    let mut canonical = diagram.clone();
+    canonical.canonicalize();
+    if !diagram_bits_equal(&canonical, diagram) {
+        return Err(CertificateError::new("bars are not in canonical order"));
+    }
+    Ok(())
+}
+
+fn canonical_bar(bar: &Bar) -> bool {
+    bar.dim <= 1 && canonical_birth(bar.birth) && canonical_death(bar.birth, bar.death)
+}
+
+fn canonical_birth(value: f64) -> bool {
+    !value.is_nan() && value.is_finite() && value >= 0.0 && (value != 0.0 || value.to_bits() == 0)
+}
+
+fn canonical_death(birth: f64, death: f64) -> bool {
+    !death.is_nan() && death >= 0.0 && death > birth && (death != 0.0 || death.to_bits() == 0)
 }
 
 fn check_change_columns(
@@ -1240,50 +1333,76 @@ fn check_change_columns(
     total_terms: &mut usize,
 ) -> std::result::Result<(), CertificateError> {
     for (column_index, column) in columns.iter().enumerate() {
-        *total_terms = total_terms
-            .checked_add(column.terms.len())
-            .ok_or_else(|| CertificateError::new("certificate term count overflows usize"))?;
-        if *total_terms > max_terms {
-            return Err(CertificateError::new(format!(
-                "{} terms exceed the limit {max_terms}",
-                *total_terms
-            )));
-        }
-        if column.terms.is_empty() {
-            return Err(CertificateError::new(format!(
-                "{label} change column {column_index} is empty"
-            )));
-        }
-        let mut previous = None;
-        for (term_index, term) in column.terms.iter().enumerate() {
-            if term.index > column_index {
-                return Err(CertificateError::new(format!(
-                    "{label} change column {column_index} term {term_index} points forward"
-                )));
-            }
-            if previous.is_some_and(|previous| previous >= term.index) {
-                return Err(CertificateError::new(format!(
-                    "{label} change column {column_index} terms are not strictly ordered"
-                )));
-            }
-            if term.coefficient == 0 || term.coefficient >= modulus {
-                return Err(CertificateError::new(format!(
-                    "{label} change column {column_index} has invalid coefficient {}",
-                    term.coefficient
-                )));
-            }
-            previous = Some(term.index);
-        }
-        if column.terms.last()
-            != Some(&CertificateTerm {
-                index: column_index,
-                coefficient: 1,
-            })
-        {
-            return Err(CertificateError::new(format!(
-                "{label} change column {column_index} is not unit triangular"
-            )));
-        }
+        add_term_count(total_terms, column.terms.len(), max_terms)?;
+        check_change_column(label, column_index, column, modulus)?;
+    }
+    Ok(())
+}
+
+fn add_term_count(total: &mut usize, count: usize, maximum: usize) -> CertificateResult<()> {
+    *total = total
+        .checked_add(count)
+        .ok_or_else(|| CertificateError::new("certificate term count overflows usize"))?;
+    if *total > maximum {
+        return Err(CertificateError::new(format!(
+            "{} terms exceed the limit {maximum}",
+            *total
+        )));
+    }
+    Ok(())
+}
+
+fn check_change_column(
+    label: &str,
+    column_index: usize,
+    column: &ChangeColumn,
+    modulus: u32,
+) -> CertificateResult<()> {
+    if column.terms.is_empty() {
+        return Err(CertificateError::new(format!(
+            "{label} change column {column_index} is empty"
+        )));
+    }
+    let mut previous = None;
+    for (term_index, term) in column.terms.iter().enumerate() {
+        check_change_term(label, column_index, term_index, term, previous, modulus)?;
+        previous = Some(term.index);
+    }
+    let unit = CertificateTerm {
+        index: column_index,
+        coefficient: 1,
+    };
+    if column.terms.last() != Some(&unit) {
+        return Err(CertificateError::new(format!(
+            "{label} change column {column_index} is not unit triangular"
+        )));
+    }
+    Ok(())
+}
+
+fn check_change_term(
+    label: &str,
+    column_index: usize,
+    term_index: usize,
+    term: &CertificateTerm,
+    previous: Option<usize>,
+    modulus: u32,
+) -> CertificateResult<()> {
+    if term.index > column_index {
+        return Err(CertificateError::new(format!(
+            "{label} change column {column_index} term {term_index} points forward"
+        )));
+    }
+    if previous.is_some_and(|previous| previous >= term.index) {
+        return Err(CertificateError::new(format!(
+            "{label} change column {column_index} terms are not strictly ordered"
+        )));
+    }
+    if term.coefficient == 0 || term.coefficient >= modulus {
+        return Err(CertificateError::new(format!(
+            "{label} change column {column_index} has invalid coefficient {}",
+            term.coefficient
+        )));
     }
     Ok(())
 }
@@ -1311,36 +1430,41 @@ fn decode_columns(
 ) -> std::result::Result<Vec<ChangeColumn>, CertificateError> {
     let mut columns = Vec::with_capacity(count);
     for column_index in 0..count {
-        let term_count = reader.usize()?;
-        *total_terms = total_terms
-            .checked_add(term_count)
-            .ok_or_else(|| CertificateError::new("certificate term count overflows usize"))?;
-        if *total_terms > max_terms {
-            return Err(CertificateError::new(format!(
-                "{} terms exceed the limit {max_terms}",
-                *total_terms
-            )));
-        }
-        let bytes = term_count
-            .checked_mul(12)
-            .ok_or_else(|| CertificateError::new("term bytes overflow usize"))?;
-        if bytes > reader.remaining() {
-            return Err(CertificateError::new(format!(
-                "column {column_index} terms exceed the remaining bytes"
-            )));
-        }
-        let mut terms = Vec::with_capacity(term_count);
-        for _ in 0..term_count {
-            terms.push(CertificateTerm {
-                index: reader.usize()?,
-                coefficient: reader.u32()?,
-            });
-        }
-        columns.push(ChangeColumn { terms });
+        columns.push(decode_column(reader, column_index, max_terms, total_terms)?);
     }
     let mut checked = 0;
     check_change_columns("decoded", &columns, modulus, max_terms, &mut checked)?;
     Ok(columns)
+}
+
+fn decode_column(
+    reader: &mut Reader<'_>,
+    column_index: usize,
+    max_terms: usize,
+    total_terms: &mut usize,
+) -> CertificateResult<ChangeColumn> {
+    let term_count = reader.usize()?;
+    add_term_count(total_terms, term_count, max_terms)?;
+    let bytes = term_count
+        .checked_mul(12)
+        .ok_or_else(|| CertificateError::new("term bytes overflow usize"))?;
+    if bytes > reader.remaining() {
+        return Err(CertificateError::new(format!(
+            "column {column_index} terms exceed the remaining bytes"
+        )));
+    }
+    let mut terms = Vec::with_capacity(term_count);
+    for _ in 0..term_count {
+        terms.push(decode_term(reader)?);
+    }
+    Ok(ChangeColumn { terms })
+}
+
+fn decode_term(reader: &mut Reader<'_>) -> CertificateResult<CertificateTerm> {
+    Ok(CertificateTerm {
+        index: reader.usize()?,
+        coefficient: reader.u32()?,
+    })
 }
 
 fn put_u16(out: &mut Vec<u8>, value: u16) {
@@ -1486,71 +1610,13 @@ impl FilteredComplex {
         threshold: f64,
         limits: CertificateLimits,
     ) -> std::result::Result<Self, CertificateError> {
-        let mut edges: Vec<_> = input
-            .edges()
-            .filter(|&(_, _, value)| value <= threshold)
-            .map(|(u, v, value)| FilteredEdge {
-                vertices: [u, v],
-                value,
-            })
-            .collect();
-        if edges.len() > limits.max_edges {
-            return Err(CertificateError::new(format!(
-                "{} filtered edges exceed the limit {}",
-                edges.len(),
-                limits.max_edges
-            )));
-        }
-        edges.sort_by(|a, b| {
-            a.value
-                .total_cmp(&b.value)
-                .then_with(|| edge_rank(b.vertices).cmp(&edge_rank(a.vertices)))
-        });
+        let edges = filtered_edges(input, threshold, limits.max_edges)?;
         let edge_rows: FxHashMap<_, _> = edges
             .iter()
             .enumerate()
             .map(|(index, edge)| ((edge.vertices[0], edge.vertices[1]), index))
             .collect();
-        let mut upper = vec![Vec::new(); input.len()];
-        for edge in &edges {
-            upper[edge.vertices[0]].push(edge.vertices[1]);
-        }
-        for neighbors in &mut upper {
-            neighbors.sort_unstable();
-        }
-        let mut triangles = Vec::new();
-        for u in 0..input.len() {
-            for &v in &upper[u] {
-                let mut a = upper[u].partition_point(|&w| w <= v);
-                let mut b = upper[v].partition_point(|&w| w <= v);
-                while a < upper[u].len() && b < upper[v].len() {
-                    match upper[u][a].cmp(&upper[v][b]) {
-                        std::cmp::Ordering::Less => a += 1,
-                        std::cmp::Ordering::Greater => b += 1,
-                        std::cmp::Ordering::Equal => {
-                            let w = upper[u][a];
-                            triangles.push(FilteredTriangle {
-                                vertices: [u, v, w],
-                                value: input.get(u, v).max(input.get(u, w)).max(input.get(v, w)),
-                            });
-                            if triangles.len() > limits.max_triangles {
-                                return Err(CertificateError::new(format!(
-                                    "triangle count exceeds the limit {}",
-                                    limits.max_triangles
-                                )));
-                            }
-                            a += 1;
-                            b += 1;
-                        }
-                    }
-                }
-            }
-        }
-        triangles.sort_by(|a, b| {
-            a.value
-                .total_cmp(&b.value)
-                .then_with(|| triangle_rank(b.vertices).cmp(&triangle_rank(a.vertices)))
-        });
+        let triangles = filtered_triangles(input, &edges, limits.max_triangles)?;
         Ok(Self {
             vertex_count: input.len(),
             edges,
@@ -1586,6 +1652,108 @@ impl FilteredComplex {
             })
             .collect()
     }
+}
+
+fn filtered_edges(
+    input: &SparseDistanceMatrix,
+    threshold: f64,
+    maximum: usize,
+) -> CertificateResult<Vec<FilteredEdge>> {
+    let mut edges: Vec<_> = input
+        .edges()
+        .filter(|&(_, _, value)| value <= threshold)
+        .map(|(u, v, value)| FilteredEdge {
+            vertices: [u, v],
+            value,
+        })
+        .collect();
+    if edges.len() > maximum {
+        return Err(CertificateError::new(format!(
+            "{} filtered edges exceed the limit {maximum}",
+            edges.len()
+        )));
+    }
+    edges.sort_by(|a, b| {
+        a.value
+            .total_cmp(&b.value)
+            .then_with(|| edge_rank(b.vertices).cmp(&edge_rank(a.vertices)))
+    });
+    Ok(edges)
+}
+
+fn upper_adjacency(vertex_count: usize, edges: &[FilteredEdge]) -> Vec<Vec<usize>> {
+    let mut upper = vec![Vec::new(); vertex_count];
+    for edge in edges {
+        upper[edge.vertices[0]].push(edge.vertices[1]);
+    }
+    for neighbors in &mut upper {
+        neighbors.sort_unstable();
+    }
+    upper
+}
+
+fn filtered_triangles(
+    input: &SparseDistanceMatrix,
+    edges: &[FilteredEdge],
+    maximum: usize,
+) -> CertificateResult<Vec<FilteredTriangle>> {
+    let upper = upper_adjacency(input.len(), edges);
+    let mut triangles = Vec::new();
+    for u in 0..input.len() {
+        for &v in &upper[u] {
+            append_edge_triangles(input, &upper, u, v, maximum, &mut triangles)?;
+        }
+    }
+    triangles.sort_by(|a, b| {
+        a.value
+            .total_cmp(&b.value)
+            .then_with(|| triangle_rank(b.vertices).cmp(&triangle_rank(a.vertices)))
+    });
+    Ok(triangles)
+}
+
+fn append_edge_triangles(
+    input: &SparseDistanceMatrix,
+    upper: &[Vec<usize>],
+    u: usize,
+    v: usize,
+    maximum: usize,
+    triangles: &mut Vec<FilteredTriangle>,
+) -> CertificateResult<()> {
+    let mut a = upper[u].partition_point(|&w| w <= v);
+    let mut b = upper[v].partition_point(|&w| w <= v);
+    while a < upper[u].len() && b < upper[v].len() {
+        match upper[u][a].cmp(&upper[v][b]) {
+            std::cmp::Ordering::Less => a += 1,
+            std::cmp::Ordering::Greater => b += 1,
+            std::cmp::Ordering::Equal => {
+                append_triangle(input, u, v, upper[u][a], maximum, triangles)?;
+                a += 1;
+                b += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn append_triangle(
+    input: &SparseDistanceMatrix,
+    u: usize,
+    v: usize,
+    w: usize,
+    maximum: usize,
+    triangles: &mut Vec<FilteredTriangle>,
+) -> CertificateResult<()> {
+    triangles.push(FilteredTriangle {
+        vertices: [u, v, w],
+        value: input.get(u, v).max(input.get(u, w)).max(input.get(v, w)),
+    });
+    if triangles.len() > maximum {
+        return Err(CertificateError::new(format!(
+            "triangle count exceeds the limit {maximum}"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1638,105 +1806,171 @@ fn reduce_with_prefix(
             "reduction prefix is longer than the boundary matrix",
         ));
     }
-    let modulus = modulus as u64;
-    let mut reduced: Vec<SparseColumn> = Vec::with_capacity(boundaries.len());
-    let mut basis: Vec<SparseColumn> = Vec::with_capacity(boundaries.len());
-    let mut pivot_owner: FxHashMap<usize, usize> = FxHashMap::default();
-    let mut total_terms = 0usize;
+    let mut state = ReductionState::new(boundaries.len(), modulus as u64);
     for (index, transform) in prefix.iter().enumerate() {
-        let mut column = SparseColumn::default();
-        let mut basis_column = SparseColumn::default();
-        let mut previous = None;
-        for term in &transform.terms {
-            if term.index > index || previous.is_some_and(|value| value >= term.index) {
-                return Err(CertificateError::new(
-                    "retained reduction prefix is not unit triangular",
-                ));
-            }
-            if term.coefficient == 0 || term.coefficient as u64 >= modulus {
-                return Err(CertificateError::new(
-                    "retained reduction prefix has an invalid coefficient",
-                ));
-            }
-            column.add_scaled(&boundaries[term.index], term.coefficient as u64, modulus);
-            basis_column.insert(term.index, term.coefficient as u64);
-            previous = Some(term.index);
+        state.retain(index, transform, boundaries, limits.max_terms)?;
+    }
+    for (index, boundary) in boundaries.iter().enumerate().skip(prefix.len()) {
+        state.reduce(index, boundary, limits.max_terms)?;
+    }
+    Ok(state.finish())
+}
+
+struct ReductionState {
+    modulus: u64,
+    reduced: Vec<SparseColumn>,
+    basis: Vec<SparseColumn>,
+    pivot_owner: FxHashMap<usize, usize>,
+    total_terms: usize,
+    additions: usize,
+}
+
+impl ReductionState {
+    fn new(capacity: usize, modulus: u64) -> Self {
+        Self {
+            modulus,
+            reduced: Vec::with_capacity(capacity),
+            basis: Vec::with_capacity(capacity),
+            pivot_owner: FxHashMap::default(),
+            total_terms: 0,
+            additions: 0,
         }
-        if basis_column.0.get(&index) != Some(&1) {
-            return Err(CertificateError::new(
-                "retained reduction prefix is not unit triangular",
-            ));
-        }
-        if let Some((pivot, _)) = column.pivot() {
-            if pivot_owner.insert(pivot, index).is_some() {
-                return Err(CertificateError::new(
-                    "retained reduction prefix has duplicate pivots",
-                ));
-            }
-        }
-        total_terms = total_terms
-            .checked_add(basis_column.0.len())
-            .ok_or_else(|| CertificateError::new("change-of-basis term count overflows usize"))?;
-        if total_terms > limits.max_terms {
-            return Err(CertificateError::new(format!(
-                "{total_terms} change-of-basis terms exceed the limit {}",
-                limits.max_terms
-            )));
-        }
-        reduced.push(column);
-        basis.push(basis_column);
     }
 
-    let mut additions = 0usize;
-    for (index, boundary) in boundaries.iter().enumerate().skip(prefix.len()) {
+    fn retain(
+        &mut self,
+        index: usize,
+        transform: &ChangeColumn,
+        boundaries: &[SparseColumn],
+        max_terms: usize,
+    ) -> CertificateResult<()> {
+        let (column, basis_column) = retained_column(index, transform, boundaries, self.modulus)?;
+        if let Some((pivot, _)) = column.pivot()
+            && self.pivot_owner.insert(pivot, index).is_some()
+        {
+            return Err(CertificateError::new(
+                "retained reduction prefix has duplicate pivots",
+            ));
+        }
+        self.add_terms(basis_column.0.len(), max_terms)?;
+        self.reduced.push(column);
+        self.basis.push(basis_column);
+        Ok(())
+    }
+
+    fn reduce(
+        &mut self,
+        index: usize,
+        boundary: &SparseColumn,
+        max_terms: usize,
+    ) -> CertificateResult<()> {
         let mut column = boundary.clone();
         let mut transform = SparseColumn::default();
         transform.insert(index, 1);
         while let Some((pivot, coefficient)) = column.pivot() {
-            let Some(&owner) = pivot_owner.get(&pivot) else {
+            let Some(&owner) = self.pivot_owner.get(&pivot) else {
                 break;
             };
-            let owner_coefficient = reduced[owner].pivot().expect("pivot owner is nonempty").1;
-            let factor = (modulus
-                - coefficient * inverse_mod(owner_coefficient, modulus) % modulus)
-                % modulus;
-            column.add_scaled(&reduced[owner], factor, modulus);
-            transform.add_scaled(&basis[owner], factor, modulus);
-            additions = additions
+            let owner_coefficient = self.reduced[owner]
+                .pivot()
+                .expect("pivot owner is nonempty")
+                .1;
+            let factor = (self.modulus
+                - coefficient * inverse_mod(owner_coefficient, self.modulus) % self.modulus)
+                % self.modulus;
+            column.add_scaled(&self.reduced[owner], factor, self.modulus);
+            transform.add_scaled(&self.basis[owner], factor, self.modulus);
+            self.additions = self
+                .additions
                 .checked_add(1)
                 .ok_or_else(|| CertificateError::new("column addition count overflows usize"))?;
         }
         if let Some((pivot, _)) = column.pivot() {
-            pivot_owner.insert(pivot, index);
+            self.pivot_owner.insert(pivot, index);
         }
-        total_terms = total_terms
-            .checked_add(transform.0.len())
+        self.add_terms(transform.0.len(), max_terms)?;
+        self.reduced.push(column);
+        self.basis.push(transform);
+        Ok(())
+    }
+
+    fn add_terms(&mut self, count: usize, maximum: usize) -> CertificateResult<()> {
+        self.total_terms = self
+            .total_terms
+            .checked_add(count)
             .ok_or_else(|| CertificateError::new("change-of-basis term count overflows usize"))?;
-        if total_terms > limits.max_terms {
+        if self.total_terms > maximum {
             return Err(CertificateError::new(format!(
-                "{total_terms} change-of-basis terms exceed the limit {}",
-                limits.max_terms
+                "{} change-of-basis terms exceed the limit {maximum}",
+                self.total_terms
             )));
         }
-        reduced.push(column);
-        basis.push(transform);
+        Ok(())
     }
-    Ok((
-        basis
+
+    fn finish(self) -> (Vec<ChangeColumn>, usize) {
+        let columns = self
+            .basis
             .into_iter()
-            .map(|column| ChangeColumn {
-                terms: column
-                    .0
-                    .into_iter()
-                    .map(|(index, coefficient)| CertificateTerm {
-                        index,
-                        coefficient: coefficient as u32,
-                    })
-                    .collect(),
+            .map(change_column_from_sparse)
+            .collect();
+        (columns, self.additions)
+    }
+}
+
+fn retained_column(
+    index: usize,
+    transform: &ChangeColumn,
+    boundaries: &[SparseColumn],
+    modulus: u64,
+) -> CertificateResult<(SparseColumn, SparseColumn)> {
+    let mut column = SparseColumn::default();
+    let mut basis_column = SparseColumn::default();
+    let mut previous = None;
+    for term in &transform.terms {
+        check_retained_term(index, term, previous, modulus)?;
+        column.add_scaled(&boundaries[term.index], term.coefficient as u64, modulus);
+        basis_column.insert(term.index, term.coefficient as u64);
+        previous = Some(term.index);
+    }
+    if basis_column.0.get(&index) != Some(&1) {
+        return Err(CertificateError::new(
+            "retained reduction prefix is not unit triangular",
+        ));
+    }
+    Ok((column, basis_column))
+}
+
+fn check_retained_term(
+    target: usize,
+    term: &CertificateTerm,
+    previous: Option<usize>,
+    modulus: u64,
+) -> CertificateResult<()> {
+    if term.index > target || previous.is_some_and(|value| value >= term.index) {
+        return Err(CertificateError::new(
+            "retained reduction prefix is not unit triangular",
+        ));
+    }
+    if term.coefficient == 0 || term.coefficient as u64 >= modulus {
+        return Err(CertificateError::new(
+            "retained reduction prefix has an invalid coefficient",
+        ));
+    }
+    Ok(())
+}
+
+fn change_column_from_sparse(column: SparseColumn) -> ChangeColumn {
+    ChangeColumn {
+        terms: column
+            .0
+            .into_iter()
+            .map(|(index, coefficient)| CertificateTerm {
+                index,
+                coefficient: coefficient as u32,
             })
             .collect(),
-        additions,
-    ))
+    }
 }
 
 fn reindexed_prefix_candidates<const N: usize>(
@@ -1744,23 +1978,56 @@ fn reindexed_prefix_candidates<const N: usize>(
     new_simplices: &[[usize; N]],
     old_columns: &[ChangeColumn],
 ) -> std::result::Result<Vec<ChangeColumn>, CertificateError> {
-    if old_simplices.len() != new_simplices.len() || old_columns.len() != old_simplices.len() {
-        return Err(CertificateError::new(
-            "reduction repair has inconsistent simplex counts",
-        ));
+    check_simplex_counts(old_simplices, new_simplices, old_columns, "repair")?;
+    let old_positions = simplex_positions(old_simplices);
+    let new_positions = simplex_positions(new_simplices);
+    check_repair_simplex_sets(old_simplices, new_simplices, &old_positions, &new_positions)?;
+    let mut columns = Vec::new();
+    for (new_target, simplex) in new_simplices.iter().enumerate() {
+        let old_target = old_positions[simplex];
+        let Some(column) = reindexed_prefix_column(
+            new_target,
+            old_simplices,
+            &new_positions,
+            &old_columns[old_target],
+        )?
+        else {
+            break;
+        };
+        columns.push(column);
     }
-    let old_positions: BTreeMap<_, _> = old_simplices
+    Ok(columns)
+}
+
+fn simplex_positions<const N: usize>(simplices: &[[usize; N]]) -> BTreeMap<[usize; N], usize> {
+    simplices
         .iter()
         .copied()
         .enumerate()
         .map(|(position, simplex)| (simplex, position))
-        .collect();
-    let new_positions: BTreeMap<_, _> = new_simplices
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(position, simplex)| (simplex, position))
-        .collect();
+        .collect()
+}
+
+fn check_simplex_counts<const N: usize>(
+    old_simplices: &[[usize; N]],
+    new_simplices: &[[usize; N]],
+    old_columns: &[ChangeColumn],
+    operation: &str,
+) -> CertificateResult<()> {
+    if old_simplices.len() != new_simplices.len() || old_columns.len() != old_simplices.len() {
+        return Err(CertificateError::new(format!(
+            "reduction {operation} has inconsistent simplex counts"
+        )));
+    }
+    Ok(())
+}
+
+fn check_repair_simplex_sets<const N: usize>(
+    old_simplices: &[[usize; N]],
+    new_simplices: &[[usize; N]],
+    old_positions: &BTreeMap<[usize; N], usize>,
+    new_positions: &BTreeMap<[usize; N], usize>,
+) -> CertificateResult<()> {
     if old_positions.len() != old_simplices.len()
         || new_positions.len() != new_simplices.len()
         || old_positions.keys().ne(new_positions.keys())
@@ -1769,37 +2036,41 @@ fn reindexed_prefix_candidates<const N: usize>(
             "reduction repair found a changed simplex set",
         ));
     }
-    let mut columns = Vec::new();
-    for (new_target, simplex) in new_simplices.iter().enumerate() {
-        let old_target = old_positions[simplex];
-        let mut terms = Vec::with_capacity(old_columns[old_target].terms.len());
-        let mut compatible = true;
-        for term in &old_columns[old_target].terms {
-            let source = old_simplices.get(term.index).ok_or_else(|| {
-                CertificateError::new("reduction repair found an invalid source position")
-            })?;
-            let index = new_positions[source];
-            if index > new_target {
-                compatible = false;
-                break;
-            }
-            terms.push(CertificateTerm {
-                index,
-                coefficient: term.coefficient,
-            });
+    Ok(())
+}
+
+fn reindexed_prefix_column<const N: usize>(
+    new_target: usize,
+    old_simplices: &[[usize; N]],
+    new_positions: &BTreeMap<[usize; N], usize>,
+    old_column: &ChangeColumn,
+) -> CertificateResult<Option<ChangeColumn>> {
+    let mut terms = Vec::with_capacity(old_column.terms.len());
+    for term in &old_column.terms {
+        let source = old_simplices.get(term.index).ok_or_else(|| {
+            CertificateError::new("reduction repair found an invalid source position")
+        })?;
+        let index = new_positions[source];
+        if index > new_target {
+            return Ok(None);
         }
-        if !compatible {
-            break;
-        }
-        terms.sort_unstable();
-        if terms.windows(2).any(|pair| pair[0].index == pair[1].index) {
-            return Err(CertificateError::new(
-                "reduction repair produced duplicate source positions",
-            ));
-        }
-        columns.push(ChangeColumn { terms });
+        terms.push(CertificateTerm {
+            index,
+            coefficient: term.coefficient,
+        });
     }
-    Ok(columns)
+    terms.sort_unstable();
+    check_distinct_terms(&terms, "reduction repair")?;
+    Ok(Some(ChangeColumn { terms }))
+}
+
+fn check_distinct_terms(terms: &[CertificateTerm], operation: &str) -> CertificateResult<()> {
+    if terms.windows(2).any(|pair| pair[0].index == pair[1].index) {
+        return Err(CertificateError::new(format!(
+            "{operation} produced duplicate source positions"
+        )));
+    }
+    Ok(())
 }
 
 fn valid_reduction_prefix_len(
@@ -1812,32 +2083,14 @@ fn valid_reduction_prefix_len(
     let mut pivots = FxHashMap::<usize, usize>::default();
     let mut total_terms = 0usize;
     for (target, transform) in candidates.iter().enumerate() {
-        let mut reduced = SparseColumn::default();
-        let mut previous = None;
-        for term in &transform.terms {
-            if term.index > target || previous.is_some_and(|value| value >= term.index) {
-                return Ok(target);
-            }
-            if term.coefficient == 0 || term.coefficient as u64 >= modulus {
-                return Err(CertificateError::new(
-                    "reduction repair found an invalid coefficient",
-                ));
-            }
-            reduced.add_scaled(&boundaries[term.index], term.coefficient as u64, modulus);
-            previous = Some(term.index);
-        }
-        if transform
-            .terms
-            .last()
-            .map(|term| (term.index, term.coefficient))
-            != Some((target, 1))
+        let Some(reduced) = candidate_reduction(target, transform, boundaries, modulus)? else {
+            return Ok(target);
+        };
+        if reduced
+            .pivot()
+            .is_some_and(|(pivot, _)| pivots.insert(pivot, target).is_some())
         {
             return Ok(target);
-        }
-        if let Some((pivot, _)) = reduced.pivot() {
-            if pivots.insert(pivot, target).is_some() {
-                return Ok(target);
-            }
         }
         total_terms = total_terms
             .checked_add(transform.terms.len())
@@ -1852,28 +2105,41 @@ fn valid_reduction_prefix_len(
     Ok(candidates.len())
 }
 
+fn candidate_reduction(
+    target: usize,
+    transform: &ChangeColumn,
+    boundaries: &[SparseColumn],
+    modulus: u64,
+) -> CertificateResult<Option<SparseColumn>> {
+    let mut reduced = SparseColumn::default();
+    let mut previous = None;
+    for term in &transform.terms {
+        if term.index > target || previous.is_some_and(|value| value >= term.index) {
+            return Ok(None);
+        }
+        if term.coefficient == 0 || term.coefficient as u64 >= modulus {
+            return Err(CertificateError::new(
+                "reduction repair found an invalid coefficient",
+            ));
+        }
+        reduced.add_scaled(&boundaries[term.index], term.coefficient as u64, modulus);
+        previous = Some(term.index);
+    }
+    let unit_diagonal = transform
+        .terms
+        .last()
+        .is_some_and(|term| (term.index, term.coefficient) == (target, 1));
+    Ok(unit_diagonal.then_some(reduced))
+}
+
 fn reindex_change_columns<const N: usize>(
     old_simplices: &[[usize; N]],
     new_simplices: &[[usize; N]],
     old_columns: &[ChangeColumn],
 ) -> std::result::Result<Vec<ChangeColumn>, CertificateError> {
-    if old_simplices.len() != new_simplices.len() || old_columns.len() != old_simplices.len() {
-        return Err(CertificateError::new(
-            "reduction reindexing has inconsistent simplex counts",
-        ));
-    }
-    let old_positions: BTreeMap<_, _> = old_simplices
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(position, simplex)| (simplex, position))
-        .collect();
-    let new_positions: BTreeMap<_, _> = new_simplices
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(position, simplex)| (simplex, position))
-        .collect();
+    check_simplex_counts(old_simplices, new_simplices, old_columns, "reindexing")?;
+    let old_positions = simplex_positions(old_simplices);
+    let new_positions = simplex_positions(new_simplices);
     if old_positions.len() != old_simplices.len() || new_positions.len() != new_simplices.len() {
         return Err(CertificateError::new(
             "reduction reindexing found duplicate simplex identities",
@@ -1884,33 +2150,43 @@ fn reindex_change_columns<const N: usize>(
         let old_target = old_positions.get(simplex).copied().ok_or_else(|| {
             CertificateError::new("reduction reindexing found a changed simplex set")
         })?;
-        let mut terms = Vec::with_capacity(old_columns[old_target].terms.len());
-        for term in &old_columns[old_target].terms {
-            let source = old_simplices.get(term.index).ok_or_else(|| {
-                CertificateError::new("reduction reindexing found an invalid source position")
-            })?;
-            let index = new_positions.get(source).copied().ok_or_else(|| {
-                CertificateError::new("reduction reindexing found a changed simplex set")
-            })?;
-            if index > new_target {
-                return Err(CertificateError::new(
-                    "accepted reduction is not filtration-compatible after reindexing",
-                ));
-            }
-            terms.push(CertificateTerm {
-                index,
-                coefficient: term.coefficient,
-            });
-        }
-        terms.sort_unstable();
-        if terms.windows(2).any(|pair| pair[0].index == pair[1].index) {
-            return Err(CertificateError::new(
-                "reduction reindexing produced duplicate source positions",
-            ));
-        }
-        columns.push(ChangeColumn { terms });
+        columns.push(reindex_column(
+            new_target,
+            old_simplices,
+            &new_positions,
+            &old_columns[old_target],
+        )?);
     }
     Ok(columns)
+}
+
+fn reindex_column<const N: usize>(
+    new_target: usize,
+    old_simplices: &[[usize; N]],
+    new_positions: &BTreeMap<[usize; N], usize>,
+    old_column: &ChangeColumn,
+) -> CertificateResult<ChangeColumn> {
+    let mut terms = Vec::with_capacity(old_column.terms.len());
+    for term in &old_column.terms {
+        let source = old_simplices.get(term.index).ok_or_else(|| {
+            CertificateError::new("reduction reindexing found an invalid source position")
+        })?;
+        let index = new_positions.get(source).copied().ok_or_else(|| {
+            CertificateError::new("reduction reindexing found a changed simplex set")
+        })?;
+        if index > new_target {
+            return Err(CertificateError::new(
+                "accepted reduction is not filtration-compatible after reindexing",
+            ));
+        }
+        terms.push(CertificateTerm {
+            index,
+            coefficient: term.coefficient,
+        });
+    }
+    terms.sort_unstable();
+    check_distinct_terms(&terms, "reduction reindexing")?;
+    Ok(ChangeColumn { terms })
 }
 
 struct CheckedReductions {
@@ -1937,6 +2213,21 @@ fn check_reductions(
         modulus,
         limits,
     )?;
+    let mut diagram = checked_h0_diagram(complex, &reduced_edges);
+    let h1_deaths = h1_death_simplices(complex, &reduced_triangles);
+    let h1_pairs = checked_h1_pairs(complex, &reduced_edges, &h1_deaths, &mut diagram);
+    diagram.canonicalize();
+    let mut h1_pairs = h1_pairs;
+    h1_pairs.sort_by(critical_pair_record_order);
+    Ok(CheckedReductions {
+        diagram,
+        h1_pairs,
+        reduced_edges,
+        reduced_triangles,
+    })
+}
+
+fn checked_h0_diagram(complex: &FilteredComplex, reduced_edges: &[SparseColumn]) -> Diagram {
     let mut diagram = Diagram::default();
     let mut killed_vertices = vec![false; complex.vertex_count];
     for (column, reduced) in reduced_edges.iter().enumerate() {
@@ -1961,12 +2252,28 @@ fn check_reductions(
             });
         }
     }
+    diagram
+}
+
+fn h1_death_simplices<'a>(
+    complex: &'a FilteredComplex,
+    reduced_triangles: &[SparseColumn],
+) -> FxHashMap<usize, &'a FilteredTriangle> {
     let mut h1_deaths = FxHashMap::default();
     for (column, reduced) in reduced_triangles.iter().enumerate() {
         if let Some((pivot, _)) = reduced.pivot() {
             h1_deaths.insert(pivot, &complex.triangles[column]);
         }
     }
+    h1_deaths
+}
+
+fn checked_h1_pairs(
+    complex: &FilteredComplex,
+    reduced_edges: &[SparseColumn],
+    h1_deaths: &FxHashMap<usize, &FilteredTriangle>,
+    diagram: &mut Diagram,
+) -> Vec<(Bar, CriticalPair)> {
     let mut h1_pairs = Vec::new();
     for (edge, reduced) in reduced_edges.iter().enumerate() {
         if !reduced.0.is_empty() {
@@ -1997,27 +2304,7 @@ fn check_reductions(
             ));
         }
     }
-    diagram.canonicalize();
-    h1_pairs.sort_by(|(a_bar, a_pair), (b_bar, b_pair)| {
-        a_bar
-            .birth
-            .total_cmp(&b_bar.birth)
-            .then(a_bar.death.total_cmp(&b_bar.death))
-            .then(a_pair.birth.vertices.cmp(&b_pair.birth.vertices))
-            .then_with(|| {
-                a_pair
-                    .death
-                    .as_ref()
-                    .map(|simplex| &simplex.vertices)
-                    .cmp(&b_pair.death.as_ref().map(|simplex| &simplex.vertices))
-            })
-    });
-    Ok(CheckedReductions {
-        diagram,
-        h1_pairs,
-        reduced_edges,
-        reduced_triangles,
-    })
+    h1_pairs
 }
 
 fn check_matrix(
@@ -2039,51 +2326,20 @@ fn check_matrix(
     let mut reduced = Vec::with_capacity(columns.len());
     let mut pivots = FxHashMap::default();
     for (column_index, transform) in columns.iter().enumerate() {
-        total_terms = total_terms
-            .checked_add(transform.terms.len())
-            .ok_or_else(|| CertificateError::new("certificate term count overflows usize"))?;
-        if total_terms > limits.max_terms {
-            return Err(CertificateError::new(format!(
-                "{total_terms} {label} terms exceed the limit {}",
-                limits.max_terms
-            )));
-        }
-        if transform.terms.is_empty() {
-            return Err(CertificateError::new(format!(
-                "{label} change column {column_index} is empty"
-            )));
-        }
-        let mut previous = None;
-        let mut diagonal = None;
-        let mut result = SparseColumn::default();
-        for (term_index, term) in transform.terms.iter().enumerate() {
-            if term.index > column_index {
-                return Err(CertificateError::new(format!(
-                    "{label} change column {column_index} term {term_index} points forward"
-                )));
-            }
-            if previous.is_some_and(|previous| previous >= term.index) {
-                return Err(CertificateError::new(format!(
-                    "{label} change column {column_index} terms are not strictly ordered"
-                )));
-            }
-            if term.coefficient == 0 || term.coefficient >= modulus {
-                return Err(CertificateError::new(format!(
-                    "{label} change column {column_index} has invalid coefficient {}",
-                    term.coefficient
-                )));
-            }
-            if term.index == column_index {
-                diagonal = Some(term.coefficient);
-            }
-            result.add_scaled(&boundaries[term.index], term.coefficient as u64, modulus64);
-            previous = Some(term.index);
-        }
-        if diagonal != Some(1) {
-            return Err(CertificateError::new(format!(
-                "{label} change column {column_index} is not unit triangular"
-            )));
-        }
+        add_matrix_terms(
+            &mut total_terms,
+            transform.terms.len(),
+            limits.max_terms,
+            label,
+        )?;
+        let result = checked_matrix_column(
+            label,
+            column_index,
+            transform,
+            boundaries,
+            modulus,
+            modulus64,
+        )?;
         if let Some((pivot, _)) = result.pivot() {
             if let Some(previous_column) = pivots.insert(pivot, column_index) {
                 return Err(CertificateError::new(format!(
@@ -2094,6 +2350,40 @@ fn check_matrix(
         reduced.push(result);
     }
     Ok(reduced)
+}
+
+fn add_matrix_terms(
+    total: &mut usize,
+    count: usize,
+    maximum: usize,
+    label: &str,
+) -> CertificateResult<()> {
+    *total = total
+        .checked_add(count)
+        .ok_or_else(|| CertificateError::new("certificate term count overflows usize"))?;
+    if *total > maximum {
+        return Err(CertificateError::new(format!(
+            "{} {label} terms exceed the limit {maximum}",
+            *total
+        )));
+    }
+    Ok(())
+}
+
+fn checked_matrix_column(
+    label: &str,
+    column_index: usize,
+    transform: &ChangeColumn,
+    boundaries: &[SparseColumn],
+    modulus: u32,
+    modulus64: u64,
+) -> CertificateResult<SparseColumn> {
+    check_change_column(label, column_index, transform, modulus)?;
+    let mut result = SparseColumn::default();
+    for term in &transform.terms {
+        result.add_scaled(&boundaries[term.index], term.coefficient as u64, modulus64);
+    }
+    Ok(result)
 }
 
 fn add_change_guards(
