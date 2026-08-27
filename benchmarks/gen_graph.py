@@ -9,8 +9,8 @@ benchmark reads that line for the threshold and the graph shape.
 
 These graphs are the sparse-only half of the engineering corpus. A point
 cloud always has a dense distance matrix behind it; a graph here need not.
-Absent edges are +inf, the input can be disconnected, and the weights of
-the synthetic generators satisfy no triangle inequality.
+Absent edges are +inf. The input can be disconnected. The weights of the
+synthetic generators satisfy no triangle inequality.
 
 Generators, each with its own meaning for PARAM:
   knn        PARAM = k. Uniform points in the unit cube, in three
@@ -104,9 +104,7 @@ def powerlaw(rng, n, m):
     return [(u, v, d) for (u, v), d in edges.items()]
 
 
-def block(rng, n, blocks):
-    if blocks < 1 or blocks > n:
-        sys.exit(f"block needs 1 <= PARAM <= N, got {blocks}")
+def block_members(n, blocks):
     sizes, weight = [], 1.0
     for _ in range(blocks):
         sizes.append(weight)
@@ -118,21 +116,38 @@ def block(rng, n, blocks):
         members.append(list(range(start, min(start + size, n))))
         start += size
     members[-1].extend(range(start, n))
+    return members
+
+
+def add_block_edges(rng, group, edges):
+    if len(group) < 2:
+        return
+    for vertex in group:
+        for _ in range(IN_DEGREE):
+            neighbor = group[rng.randrange(len(group))]
+            if neighbor != vertex:
+                edge = (max(neighbor, vertex), min(neighbor, vertex))
+                edges[edge] = ladder(rng, 0.0, LOW_BAND)
+
+
+def add_cross_edges(rng, n, home, edges):
+    for vertex in range(0, n, CROSS_EVERY):
+        neighbor = rng.randrange(n)
+        if home.get(neighbor) != home.get(vertex):
+            edge = (max(neighbor, vertex), min(neighbor, vertex))
+            edges[edge] = ladder(rng, LOW_BAND, 1.0)
+
+
+def block(rng, n, blocks):
+    if blocks < 1 or blocks > n:
+        sys.exit(f"block needs 1 <= PARAM <= N, got {blocks}")
+    members = block_members(n, blocks)
     home = {v: b for b, group in enumerate(members) for v in group}
 
     edges = {}
     for group in members:
-        if len(group) < 2:
-            continue
-        for v in group:
-            for _ in range(IN_DEGREE):
-                u = group[rng.randrange(len(group))]
-                if u != v:
-                    edges[(max(u, v), min(u, v))] = ladder(rng, 0.0, LOW_BAND)
-    for v in range(0, n, CROSS_EVERY):
-        u = rng.randrange(n)
-        if home.get(u) != home.get(v):
-            edges[(max(u, v), min(u, v))] = ladder(rng, LOW_BAND, 1.0)
+        add_block_edges(rng, group, edges)
+    add_cross_edges(rng, n, home, edges)
     return [(u, v, d) for (u, v), d in edges.items()]
 
 
@@ -193,59 +208,72 @@ def components_of(n, edges):
     return sum(1 for v in range(n) if find(v) == v)
 
 
-def main() -> None:
-    if len(sys.argv) != 7:
+def parse_args(argv):
+    if len(argv) != 7:
         sys.exit("usage: gen_graph.py GENERATOR N SEED TAU PARAM OUT_SPARSE")
-    name = sys.argv[1]
+    name = argv[1]
     if name not in GENERATORS:
         sys.exit(f"unknown generator {name!r}; pick one of {', '.join(sorted(GENERATORS))}")
-    n, seed = int(sys.argv[2]), int(sys.argv[3])
-    tau = float(sys.argv[4])
-    param = int(sys.argv[5])
-    out_path = sys.argv[6]
+    n = int(argv[2])
     if n < 2:
         sys.exit(f"need at least two vertices, got {n}")
+    return name, n, int(argv[3]), float(argv[4]), int(argv[5]), argv[6]
 
-    rng = random.Random(seed)
-    drawn = GENERATORS[name](rng, n, param)
+
+def retained_edges(name, n, seed, tau, param):
+    drawn = GENERATORS[name](random.Random(seed), n, param)
     if not drawn:
         sys.exit(f"{name}: the generator drew no edge")
-
-    max_weight = max(d for _, _, d in drawn)
+    max_weight = max(distance for _, _, distance in drawn)
     threshold = tau * max_weight
-    edges = [(u, v, d) for u, v, d in drawn if d <= threshold]
+    edges = [edge for edge in drawn if edge[2] <= threshold]
     if not edges:
         sys.exit(f"{name}: threshold {threshold!r} keeps no edge")
+    return edges, max_weight, threshold
 
+
+def relabel_edges(n, edges):
     degree = [0] * n
     for u, v, _ in edges:
         degree[u] += 1
         degree[v] += 1
-    order = [v for v in range(n) if degree[v] == 0]
+    order = [vertex for vertex in range(n) if degree[vertex] == 0]
     isolated = len(order)
-    order += [v for v in range(n) if degree[v] > 0]
+    order += [vertex for vertex in range(n) if degree[vertex] > 0]
     label = [0] * n
     for new, old in enumerate(order):
         label[old] = new
-    relabelled = "yes" if any(old != new for new, old in enumerate(order)) else "no"
-
-    # Sorted output keeps the file byte-identical whatever order the
-    # generator produced its edges in.
     rows = sorted(
-        (max(label[u], label[v]), min(label[u], label[v]), d) for u, v, d in edges
+        (max(label[u], label[v]), min(label[u], label[v]), distance)
+        for u, v, distance in edges
     )
-    with open(out_path, "w") as f:
-        for u, v, d in rows:
-            f.write(f"{u} {v} {d!r}\n")
+    relabelled = "yes" if any(old != new for new, old in enumerate(order)) else "no"
+    return rows, degree, isolated, relabelled
 
+
+def write_edges(path, rows):
+    with open(path, "w") as output:
+        for u, v, distance in rows:
+            output.write(f"{u} {v} {distance!r}\n")
+
+
+def metadata(name, n, param, edges, degree, isolated, relabelled, max_weight, tau, threshold):
     pairs = n * (n - 1) // 2
-    print(
+    return (
         f"generator={name} n={n} param={param} pairs={pairs} edges={len(edges)} "
         f"density={len(edges) / pairs:.6f} mean_degree={2 * len(edges) / n:.2f} "
         f"max_degree={max(degree)} isolated={isolated} "
         f"components={components_of(n, edges)} relabelled={relabelled} "
         f"max_weight={max_weight!r} tau={tau!r} threshold={threshold!r}"
     )
+
+
+def main() -> None:
+    name, n, seed, tau, param, out_path = parse_args(sys.argv)
+    edges, max_weight, threshold = retained_edges(name, n, seed, tau, param)
+    rows, degree, isolated, relabelled = relabel_edges(n, edges)
+    write_edges(out_path, rows)
+    print(metadata(name, n, param, edges, degree, isolated, relabelled, max_weight, tau, threshold))
 
 
 if __name__ == "__main__":
