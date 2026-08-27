@@ -98,12 +98,40 @@ where
         ));
     }
     let manifest = decode_manifest(manifest, limits)?;
-    let mut referenced: BTreeSet<_> = manifest.shards.iter().copied().collect();
+    let referenced = referenced_objects(&manifest);
+    verify_object_budget(&referenced, &mut load, limits)?;
+    verify_shards(&manifest, &mut load, limits)?;
+    verify_folds(&manifest, &mut load, limits)?;
+    let last = *manifest.folds.last().expect("a checked manifest has folds");
+    verify_result(&manifest, last, &mut load, limits)?;
+    Ok(VerifiedDistributedInterface {
+        job: manifest.job,
+        result: manifest.result,
+        shards: manifest.shards.len(),
+        folds: manifest.folds.len().saturating_sub(1) + usize::from(manifest.result != last),
+        objects: referenced.len(),
+        max_dim: manifest.max_dim,
+    })
+}
+
+fn referenced_objects(manifest: &Manifest) -> BTreeSet<[u8; 32]> {
+    let mut referenced = manifest.shards.iter().copied().collect::<BTreeSet<_>>();
     referenced.extend(manifest.folds.iter().copied());
     referenced.insert(manifest.result);
+    referenced
+}
+
+fn verify_object_budget<F>(
+    referenced: &BTreeSet<[u8; 32]>,
+    load: &mut F,
+    limits: ProofLimits,
+) -> Result<(), ProofError>
+where
+    F: FnMut(&[u8; 32]) -> Result<Vec<u8>, ProofError>,
+{
     let mut object_bytes = 0usize;
-    for id in &referenced {
-        let bytes = load_checked(&mut load, id, limits)?;
+    for id in referenced {
+        let bytes = load_checked(load, id, limits)?;
         object_bytes = object_bytes
             .checked_add(bytes.len())
             .ok_or_else(|| ProofError::new("distributed object byte count overflows"))?;
@@ -111,9 +139,19 @@ where
             return Err(ProofError::new("distributed objects exceed the byte limit"));
         }
     }
+    Ok(())
+}
 
+fn verify_shards<F>(
+    manifest: &Manifest,
+    load: &mut F,
+    limits: ProofLimits,
+) -> Result<(), ProofError>
+where
+    F: FnMut(&[u8; 32]) -> Result<Vec<u8>, ProofError>,
+{
     for shard in &manifest.shards {
-        let bytes = load_checked(&mut load, shard, limits)?;
+        let bytes = load_checked(load, shard, limits)?;
         let certificate = decode_verified(&bytes, limits)?;
         if certificate.max_dim != manifest.max_dim
             || certificate.modulus != manifest.modulus
@@ -129,6 +167,13 @@ where
             ));
         }
     }
+    Ok(())
+}
+
+fn verify_folds<F>(manifest: &Manifest, load: &mut F, limits: ProofLimits) -> Result<(), ProofError>
+where
+    F: FnMut(&[u8; 32]) -> Result<Vec<u8>, ProofError>,
+{
     if manifest.folds[0] != manifest.shards[0] {
         return Err(ProofError::new(
             "first distributed fold differs from the first shard",
@@ -139,14 +184,25 @@ where
     intermediate.sort_unstable();
     intermediate.dedup();
     for position in 1..manifest.shards.len() {
-        let parent = load_checked(&mut load, &manifest.folds[position], limits)?;
-        let left = load_checked(&mut load, &manifest.folds[position - 1], limits)?;
-        let right = load_checked(&mut load, &manifest.shards[position], limits)?;
+        let parent = load_checked(load, &manifest.folds[position], limits)?;
+        let left = load_checked(load, &manifest.folds[position - 1], limits)?;
+        let right = load_checked(load, &manifest.shards[position], limits)?;
         verify_relative_composition(&parent, &[&left, &right], &intermediate, limits)?;
     }
-    let last = *manifest.folds.last().unwrap();
+    Ok(())
+}
+
+fn verify_result<F>(
+    manifest: &Manifest,
+    last: [u8; 32],
+    load: &mut F,
+    limits: ProofLimits,
+) -> Result<(), ProofError>
+where
+    F: FnMut(&[u8; 32]) -> Result<Vec<u8>, ProofError>,
+{
     if manifest.result == last {
-        let bytes = load_checked(&mut load, &last, limits)?;
+        let bytes = load_checked(load, &last, limits)?;
         let certificate = decode_verified(&bytes, limits)?;
         if certificate.protected_vertices != manifest.output_protected {
             return Err(ProofError::new(
@@ -154,18 +210,11 @@ where
             ));
         }
     } else {
-        let result = load_checked(&mut load, &manifest.result, limits)?;
-        let child = load_checked(&mut load, &last, limits)?;
+        let result = load_checked(load, &manifest.result, limits)?;
+        let child = load_checked(load, &last, limits)?;
         verify_relative_composition(&result, &[&child], &manifest.output_protected, limits)?;
     }
-    Ok(VerifiedDistributedInterface {
-        job: manifest.job,
-        result: manifest.result,
-        shards: manifest.shards.len(),
-        folds: manifest.folds.len().saturating_sub(1) + usize::from(manifest.result != last),
-        objects: referenced.len(),
-        max_dim: manifest.max_dim,
-    })
+    Ok(())
 }
 
 fn load_checked<F>(load: &mut F, id: &[u8; 32], limits: ProofLimits) -> Result<Vec<u8>, ProofError>
@@ -186,45 +235,65 @@ where
 
 fn decode_manifest(bytes: &[u8], limits: ProofLimits) -> Result<Manifest, ProofError> {
     let mut reader = Reader::new(bytes);
+    decode_manifest_prefix(&mut reader)?;
+    let manifest = decode_manifest_body(&mut reader, limits)?;
+    validate_manifest(&manifest, reader.remaining())?;
+    Ok(manifest)
+}
+
+fn decode_manifest_prefix(reader: &mut Reader<'_>) -> Result<(), ProofError> {
     if reader.take(8)? != MAGIC || reader.u16()? != VERSION {
         return Err(ProofError::new(
             "unsupported distributed manifest magic or version",
         ));
     }
-    let job = reader.array32()?;
-    let max_dim = reader.bounded_usize("distributed dimension", limits.max_dimension)?;
-    let modulus = reader.u32()?;
-    let separator = decode_usizes(&mut reader, limits.max_vertices)?;
-    let output_protected = decode_usizes(&mut reader, limits.max_vertices)?;
-    let shards = decode_ids(&mut reader, limits.max_references)?;
-    let folds = decode_ids(&mut reader, limits.max_references)?;
-    let result = reader.array32()?;
-    if reader.remaining() != 0 || shards.is_empty() || folds.len() != shards.len() {
+    Ok(())
+}
+
+fn decode_manifest_body(
+    reader: &mut Reader<'_>,
+    limits: ProofLimits,
+) -> Result<Manifest, ProofError> {
+    Ok(Manifest {
+        job: reader.array32()?,
+        max_dim: reader.bounded_usize("distributed dimension", limits.max_dimension)?,
+        modulus: reader.u32()?,
+        separator: decode_usizes(reader, limits.max_vertices)?,
+        output_protected: decode_usizes(reader, limits.max_vertices)?,
+        shards: decode_ids(reader, limits.max_references)?,
+        folds: decode_ids(reader, limits.max_references)?,
+        result: reader.array32()?,
+    })
+}
+
+fn validate_manifest(manifest: &Manifest, remaining: usize) -> Result<(), ProofError> {
+    if remaining != 0 || manifest.shards.is_empty() || manifest.folds.len() != manifest.shards.len()
+    {
         return Err(ProofError::new("distributed manifest shape is invalid"));
     }
-    if separator.windows(2).any(|pair| pair[0] >= pair[1])
-        || output_protected.windows(2).any(|pair| pair[0] >= pair[1])
+    if manifest.separator.windows(2).any(|pair| pair[0] >= pair[1])
+        || manifest
+            .output_protected
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
     {
         return Err(ProofError::new(
             "distributed manifest vertex lists are not canonical",
         ));
     }
-    let computed = job_id(max_dim, modulus, &separator, &output_protected, &shards);
-    if computed != job {
+    let computed = job_id(
+        manifest.max_dim,
+        manifest.modulus,
+        &manifest.separator,
+        &manifest.output_protected,
+        &manifest.shards,
+    );
+    if computed != manifest.job {
         return Err(ProofError::new(
             "distributed manifest job binding is invalid",
         ));
     }
-    Ok(Manifest {
-        job,
-        max_dim,
-        modulus,
-        separator,
-        output_protected,
-        shards,
-        folds,
-        result,
-    })
+    Ok(())
 }
 
 fn decode_usizes(reader: &mut Reader<'_>, maximum: usize) -> Result<Vec<usize>, ProofError> {
