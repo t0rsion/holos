@@ -81,6 +81,24 @@ pub struct KineticZigzagArtifact {
     digest: [u8; 32],
 }
 
+struct KineticZigzagHeader {
+    vertex_count: usize,
+    edges: Vec<KineticEdge>,
+    start: f64,
+    end: f64,
+    dimension: usize,
+    scale: f64,
+    modulus: u32,
+    persistent_ties: usize,
+}
+
+struct KineticZigzagRanks {
+    node_ranks: Vec<usize>,
+    node_active_edges: Vec<usize>,
+    arrow_ranks: Vec<usize>,
+    generalized_ranks: Vec<usize>,
+}
+
 impl KineticZigzagArtifact {
     /// Build one artifact and return the complete checked zigzag.
     pub fn build(
@@ -173,95 +191,30 @@ impl KineticZigzagArtifact {
 
     /// Decode and verify canonical `HOLOSZZ` version 1 bytes.
     pub fn decode(bytes: &[u8], limits: KineticZigzagArtifactLimits) -> Result<Self> {
-        if bytes.len() > limits.max_bytes || bytes.len() < 32 {
-            return Err(Error::InvalidInput(
-                "kinetic zigzag artifact exceeds its byte limit or is truncated".into(),
-            ));
-        }
+        validate_artifact_size(bytes, limits)?;
         let mut reader = Reader::new(bytes);
-        if reader.take(8)? != MAGIC || reader.u16()? != VERSION || reader.u8()? != F64_BITS_CODEC {
-            return Err(Error::InvalidInput(
-                "unsupported kinetic zigzag artifact".into(),
-            ));
-        }
-        let vertex_count = reader.bounded_usize("vertex count", limits.cohomology.max_vertices)?;
-        let edge_count = reader.bounded_usize("edge count", limits.kinetic.max_edges)?;
-        if edge_count > reader.remaining() / 32 {
-            return Err(Error::InvalidInput(
-                "kinetic zigzag edge count exceeds the remaining bytes".into(),
-            ));
-        }
-        let mut edges = Vec::with_capacity(edge_count);
-        for _ in 0..edge_count {
-            edges.push(KineticEdge {
-                u: reader.usize()?,
-                v: reader.usize()?,
-                intercept: f64::from_bits(reader.u64()?),
-                velocity: f64::from_bits(reader.u64()?),
-            });
-        }
-        let start = f64::from_bits(reader.u64()?);
-        let end = f64::from_bits(reader.u64()?);
-        let dimension = reader.bounded_usize("dimension", limits.cohomology.max_dimension)?;
-        let scale = f64::from_bits(reader.u64()?);
-        let modulus = reader.u32()?;
-        let persistent_ties = reader.usize()?;
-        let node_ranks = reader.usizes("node ranks", limits.zigzag.max_nodes)?;
-        let node_active_edges = reader.usizes("node edge counts", limits.zigzag.max_nodes)?;
-        let arrow_ranks =
-            reader.usizes("arrow ranks", limits.zigzag.max_nodes.saturating_sub(1))?;
-        let maximum_ranks = node_ranks
-            .len()
-            .checked_mul(node_ranks.len())
-            .ok_or_else(|| Error::InvalidInput("kinetic zigzag rank count overflows".into()))?;
-        let generalized_ranks = reader.usizes("generalized ranks", maximum_ranks)?;
-        let maximum_intervals = node_ranks
-            .len()
-            .checked_mul(node_ranks.len().saturating_add(1))
-            .map(|value| value / 2)
-            .ok_or_else(|| Error::InvalidInput("kinetic zigzag interval count overflows".into()))?;
-        let interval_count = reader.bounded_usize("interval count", maximum_intervals)?;
-        let mut intervals = Vec::with_capacity(interval_count);
-        for _ in 0..interval_count {
-            intervals.push(KineticZigzagIntervalClaim {
-                start: reader.usize()?,
-                end: reader.usize()?,
-                multiplicity: reader.usize()?,
-            });
-        }
-        let digest = reader.array32()?;
-        if reader.remaining() != 0 {
-            return Err(Error::InvalidInput(
-                "trailing bytes follow the kinetic zigzag artifact".into(),
-            ));
-        }
+        decode_prefix(&mut reader)?;
+        let header = decode_header(&mut reader, limits)?;
+        let ranks = decode_ranks(&mut reader, limits)?;
+        let intervals = decode_intervals(&mut reader, ranks.node_ranks.len())?;
+        let digest = decode_trailer(&mut reader)?;
         let artifact = Self {
-            vertex_count,
-            edges,
-            start,
-            end,
-            dimension,
-            scale,
-            modulus,
-            persistent_ties,
-            node_ranks,
-            node_active_edges,
-            arrow_ranks,
-            generalized_ranks,
+            vertex_count: header.vertex_count,
+            edges: header.edges,
+            start: header.start,
+            end: header.end,
+            dimension: header.dimension,
+            scale: header.scale,
+            modulus: header.modulus,
+            persistent_ties: header.persistent_ties,
+            node_ranks: ranks.node_ranks,
+            node_active_edges: ranks.node_active_edges,
+            arrow_ranks: ranks.arrow_ranks,
+            generalized_ranks: ranks.generalized_ranks,
             intervals,
             digest,
         };
-        if artifact.compute_digest()? != artifact.digest {
-            return Err(Error::InvalidInput(
-                "kinetic zigzag digest differs from its content".into(),
-            ));
-        }
-        artifact.verify(limits)?;
-        if artifact.encode(limits)? != bytes {
-            return Err(Error::InvalidInput(
-                "kinetic zigzag encoding is not canonical".into(),
-            ));
-        }
+        validate_decoded_artifact(&artifact, bytes, limits)?;
         Ok(artifact)
     }
 
@@ -311,35 +264,193 @@ impl KineticZigzagArtifact {
 
     fn encode_payload(&self) -> Result<Vec<u8>> {
         let mut output = Vec::new();
-        output.extend_from_slice(MAGIC);
-        write_u16(&mut output, VERSION);
-        output.push(F64_BITS_CODEC);
-        write_usize(&mut output, self.vertex_count)?;
-        write_usize(&mut output, self.edges.len())?;
-        for edge in &self.edges {
-            write_usize(&mut output, edge.u)?;
-            write_usize(&mut output, edge.v)?;
-            write_u64(&mut output, edge.intercept.to_bits());
-            write_u64(&mut output, edge.velocity.to_bits());
-        }
-        write_u64(&mut output, self.start.to_bits());
-        write_u64(&mut output, self.end.to_bits());
-        write_usize(&mut output, self.dimension)?;
-        write_u64(&mut output, self.scale.to_bits());
-        write_u32(&mut output, self.modulus);
-        write_usize(&mut output, self.persistent_ties)?;
-        write_usizes(&mut output, &self.node_ranks)?;
-        write_usizes(&mut output, &self.node_active_edges)?;
-        write_usizes(&mut output, &self.arrow_ranks)?;
-        write_usizes(&mut output, &self.generalized_ranks)?;
-        write_usize(&mut output, self.intervals.len())?;
-        for interval in &self.intervals {
-            write_usize(&mut output, interval.start)?;
-            write_usize(&mut output, interval.end)?;
-            write_usize(&mut output, interval.multiplicity)?;
-        }
+        encode_prefix(&mut output);
+        encode_header(&mut output, self)?;
+        encode_edges(&mut output, &self.edges)?;
+        encode_ranks(&mut output, self)?;
+        encode_intervals(&mut output, &self.intervals)?;
         Ok(output)
     }
+}
+
+fn validate_artifact_size(bytes: &[u8], limits: KineticZigzagArtifactLimits) -> Result<()> {
+    if bytes.len() > limits.max_bytes || bytes.len() < 32 {
+        Err(Error::InvalidInput(
+            "kinetic zigzag artifact exceeds its byte limit or is truncated".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_prefix(reader: &mut Reader<'_>) -> Result<()> {
+    let magic = reader.take(8)?;
+    let version = reader.u16()?;
+    let codec = reader.u8()?;
+    if magic != MAGIC || version != VERSION || codec != F64_BITS_CODEC {
+        Err(Error::InvalidInput(
+            "unsupported kinetic zigzag artifact".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_header(
+    reader: &mut Reader<'_>,
+    limits: KineticZigzagArtifactLimits,
+) -> Result<KineticZigzagHeader> {
+    Ok(KineticZigzagHeader {
+        vertex_count: reader.bounded_usize("vertex count", limits.cohomology.max_vertices)?,
+        edges: decode_edges(reader, limits)?,
+        start: f64::from_bits(reader.u64()?),
+        end: f64::from_bits(reader.u64()?),
+        dimension: reader.bounded_usize("dimension", limits.cohomology.max_dimension)?,
+        scale: f64::from_bits(reader.u64()?),
+        modulus: reader.u32()?,
+        persistent_ties: reader.usize()?,
+    })
+}
+
+fn decode_edges(
+    reader: &mut Reader<'_>,
+    limits: KineticZigzagArtifactLimits,
+) -> Result<Vec<KineticEdge>> {
+    let count = reader.bounded_usize("edge count", limits.kinetic.max_edges)?;
+    if count > reader.remaining() / 32 {
+        return Err(Error::InvalidInput(
+            "kinetic zigzag edge count exceeds the remaining bytes".into(),
+        ));
+    }
+    (0..count).map(|_| decode_edge(reader)).collect()
+}
+
+fn decode_edge(reader: &mut Reader<'_>) -> Result<KineticEdge> {
+    Ok(KineticEdge {
+        u: reader.usize()?,
+        v: reader.usize()?,
+        intercept: f64::from_bits(reader.u64()?),
+        velocity: f64::from_bits(reader.u64()?),
+    })
+}
+
+fn decode_ranks(
+    reader: &mut Reader<'_>,
+    limits: KineticZigzagArtifactLimits,
+) -> Result<KineticZigzagRanks> {
+    let node_ranks = reader.usizes("node ranks", limits.zigzag.max_nodes)?;
+    let node_active_edges = reader.usizes("node edge counts", limits.zigzag.max_nodes)?;
+    let arrow_ranks = reader.usizes("arrow ranks", limits.zigzag.max_nodes.saturating_sub(1))?;
+    let generalized_ranks = reader.usizes("generalized ranks", rank_square(node_ranks.len())?)?;
+    Ok(KineticZigzagRanks {
+        node_ranks,
+        node_active_edges,
+        arrow_ranks,
+        generalized_ranks,
+    })
+}
+
+fn rank_square(nodes: usize) -> Result<usize> {
+    nodes
+        .checked_mul(nodes)
+        .ok_or_else(|| Error::InvalidInput("kinetic zigzag rank count overflows".into()))
+}
+
+fn decode_intervals(
+    reader: &mut Reader<'_>,
+    nodes: usize,
+) -> Result<Vec<KineticZigzagIntervalClaim>> {
+    let count = reader.bounded_usize("interval count", maximum_intervals(nodes)?)?;
+    (0..count).map(|_| decode_interval(reader)).collect()
+}
+
+fn maximum_intervals(nodes: usize) -> Result<usize> {
+    nodes
+        .checked_mul(nodes.saturating_add(1))
+        .map(|value| value / 2)
+        .ok_or_else(|| Error::InvalidInput("kinetic zigzag interval count overflows".into()))
+}
+
+fn decode_interval(reader: &mut Reader<'_>) -> Result<KineticZigzagIntervalClaim> {
+    Ok(KineticZigzagIntervalClaim {
+        start: reader.usize()?,
+        end: reader.usize()?,
+        multiplicity: reader.usize()?,
+    })
+}
+
+fn decode_trailer(reader: &mut Reader<'_>) -> Result<[u8; 32]> {
+    let digest = reader.array32()?;
+    if reader.remaining() != 0 {
+        Err(Error::InvalidInput(
+            "trailing bytes follow the kinetic zigzag artifact".into(),
+        ))
+    } else {
+        Ok(digest)
+    }
+}
+
+fn validate_decoded_artifact(
+    artifact: &KineticZigzagArtifact,
+    bytes: &[u8],
+    limits: KineticZigzagArtifactLimits,
+) -> Result<()> {
+    if artifact.compute_digest()? != artifact.digest {
+        return Err(Error::InvalidInput(
+            "kinetic zigzag digest differs from its content".into(),
+        ));
+    }
+    artifact.verify(limits)?;
+    if artifact.encode(limits)? != bytes {
+        return Err(Error::InvalidInput(
+            "kinetic zigzag encoding is not canonical".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn encode_prefix(output: &mut Vec<u8>) {
+    output.extend_from_slice(MAGIC);
+    write_u16(output, VERSION);
+    output.push(F64_BITS_CODEC);
+}
+
+fn encode_header(output: &mut Vec<u8>, artifact: &KineticZigzagArtifact) -> Result<()> {
+    write_usize(output, artifact.vertex_count)?;
+    write_usize(output, artifact.edges.len())
+}
+
+fn encode_edges(output: &mut Vec<u8>, edges: &[KineticEdge]) -> Result<()> {
+    for edge in edges {
+        write_usize(output, edge.u)?;
+        write_usize(output, edge.v)?;
+        write_u64(output, edge.intercept.to_bits());
+        write_u64(output, edge.velocity.to_bits());
+    }
+    Ok(())
+}
+
+fn encode_ranks(output: &mut Vec<u8>, artifact: &KineticZigzagArtifact) -> Result<()> {
+    write_u64(output, artifact.start.to_bits());
+    write_u64(output, artifact.end.to_bits());
+    write_usize(output, artifact.dimension)?;
+    write_u64(output, artifact.scale.to_bits());
+    write_u32(output, artifact.modulus);
+    write_usize(output, artifact.persistent_ties)?;
+    write_usizes(output, &artifact.node_ranks)?;
+    write_usizes(output, &artifact.node_active_edges)?;
+    write_usizes(output, &artifact.arrow_ranks)?;
+    write_usizes(output, &artifact.generalized_ranks)
+}
+
+fn encode_intervals(output: &mut Vec<u8>, intervals: &[KineticZigzagIntervalClaim]) -> Result<()> {
+    write_usize(output, intervals.len())?;
+    for interval in intervals {
+        write_usize(output, interval.start)?;
+        write_usize(output, interval.end)?;
+        write_usize(output, interval.multiplicity)?;
+    }
+    Ok(())
 }
 
 fn write_usizes(output: &mut Vec<u8>, values: &[usize]) -> Result<()> {
