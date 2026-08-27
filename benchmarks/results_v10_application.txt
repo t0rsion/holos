@@ -1,5 +1,0 @@
-commit=2cad8a0595583c87cec3d54aab4c3a2bcf02fc2f
-platform=Linux-7.1.8-arch1-3-x86_64-with-glibc2.44
-cargo=cargo 1.92.0 (344c4567c 2025-10-21)
-binary_sha256=45dcf93e46c30653a8951152eac30d06f55e701b6e148dc6b36a35d1b2391d40
-record=format=holos-program-application-v1 modulus=3 atoms=2 initial_spaces=1 initial_classes=2 update_mode=reused final_spaces=2 split_records=1 transports=2 trace_steps=1 trace_reused=1 intervention_status=optimal intervention_edits=1 program_bytes=2570 trace_bytes=3759 intervention_bytes=3932
