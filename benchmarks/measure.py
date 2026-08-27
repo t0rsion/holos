@@ -63,18 +63,20 @@ def cpu_list(text):
     return cpus
 
 
-def main():
-    if len(sys.argv) < 3:
-        sys.exit("usage: measure.py OUTFILE CMD [ARG...]")
-    outfile, cmd = sys.argv[1], sys.argv[2:]
-    errfile = os.environ.get("MEASURE_STDERR")
-    affinity = os.environ.get("MEASURE_AFFINITY")
-    pin = None
-    if affinity:
-        cpus = cpu_list(affinity)
-        def pin():  # noqa: E306  (set in the child, between fork and exec)
-            os.sched_setaffinity(0, cpus)
+def child_pin(affinity):
+    """Return a child hook that pins the process, or `None`."""
+    if not affinity:
+        return None
+    cpus = cpu_list(affinity)
 
+    def pin():
+        os.sched_setaffinity(0, cpus)
+
+    return pin
+
+
+def run_command(outfile, cmd, errfile, pin):
+    """Run and measure one command."""
     want_argv0 = os.fsencode(cmd[0])
     peak = 0
     with open(outfile, "wb") as out:
@@ -96,8 +98,18 @@ def main():
         finally:
             if err:
                 err.close()
+    return wall, peak, proc.returncode
+
+
+def main():
+    if len(sys.argv) < 3:
+        sys.exit("usage: measure.py OUTFILE CMD [ARG...]")
+    outfile, cmd = sys.argv[1], sys.argv[2:]
+    errfile = os.environ.get("MEASURE_STDERR")
+    pin = child_pin(os.environ.get("MEASURE_AFFINITY"))
+    wall, peak, returncode = run_command(outfile, cmd, errfile, pin)
     print(f"wall_s={wall:.3f} max_rss_kb={peak}")
-    sys.exit(proc.returncode)
+    sys.exit(returncode)
 
 
 if __name__ == "__main__":
