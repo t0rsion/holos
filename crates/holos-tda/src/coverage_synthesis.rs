@@ -11,12 +11,14 @@ use std::fmt;
 
 use sha2::{Digest, Sha256};
 
-use crate::coverage_frontier::{CoverageCompositionStatus, compose_coverage_frontiers};
+use crate::coverage_frontier::{
+    CoverageComposition, CoverageCompositionStatus, compose_coverage_frontiers,
+};
 use crate::monotone_proof::{
     BoundKind, ProofLimits, ProofNode, ProofWork, build_proof, proof_topology_checks, verify_proof,
     verify_root_blockers,
 };
-use crate::monotone_search::{SearchLimits, SearchStatus, minimize_antitone};
+use crate::monotone_search::{SearchLimits, SearchResult, SearchStatus, minimize_antitone};
 use crate::{
     CoverageFence, CoverageLimits, Error, KineticEdge, KineticEdgeKey, KineticFiltration,
     KineticLimits, PlanarCoverageModel, Result, SparseDistanceMatrix, evaluate_planar_coverage,
@@ -300,30 +302,7 @@ impl CoverageSpecification {
 
     fn validate(&self, limits: CoverageLimits) -> Result<()> {
         PlanarCoverageModel::new(self.model.broadcast_radius(), self.model.sensing_radius())?;
-        if self.vertex_count == 0
-            || self.vertex_count > limits.max_vertices
-            || self.states.is_empty()
-            || self.states.len() > limits.max_states
-            || self
-                .fence
-                .vertices()
-                .iter()
-                .any(|vertex| *vertex >= self.vertex_count)
-            || self
-                .failable_vertices
-                .iter()
-                .any(|vertex| *vertex >= self.vertex_count)
-            || self
-                .fence
-                .vertices()
-                .iter()
-                .any(|vertex| self.failable_vertices.binary_search(vertex).is_ok())
-            || self.failure_budget > self.failable_vertices.len()
-        {
-            return Err(Error::InvalidInput(
-                "coverage specification has an invalid scope, fence, or failure model".into(),
-            ));
-        }
+        self.validate_scope(limits)?;
         if self
             .states
             .windows(2)
@@ -334,31 +313,70 @@ impl CoverageSpecification {
             ));
         }
         for state in &self.states {
-            if state
-                .base_vertices
-                .iter()
-                .any(|vertex| *vertex >= self.vertex_count)
-                || state.possible_edges.len() > limits.max_edges
-                || state
-                    .possible_edges
-                    .iter()
-                    .any(|edge| edge.u >= edge.v || edge.v >= self.vertex_count)
-                || state
-                    .possible_edges
-                    .windows(2)
-                    .any(|pair| pair[0] >= pair[1])
-                || self
-                    .fence
-                    .vertices()
-                    .iter()
-                    .any(|vertex| state.base_vertices.binary_search(vertex).is_err())
-            {
-                return Err(Error::InvalidInput(
-                    "coverage state is not canonical or omits a fence vertex".into(),
-                ));
-            }
+            self.validate_state(state, limits)?;
         }
         Ok(())
+    }
+
+    fn validate_scope(&self, limits: CoverageLimits) -> Result<()> {
+        let invalid_failable = self
+            .failable_vertices
+            .iter()
+            .any(|vertex| *vertex >= self.vertex_count);
+        let failable_fence = self
+            .fence
+            .vertices()
+            .iter()
+            .any(|vertex| self.failable_vertices.binary_search(vertex).is_ok());
+        if self.vertex_count == 0
+            || self.vertex_count > limits.max_vertices
+            || self.states.is_empty()
+            || self.states.len() > limits.max_states
+            || self
+                .fence
+                .vertices()
+                .iter()
+                .any(|vertex| *vertex >= self.vertex_count)
+            || invalid_failable
+            || failable_fence
+            || self.failure_budget > self.failable_vertices.len()
+        {
+            Err(Error::InvalidInput(
+                "coverage specification has an invalid scope, fence, or failure model".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn validate_state(&self, state: &CoverageState, limits: CoverageLimits) -> Result<()> {
+        let invalid_edge = state
+            .possible_edges
+            .iter()
+            .any(|edge| edge.u >= edge.v || edge.v >= self.vertex_count);
+        let missing_fence = self
+            .fence
+            .vertices()
+            .iter()
+            .any(|vertex| state.base_vertices.binary_search(vertex).is_err());
+        if state
+            .base_vertices
+            .iter()
+            .any(|vertex| *vertex >= self.vertex_count)
+            || state.possible_edges.len() > limits.max_edges
+            || invalid_edge
+            || state
+                .possible_edges
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || missing_fence
+        {
+            Err(Error::InvalidInput(
+                "coverage state is not canonical or omits a fence vertex".into(),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     /// Decompose the state-action incidence relation into exact components.
@@ -506,6 +524,16 @@ pub(crate) fn evaluate_coverage_plan_states_prevalidated(
     state_indices: &[usize],
     limits: CoverageLimits,
 ) -> Result<CoveragePlanEvaluation> {
+    validate_evaluation_indices(specification, actions, selected, state_indices)?;
+    evaluate_selected_states(specification, actions, selected, state_indices, limits)
+}
+
+fn validate_evaluation_indices(
+    specification: &CoverageSpecification,
+    actions: &[CoverageAction],
+    selected: &[usize],
+    state_indices: &[usize],
+) -> Result<()> {
     if selected.windows(2).any(|pair| pair[0] >= pair[1])
         || selected.iter().any(|action| *action >= actions.len())
         || state_indices.windows(2).any(|pair| pair[0] >= pair[1])
@@ -517,6 +545,16 @@ pub(crate) fn evaluate_coverage_plan_states_prevalidated(
             "coverage selected action or state indices are not canonical".into(),
         ));
     }
+    Ok(())
+}
+
+fn evaluate_selected_states(
+    specification: &CoverageSpecification,
+    actions: &[CoverageAction],
+    selected: &[usize],
+    state_indices: &[usize],
+    limits: CoverageLimits,
+) -> Result<CoveragePlanEvaluation> {
     let mut checks = 0usize;
     let mut minimum_witness = None;
     for &state_index in state_indices {
@@ -683,6 +721,71 @@ pub struct CoverageSynthesisArtifact {
     digest: [u8; 32],
 }
 
+struct CoverageSearchData {
+    status: CoverageSynthesisStatus,
+    selected: Vec<usize>,
+    lower_bound: Option<u64>,
+    upper_bound: Option<u64>,
+    oracle_calls: usize,
+    search_nodes: usize,
+    cache_hits: usize,
+    root_blockers: Vec<Vec<usize>>,
+}
+
+struct BuiltCoverageProof {
+    proof: Option<ProofNode>,
+    work: ProofWork,
+}
+
+struct CoverageHeader {
+    vertex_count: usize,
+    model: PlanarCoverageModel,
+    modulus: u32,
+    fence: CoverageFence,
+    failable_vertices: Vec<usize>,
+    failure_budget: usize,
+    source: CoverageSource,
+}
+
+struct DecodedCoverageSearch {
+    max_activations: usize,
+    oracle_limit: usize,
+    node_limit: usize,
+    status: CoverageSynthesisStatus,
+    selected: Vec<usize>,
+    lower_bound_cost: Option<u64>,
+    upper_bound_cost: Option<u64>,
+    producer_oracle_calls: usize,
+    producer_search_nodes: usize,
+    producer_cache_hits: usize,
+}
+
+struct CoverageWorkLimits {
+    oracle: usize,
+    nodes: usize,
+}
+
+struct CoverageSelectionData {
+    status: CoverageSynthesisStatus,
+    selected: Vec<usize>,
+    lower_bound_cost: Option<u64>,
+    upper_bound_cost: Option<u64>,
+}
+
+struct CoverageProducerWork {
+    oracle_calls: usize,
+    search_nodes: usize,
+    cache_hits: usize,
+}
+
+struct DecodedCoverageProof {
+    root_blockers: Vec<Vec<usize>>,
+    before: EvaluationClaim,
+    after: EvaluationClaim,
+    proof: Option<ProofNode>,
+    work: ProofWork,
+}
+
 impl CoverageSynthesisArtifact {
     /// Solve a minimum-cost activation problem and build its proof tree.
     pub fn build(
@@ -691,137 +794,39 @@ impl CoverageSynthesisArtifact {
         max_activations: usize,
         limits: CoverageSynthesisLimits,
     ) -> Result<Self> {
-        specification.validate(limits.coverage)?;
-        validate_source(&specification, limits)?;
-        validate_actions(&specification, &actions, limits.coverage)?;
-        if limits.max_oracle_calls == 0 || limits.max_search_nodes == 0 {
-            return Err(Error::InvalidInput(
-                "coverage synthesis search limits must be positive".into(),
-            ));
-        }
+        validate_build_inputs(&specification, &actions, limits)?;
         let costs = actions.iter().map(|action| action.cost).collect::<Vec<_>>();
-        let components = specification.components(&actions)?;
-        let (
-            status,
-            selected,
-            lower_bound,
-            upper_bound,
-            oracle_calls,
-            search_nodes,
-            cache_hits,
-            root_blockers,
-        ) = if components.len() > 1 {
-            let composition =
-                compose_coverage_frontiers(&specification, &actions, max_activations, limits)?;
-            match composition.status() {
-                CoverageCompositionStatus::Optimal => (
-                    CoverageSynthesisStatus::Optimal,
-                    composition.selected().to_vec(),
-                    composition.cost(),
-                    composition.cost(),
-                    composition.oracle_calls(),
-                    composition.search_nodes(),
-                    composition.cache_hits(),
-                    Vec::new(),
-                ),
-                CoverageCompositionStatus::Infeasible => (
-                    CoverageSynthesisStatus::Infeasible,
-                    Vec::new(),
-                    None,
-                    None,
-                    composition.oracle_calls(),
-                    composition.search_nodes(),
-                    composition.cache_hits(),
-                    Vec::new(),
-                ),
-                CoverageCompositionStatus::SearchIncomplete => (
-                    CoverageSynthesisStatus::SearchIncomplete,
-                    Vec::new(),
-                    Some(0),
-                    None,
-                    composition.oracle_calls(),
-                    composition.search_nodes(),
-                    composition.cache_hits(),
-                    Vec::new(),
-                ),
-            }
-        } else {
-            let search = minimize_antitone(
-                &costs,
-                max_activations,
-                SearchLimits {
-                    oracle_calls: limits.max_oracle_calls,
-                    search_nodes: limits.max_search_nodes,
-                },
-                |selected| survives(&specification, &actions, selected, limits.coverage),
-            )?;
-            (
-                match search.status {
-                    SearchStatus::Optimal => CoverageSynthesisStatus::Optimal,
-                    SearchStatus::Infeasible => CoverageSynthesisStatus::Infeasible,
-                    SearchStatus::Incomplete => CoverageSynthesisStatus::SearchIncomplete,
-                },
-                search.selected,
-                search.lower_bound,
-                search.upper_bound,
-                search.oracle_calls,
-                search.search_nodes,
-                search.cache_hits,
-                search.root_blockers,
-            )
-        };
+        let search =
+            solve_coverage_search(&specification, &actions, &costs, max_activations, limits)?;
         let before = evaluate_coverage_plan(&specification, &actions, &[], limits.coverage)?;
-        let after = evaluate_coverage_plan(&specification, &actions, &selected, limits.coverage)?;
-        let (proof, proof_work) = match status {
-            CoverageSynthesisStatus::Optimal => {
-                let cutoff = upper_bound.ok_or_else(|| {
-                    Error::InvalidInput("optimal coverage result has no cost".into())
-                })?;
-                let mut oracle = |selected: &[usize]| {
-                    survives(&specification, &actions, selected, limits.coverage)
-                };
-                let (proof, work) = build_proof(
-                    &costs,
-                    max_activations.min(actions.len()),
-                    Some(cutoff),
-                    limits.proof(),
-                    &mut oracle,
-                )?;
-                (Some(proof), work)
-            }
-            CoverageSynthesisStatus::Infeasible => {
-                let mut oracle = |selected: &[usize]| {
-                    survives(&specification, &actions, selected, limits.coverage)
-                };
-                let (proof, work) = build_proof(
-                    &costs,
-                    max_activations.min(actions.len()),
-                    None,
-                    limits.proof(),
-                    &mut oracle,
-                )?;
-                (Some(proof), work)
-            }
-            CoverageSynthesisStatus::SearchIncomplete => (None, ProofWork::default()),
-        };
+        let after =
+            evaluate_coverage_plan(&specification, &actions, &search.selected, limits.coverage)?;
+        let built = build_coverage_proof(
+            &specification,
+            &actions,
+            &costs,
+            max_activations,
+            &search,
+            limits,
+        )?;
         let mut artifact = Self {
             specification,
             actions,
             max_activations,
             oracle_limit: limits.max_oracle_calls,
             node_limit: limits.max_search_nodes,
-            status,
-            selected,
-            lower_bound_cost: lower_bound,
-            upper_bound_cost: upper_bound,
-            producer_oracle_calls: oracle_calls,
-            producer_search_nodes: search_nodes,
-            producer_cache_hits: cache_hits,
-            root_blockers,
+            status: search.status,
+            selected: search.selected,
+            lower_bound_cost: search.lower_bound,
+            upper_bound_cost: search.upper_bound,
+            producer_oracle_calls: search.oracle_calls,
+            producer_search_nodes: search.search_nodes,
+            producer_cache_hits: search.cache_hits,
+            root_blockers: search.root_blockers,
             before: EvaluationClaim::from(&before),
             after: EvaluationClaim::from(&after),
-            proof,
-            proof_work,
+            proof: built.proof,
+            proof_work: built.work,
             digest: [0; 32],
         };
         artifact.verify(limits)?;
@@ -831,152 +836,17 @@ impl CoverageSynthesisArtifact {
 
     /// Verify the semantic claims and proof without repeating producer search.
     pub fn verify(&self, limits: CoverageSynthesisLimits) -> Result<()> {
-        self.specification.validate(limits.coverage)?;
-        validate_source(&self.specification, limits)?;
-        validate_actions(&self.specification, &self.actions, limits.coverage)?;
-        if self.oracle_limit == 0
-            || self.node_limit == 0
-            || self.producer_oracle_calls > self.oracle_limit
-            || self.producer_search_nodes > self.node_limit
-            || self.selected.len() > self.max_activations.min(self.actions.len())
-            || self
-                .selected
-                .iter()
-                .any(|index| *index >= self.actions.len())
-            || self.selected.windows(2).any(|pair| pair[0] >= pair[1])
-        {
-            return Err(Error::InvalidInput(
-                "coverage synthesis result shape or producer work is invalid".into(),
-            ));
-        }
-        let before =
-            evaluate_coverage_plan(&self.specification, &self.actions, &[], limits.coverage)?;
-        let after = evaluate_coverage_plan(
-            &self.specification,
-            &self.actions,
-            &self.selected,
-            limits.coverage,
-        )?;
-        if self.before != EvaluationClaim::from(&before)
-            || self.after != EvaluationClaim::from(&after)
-        {
-            return Err(Error::InvalidInput(
-                "coverage synthesis evaluation claims differ from exact checks".into(),
-            ));
-        }
+        validate_coverage_artifact_inputs(self, limits)?;
+        let (_, after) = checked_coverage_evaluations(self, limits.coverage)?;
         let costs = self
             .actions
             .iter()
             .map(|action| action.cost)
             .collect::<Vec<_>>();
         let selected_cost = selected_cost(&costs, &self.selected)?;
-        let mut root_oracle = |selected: &[usize]| {
-            survives(
-                &self.specification,
-                &self.actions,
-                selected,
-                limits.coverage,
-            )
-        };
-        verify_root_blockers(
-            &self.root_blockers,
-            &costs,
-            self.lower_bound_cost,
-            &mut root_oracle,
-        )?;
-        let cutoff = match self.status {
-            CoverageSynthesisStatus::Optimal => Some(selected_cost),
-            CoverageSynthesisStatus::Infeasible => None,
-            CoverageSynthesisStatus::SearchIncomplete => self.upper_bound_cost,
-        };
-        let mut proof_oracle = |selected: &[usize]| {
-            survives(
-                &self.specification,
-                &self.actions,
-                selected,
-                limits.coverage,
-            )
-        };
-        match self.status {
-            CoverageSynthesisStatus::Optimal => {
-                if !after.criterion_holds
-                    || self.lower_bound_cost != Some(selected_cost)
-                    || self.upper_bound_cost != Some(selected_cost)
-                {
-                    return Err(Error::InvalidInput(
-                        "optimal coverage result has an invalid incumbent or bound".into(),
-                    ));
-                }
-                let work = verify_proof(
-                    self.proof.as_ref().ok_or_else(|| {
-                        Error::InvalidInput("optimal coverage result has no proof tree".into())
-                    })?,
-                    &costs,
-                    self.max_activations.min(self.actions.len()),
-                    cutoff,
-                    limits.proof(),
-                    &mut proof_oracle,
-                )?;
-                if work != self.proof_work {
-                    return Err(Error::InvalidInput(
-                        "coverage proof work differs from the checked tree".into(),
-                    ));
-                }
-            }
-            CoverageSynthesisStatus::Infeasible => {
-                if !self.selected.is_empty()
-                    || self.lower_bound_cost.is_some()
-                    || self.upper_bound_cost.is_some()
-                    || after.criterion_holds
-                {
-                    return Err(Error::InvalidInput(
-                        "infeasible coverage result has an incumbent or finite bound".into(),
-                    ));
-                }
-                let work = verify_proof(
-                    self.proof.as_ref().ok_or_else(|| {
-                        Error::InvalidInput("infeasible coverage result has no proof tree".into())
-                    })?,
-                    &costs,
-                    self.max_activations.min(self.actions.len()),
-                    None,
-                    limits.proof(),
-                    &mut proof_oracle,
-                )?;
-                if work != self.proof_work {
-                    return Err(Error::InvalidInput(
-                        "coverage proof work differs from the checked tree".into(),
-                    ));
-                }
-            }
-            CoverageSynthesisStatus::SearchIncomplete => {
-                if self.proof.is_some()
-                    || self.proof_work != ProofWork::default()
-                    || self.upper_bound_cost.is_some() != after.criterion_holds
-                    || self
-                        .upper_bound_cost
-                        .is_some_and(|cost| cost != selected_cost)
-                    || self
-                        .lower_bound_cost
-                        .zip(self.upper_bound_cost)
-                        .is_some_and(|(lower, upper)| lower > upper)
-                {
-                    return Err(Error::InvalidInput(
-                        "incomplete coverage result has an invalid gap".into(),
-                    ));
-                }
-            }
-        }
-        if self
-            .proof
-            .as_ref()
-            .is_some_and(|proof| proof_topology_checks(proof) != self.proof_work.checks)
-        {
-            return Err(Error::InvalidInput(
-                "coverage proof check count differs from its tree".into(),
-            ));
-        }
-        Ok(())
+        verify_coverage_root(self, &costs, limits)?;
+        verify_coverage_status(self, &costs, selected_cost, &after, limits)?;
+        verify_coverage_proof_checks(self)
     }
 
     /// Coverage specification bound to this result.
@@ -1059,217 +929,769 @@ impl CoverageSynthesisArtifact {
 
     /// Decode and verify canonical `HOLOSCOV` version 1 bytes.
     pub fn decode(bytes: &[u8], limits: CoverageSynthesisLimits) -> Result<Self> {
-        if bytes.len() > limits.max_bytes || bytes.len() < 32 {
-            return Err(Error::InvalidInput(
-                "coverage artifact exceeds its byte limit or is truncated".into(),
-            ));
-        }
+        validate_coverage_artifact_size(bytes, limits)?;
         let mut reader = Reader::new(bytes);
-        if reader.take(8)? != MAGIC || reader.u16()? != VERSION || reader.u8()? != F64_BITS_CODEC {
-            return Err(Error::InvalidInput("unsupported coverage artifact".into()));
-        }
-        let vertex_count = reader.bounded_usize("vertex count", limits.coverage.max_vertices)?;
-        let model =
-            PlanarCoverageModel::new(f64::from_bits(reader.u64()?), f64::from_bits(reader.u64()?))?;
-        let modulus = reader.u32()?;
-        let fence = CoverageFence::new(decode_usizes(&mut reader, limits.coverage.max_vertices)?)?;
-        let failable_vertices =
-            decode_indices(&mut reader, vertex_count, limits.coverage.max_vertices)?;
-        let failure_budget = reader.usize()?;
-        let source = decode_source(&mut reader, limits)?;
-        let state_count = reader.bounded_usize("state count", limits.coverage.max_states)?;
-        let mut states = Vec::with_capacity(state_count);
-        for _ in 0..state_count {
-            states.push(CoverageState {
-                scenario: reader.u64()?,
-                step: reader.u64()?,
-                base_vertices: decode_indices(
-                    &mut reader,
-                    vertex_count,
-                    limits.coverage.max_vertices,
-                )?,
-                possible_edges: decode_edges(&mut reader, vertex_count, limits.coverage.max_edges)?,
-            });
-        }
-        let specification = CoverageSpecification {
-            vertex_count,
-            model,
-            modulus,
-            fence,
-            failable_vertices,
-            failure_budget,
-            source,
-            states,
-        };
-        let action_count = reader.bounded_usize("action count", limits.coverage.max_actions)?;
-        let mut actions = Vec::with_capacity(action_count);
-        for _ in 0..action_count {
-            actions.push(CoverageAction {
-                vertex: reader.usize()?,
-                cost: reader.u64()?,
-                states: decode_indices(&mut reader, state_count, state_count)?,
-            });
-        }
-        let max_activations = reader.usize()?;
-        let oracle_limit = reader.usize()?;
-        let node_limit = reader.usize()?;
-        let status = CoverageSynthesisStatus::from_code(reader.u8()?)?;
-        let selected = decode_indices(&mut reader, action_count, action_count)?;
-        let lower_bound_cost = reader.optional_u64()?;
-        let upper_bound_cost = reader.optional_u64()?;
-        let producer_oracle_calls = reader.usize()?;
-        let producer_search_nodes = reader.usize()?;
-        let producer_cache_hits = reader.usize()?;
-        let blocker_count = reader.bounded_usize("root blocker count", limits.max_proof_terms)?;
-        let mut root_blockers = Vec::with_capacity(blocker_count);
-        let mut terms = 0usize;
-        for _ in 0..blocker_count {
-            let blocker = decode_indices(&mut reader, action_count, limits.max_proof_terms)?;
-            terms = terms
-                .checked_add(blocker.len())
-                .ok_or_else(|| Error::InvalidInput("coverage proof term count overflows".into()))?;
-            if terms > limits.max_proof_terms.min(FORMAT_MAX_PROOF_TERMS) {
-                return Err(Error::InvalidInput(
-                    "coverage proof terms exceed their limit".into(),
-                ));
-            }
-            root_blockers.push(blocker);
-        }
-        let before = decode_evaluation(&mut reader)?;
-        let after = decode_evaluation(&mut reader)?;
-        let mut decoded_work = ProofWork::default();
-        let proof = match reader.u8()? {
-            0 => None,
-            1 => Some(decode_proof(
-                &mut reader,
-                action_count,
-                0,
-                &mut decoded_work,
-                limits,
-            )?),
-            _ => {
-                return Err(Error::InvalidInput(
-                    "coverage proof-presence flag is invalid".into(),
-                ));
-            }
-        };
-        let proof_work = ProofWork {
-            nodes: reader.usize()?,
-            checks: reader.usize()?,
-            terms: reader.usize()?,
-        };
-        if proof.is_some() && decoded_work.nodes != proof_work.nodes {
-            return Err(Error::InvalidInput(
-                "coverage decoded proof node count differs from its claim".into(),
-            ));
-        }
-        let digest = reader.array32()?;
-        if reader.remaining() != 0 {
-            return Err(Error::InvalidInput(
-                "trailing bytes follow the coverage artifact".into(),
-            ));
-        }
+        decode_coverage_prefix(&mut reader)?;
+        let specification = decode_coverage_specification(&mut reader, limits)?;
+        let actions = decode_coverage_actions(&mut reader, specification.states.len(), limits)?;
+        let search = decode_coverage_search(&mut reader, actions.len())?;
+        let proof = decode_coverage_proof_data(&mut reader, actions.len(), limits)?;
+        let digest = decode_coverage_trailer(&mut reader)?;
         let artifact = Self {
             specification,
             actions,
-            max_activations,
-            oracle_limit,
-            node_limit,
-            status,
-            selected,
-            lower_bound_cost,
-            upper_bound_cost,
-            producer_oracle_calls,
-            producer_search_nodes,
-            producer_cache_hits,
-            root_blockers,
-            before,
-            after,
-            proof,
-            proof_work,
+            max_activations: search.max_activations,
+            oracle_limit: search.oracle_limit,
+            node_limit: search.node_limit,
+            status: search.status,
+            selected: search.selected,
+            lower_bound_cost: search.lower_bound_cost,
+            upper_bound_cost: search.upper_bound_cost,
+            producer_oracle_calls: search.producer_oracle_calls,
+            producer_search_nodes: search.producer_search_nodes,
+            producer_cache_hits: search.producer_cache_hits,
+            root_blockers: proof.root_blockers,
+            before: proof.before,
+            after: proof.after,
+            proof: proof.proof,
+            proof_work: proof.work,
             digest,
         };
-        artifact.verify(limits)?;
-        if artifact.compute_digest()? != artifact.digest {
-            return Err(Error::InvalidInput(
-                "coverage artifact digest differs from its content".into(),
-            ));
-        }
+        validate_decoded_coverage(&artifact, limits)?;
         Ok(artifact)
     }
 
     fn encode_payload(&self) -> Result<Vec<u8>> {
         let mut output = Vec::new();
-        output.extend_from_slice(MAGIC);
-        output.extend_from_slice(&VERSION.to_be_bytes());
-        output.push(F64_BITS_CODEC);
-        put_usize(&mut output, self.specification.vertex_count)?;
-        output.extend_from_slice(
-            &self
-                .specification
-                .model
-                .broadcast_radius()
-                .to_bits()
-                .to_be_bytes(),
-        );
-        output.extend_from_slice(
-            &self
-                .specification
-                .model
-                .sensing_radius()
-                .to_bits()
-                .to_be_bytes(),
-        );
-        output.extend_from_slice(&self.specification.modulus.to_be_bytes());
-        encode_usizes(&mut output, self.specification.fence.vertices())?;
-        encode_usizes(&mut output, &self.specification.failable_vertices)?;
-        put_usize(&mut output, self.specification.failure_budget)?;
-        encode_source(&mut output, &self.specification.source)?;
-        put_usize(&mut output, self.specification.states.len())?;
-        for state in &self.specification.states {
-            output.extend_from_slice(&state.scenario.to_be_bytes());
-            output.extend_from_slice(&state.step.to_be_bytes());
-            encode_usizes(&mut output, &state.base_vertices)?;
-            encode_edges(&mut output, &state.possible_edges)?;
-        }
-        put_usize(&mut output, self.actions.len())?;
-        for action in &self.actions {
-            put_usize(&mut output, action.vertex)?;
-            output.extend_from_slice(&action.cost.to_be_bytes());
-            encode_usizes(&mut output, &action.states)?;
-        }
-        put_usize(&mut output, self.max_activations)?;
-        put_usize(&mut output, self.oracle_limit)?;
-        put_usize(&mut output, self.node_limit)?;
-        output.push(self.status.code());
-        encode_usizes(&mut output, &self.selected)?;
-        encode_optional_u64(&mut output, self.lower_bound_cost);
-        encode_optional_u64(&mut output, self.upper_bound_cost);
-        put_usize(&mut output, self.producer_oracle_calls)?;
-        put_usize(&mut output, self.producer_search_nodes)?;
-        put_usize(&mut output, self.producer_cache_hits)?;
-        put_usize(&mut output, self.root_blockers.len())?;
-        for blocker in &self.root_blockers {
-            encode_usizes(&mut output, blocker)?;
-        }
-        encode_evaluation(&mut output, self.before)?;
-        encode_evaluation(&mut output, self.after)?;
-        match &self.proof {
-            Some(proof) => {
-                output.push(1);
-                encode_proof(&mut output, proof)?;
-            }
-            None => output.push(0),
-        }
-        put_usize(&mut output, self.proof_work.nodes)?;
-        put_usize(&mut output, self.proof_work.checks)?;
-        put_usize(&mut output, self.proof_work.terms)?;
+        encode_coverage_prefix(&mut output);
+        encode_coverage_specification(&mut output, &self.specification)?;
+        encode_coverage_actions(&mut output, &self.actions)?;
+        encode_coverage_search(&mut output, self)?;
+        encode_coverage_proof_data(&mut output, self)?;
         Ok(output)
     }
 
     fn compute_digest(&self) -> Result<[u8; 32]> {
         let payload = self.encode_payload()?;
         Ok(Sha256::digest(payload).into())
+    }
+}
+
+fn validate_coverage_artifact_inputs(
+    artifact: &CoverageSynthesisArtifact,
+    limits: CoverageSynthesisLimits,
+) -> Result<()> {
+    artifact.specification.validate(limits.coverage)?;
+    validate_source(&artifact.specification, limits)?;
+    validate_actions(&artifact.specification, &artifact.actions, limits.coverage)?;
+    validate_coverage_result_shape(artifact)
+}
+
+fn checked_coverage_evaluations(
+    artifact: &CoverageSynthesisArtifact,
+    limits: CoverageLimits,
+) -> Result<(CoveragePlanEvaluation, CoveragePlanEvaluation)> {
+    let before = evaluate_coverage_plan(&artifact.specification, &artifact.actions, &[], limits)?;
+    let after = evaluate_coverage_plan(
+        &artifact.specification,
+        &artifact.actions,
+        &artifact.selected,
+        limits,
+    )?;
+    verify_evaluation_claims(artifact, &before, &after)?;
+    Ok((before, after))
+}
+
+fn validate_coverage_artifact_size(bytes: &[u8], limits: CoverageSynthesisLimits) -> Result<()> {
+    if bytes.len() > limits.max_bytes || bytes.len() < 32 {
+        Err(Error::InvalidInput(
+            "coverage artifact exceeds its byte limit or is truncated".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_coverage_prefix(reader: &mut Reader<'_>) -> Result<()> {
+    let magic = reader.take(8)?;
+    let version = reader.u16()?;
+    let codec = reader.u8()?;
+    if magic != MAGIC || version != VERSION || codec != F64_BITS_CODEC {
+        Err(Error::InvalidInput("unsupported coverage artifact".into()))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_coverage_specification(
+    reader: &mut Reader<'_>,
+    limits: CoverageSynthesisLimits,
+) -> Result<CoverageSpecification> {
+    let header = decode_coverage_header(reader, limits)?;
+    let states = decode_coverage_states(reader, header.vertex_count, limits)?;
+    Ok(CoverageSpecification {
+        vertex_count: header.vertex_count,
+        model: header.model,
+        modulus: header.modulus,
+        fence: header.fence,
+        failable_vertices: header.failable_vertices,
+        failure_budget: header.failure_budget,
+        source: header.source,
+        states,
+    })
+}
+
+fn decode_coverage_header(
+    reader: &mut Reader<'_>,
+    limits: CoverageSynthesisLimits,
+) -> Result<CoverageHeader> {
+    let vertex_count = reader.bounded_usize("vertex count", limits.coverage.max_vertices)?;
+    Ok(CoverageHeader {
+        vertex_count,
+        model: decode_coverage_model(reader)?,
+        modulus: reader.u32()?,
+        fence: CoverageFence::new(decode_usizes(reader, limits.coverage.max_vertices)?)?,
+        failable_vertices: decode_indices(reader, vertex_count, limits.coverage.max_vertices)?,
+        failure_budget: reader.usize()?,
+        source: decode_source(reader, limits)?,
+    })
+}
+
+fn decode_coverage_model(reader: &mut Reader<'_>) -> Result<PlanarCoverageModel> {
+    let broadcast = f64::from_bits(reader.u64()?);
+    let sensing = f64::from_bits(reader.u64()?);
+    PlanarCoverageModel::new(broadcast, sensing)
+}
+
+fn decode_coverage_states(
+    reader: &mut Reader<'_>,
+    vertex_count: usize,
+    limits: CoverageSynthesisLimits,
+) -> Result<Vec<CoverageState>> {
+    let count = reader.bounded_usize("state count", limits.coverage.max_states)?;
+    let mut states = Vec::with_capacity(count);
+    for _ in 0..count {
+        states.push(decode_coverage_state(reader, vertex_count, limits)?);
+    }
+    Ok(states)
+}
+
+fn decode_coverage_state(
+    reader: &mut Reader<'_>,
+    vertex_count: usize,
+    limits: CoverageSynthesisLimits,
+) -> Result<CoverageState> {
+    Ok(CoverageState {
+        scenario: reader.u64()?,
+        step: reader.u64()?,
+        base_vertices: decode_indices(reader, vertex_count, limits.coverage.max_vertices)?,
+        possible_edges: decode_edges(reader, vertex_count, limits.coverage.max_edges)?,
+    })
+}
+
+fn decode_coverage_actions(
+    reader: &mut Reader<'_>,
+    state_count: usize,
+    limits: CoverageSynthesisLimits,
+) -> Result<Vec<CoverageAction>> {
+    let count = reader.bounded_usize("action count", limits.coverage.max_actions)?;
+    let mut actions = Vec::with_capacity(count);
+    for _ in 0..count {
+        actions.push(decode_coverage_action(reader, state_count)?);
+    }
+    Ok(actions)
+}
+
+fn decode_coverage_action(reader: &mut Reader<'_>, state_count: usize) -> Result<CoverageAction> {
+    Ok(CoverageAction {
+        vertex: reader.usize()?,
+        cost: reader.u64()?,
+        states: decode_indices(reader, state_count, state_count)?,
+    })
+}
+
+fn decode_coverage_search(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+) -> Result<DecodedCoverageSearch> {
+    let max_activations = reader.usize()?;
+    let limits = decode_coverage_work_limits(reader)?;
+    let selection = decode_coverage_selection(reader, action_count)?;
+    let work = decode_coverage_producer_work(reader)?;
+    Ok(DecodedCoverageSearch {
+        max_activations,
+        oracle_limit: limits.oracle,
+        node_limit: limits.nodes,
+        status: selection.status,
+        selected: selection.selected,
+        lower_bound_cost: selection.lower_bound_cost,
+        upper_bound_cost: selection.upper_bound_cost,
+        producer_oracle_calls: work.oracle_calls,
+        producer_search_nodes: work.search_nodes,
+        producer_cache_hits: work.cache_hits,
+    })
+}
+
+fn decode_coverage_work_limits(reader: &mut Reader<'_>) -> Result<CoverageWorkLimits> {
+    Ok(CoverageWorkLimits {
+        oracle: reader.usize()?,
+        nodes: reader.usize()?,
+    })
+}
+
+fn decode_coverage_selection(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+) -> Result<CoverageSelectionData> {
+    Ok(CoverageSelectionData {
+        status: CoverageSynthesisStatus::from_code(reader.u8()?)?,
+        selected: decode_indices(reader, action_count, action_count)?,
+        lower_bound_cost: reader.optional_u64()?,
+        upper_bound_cost: reader.optional_u64()?,
+    })
+}
+
+fn decode_coverage_producer_work(reader: &mut Reader<'_>) -> Result<CoverageProducerWork> {
+    Ok(CoverageProducerWork {
+        oracle_calls: reader.usize()?,
+        search_nodes: reader.usize()?,
+        cache_hits: reader.usize()?,
+    })
+}
+
+fn decode_coverage_proof_data(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    limits: CoverageSynthesisLimits,
+) -> Result<DecodedCoverageProof> {
+    let mut decoded_work = ProofWork::default();
+    let root_blockers =
+        decode_coverage_root_blockers(reader, action_count, &mut decoded_work, limits)?;
+    let before = decode_evaluation(reader)?;
+    let after = decode_evaluation(reader)?;
+    let proof = decode_optional_coverage_proof(reader, action_count, &mut decoded_work, limits)?;
+    let work = decode_claimed_proof_work(reader)?;
+    if proof.is_some() && decoded_work.nodes != work.nodes {
+        return Err(Error::InvalidInput(
+            "coverage decoded proof node count differs from its claim".into(),
+        ));
+    }
+    Ok(DecodedCoverageProof {
+        root_blockers,
+        before,
+        after,
+        proof,
+        work,
+    })
+}
+
+fn decode_coverage_root_blockers(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    work: &mut ProofWork,
+    limits: CoverageSynthesisLimits,
+) -> Result<Vec<Vec<usize>>> {
+    let count = reader.bounded_usize("root blocker count", limits.max_proof_terms)?;
+    let mut blockers = Vec::with_capacity(count);
+    for _ in 0..count {
+        let blocker = decode_indices(reader, action_count, limits.max_proof_terms)?;
+        add_coverage_proof_terms(work, blocker.len(), limits)?;
+        blockers.push(blocker);
+    }
+    Ok(blockers)
+}
+
+fn decode_optional_coverage_proof(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    work: &mut ProofWork,
+    limits: CoverageSynthesisLimits,
+) -> Result<Option<ProofNode>> {
+    match reader.u8()? {
+        0 => Ok(None),
+        1 => decode_proof(reader, action_count, 0, work, limits).map(Some),
+        _ => Err(Error::InvalidInput(
+            "coverage proof-presence flag is invalid".into(),
+        )),
+    }
+}
+
+fn decode_claimed_proof_work(reader: &mut Reader<'_>) -> Result<ProofWork> {
+    Ok(ProofWork {
+        nodes: reader.usize()?,
+        checks: reader.usize()?,
+        terms: reader.usize()?,
+    })
+}
+
+fn decode_coverage_trailer(reader: &mut Reader<'_>) -> Result<[u8; 32]> {
+    let digest = reader.array32()?;
+    if reader.remaining() != 0 {
+        Err(Error::InvalidInput(
+            "trailing bytes follow the coverage artifact".into(),
+        ))
+    } else {
+        Ok(digest)
+    }
+}
+
+fn validate_decoded_coverage(
+    artifact: &CoverageSynthesisArtifact,
+    limits: CoverageSynthesisLimits,
+) -> Result<()> {
+    artifact.verify(limits)?;
+    if artifact.compute_digest()? != artifact.digest {
+        Err(Error::InvalidInput(
+            "coverage artifact digest differs from its content".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn encode_coverage_prefix(output: &mut Vec<u8>) {
+    output.extend_from_slice(MAGIC);
+    output.extend_from_slice(&VERSION.to_be_bytes());
+    output.push(F64_BITS_CODEC);
+}
+
+fn encode_coverage_specification(
+    output: &mut Vec<u8>,
+    specification: &CoverageSpecification,
+) -> Result<()> {
+    encode_coverage_header(output, specification)?;
+    put_usize(output, specification.states.len())?;
+    for state in &specification.states {
+        encode_coverage_state(output, state)?;
+    }
+    Ok(())
+}
+
+fn encode_coverage_header(
+    output: &mut Vec<u8>,
+    specification: &CoverageSpecification,
+) -> Result<()> {
+    put_usize(output, specification.vertex_count)?;
+    output.extend_from_slice(
+        &specification
+            .model
+            .broadcast_radius()
+            .to_bits()
+            .to_be_bytes(),
+    );
+    output.extend_from_slice(&specification.model.sensing_radius().to_bits().to_be_bytes());
+    output.extend_from_slice(&specification.modulus.to_be_bytes());
+    encode_usizes(output, specification.fence.vertices())?;
+    encode_usizes(output, &specification.failable_vertices)?;
+    put_usize(output, specification.failure_budget)?;
+    encode_source(output, &specification.source)
+}
+
+fn encode_coverage_state(output: &mut Vec<u8>, state: &CoverageState) -> Result<()> {
+    output.extend_from_slice(&state.scenario.to_be_bytes());
+    output.extend_from_slice(&state.step.to_be_bytes());
+    encode_usizes(output, &state.base_vertices)?;
+    encode_edges(output, &state.possible_edges)
+}
+
+fn encode_coverage_actions(output: &mut Vec<u8>, actions: &[CoverageAction]) -> Result<()> {
+    put_usize(output, actions.len())?;
+    for action in actions {
+        encode_coverage_action(output, action)?;
+    }
+    Ok(())
+}
+
+fn encode_coverage_action(output: &mut Vec<u8>, action: &CoverageAction) -> Result<()> {
+    put_usize(output, action.vertex)?;
+    output.extend_from_slice(&action.cost.to_be_bytes());
+    encode_usizes(output, &action.states)
+}
+
+fn encode_coverage_search(
+    output: &mut Vec<u8>,
+    artifact: &CoverageSynthesisArtifact,
+) -> Result<()> {
+    put_usize(output, artifact.max_activations)?;
+    put_usize(output, artifact.oracle_limit)?;
+    put_usize(output, artifact.node_limit)?;
+    output.push(artifact.status.code());
+    encode_usizes(output, &artifact.selected)?;
+    encode_optional_u64(output, artifact.lower_bound_cost);
+    encode_optional_u64(output, artifact.upper_bound_cost);
+    put_usize(output, artifact.producer_oracle_calls)?;
+    put_usize(output, artifact.producer_search_nodes)?;
+    put_usize(output, artifact.producer_cache_hits)
+}
+
+fn encode_coverage_proof_data(
+    output: &mut Vec<u8>,
+    artifact: &CoverageSynthesisArtifact,
+) -> Result<()> {
+    encode_coverage_root_blockers(output, &artifact.root_blockers)?;
+    encode_evaluation(output, artifact.before)?;
+    encode_evaluation(output, artifact.after)?;
+    encode_optional_coverage_proof(output, artifact.proof.as_ref())?;
+    put_usize(output, artifact.proof_work.nodes)?;
+    put_usize(output, artifact.proof_work.checks)?;
+    put_usize(output, artifact.proof_work.terms)
+}
+
+fn encode_coverage_root_blockers(output: &mut Vec<u8>, blockers: &[Vec<usize>]) -> Result<()> {
+    put_usize(output, blockers.len())?;
+    for blocker in blockers {
+        encode_usizes(output, blocker)?;
+    }
+    Ok(())
+}
+
+fn encode_optional_coverage_proof(output: &mut Vec<u8>, proof: Option<&ProofNode>) -> Result<()> {
+    match proof {
+        Some(proof) => {
+            output.push(1);
+            encode_proof(output, proof)
+        }
+        None => {
+            output.push(0);
+            Ok(())
+        }
+    }
+}
+
+fn validate_coverage_result_shape(artifact: &CoverageSynthesisArtifact) -> Result<()> {
+    let invalid_selection = artifact.selected.len()
+        > artifact.max_activations.min(artifact.actions.len())
+        || artifact
+            .selected
+            .iter()
+            .any(|index| *index >= artifact.actions.len())
+        || artifact.selected.windows(2).any(|pair| pair[0] >= pair[1]);
+    if artifact.oracle_limit == 0
+        || artifact.node_limit == 0
+        || artifact.producer_oracle_calls > artifact.oracle_limit
+        || artifact.producer_search_nodes > artifact.node_limit
+        || invalid_selection
+    {
+        Err(Error::InvalidInput(
+            "coverage synthesis result shape or producer work is invalid".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_evaluation_claims(
+    artifact: &CoverageSynthesisArtifact,
+    before: &CoveragePlanEvaluation,
+    after: &CoveragePlanEvaluation,
+) -> Result<()> {
+    if artifact.before != EvaluationClaim::from(before)
+        || artifact.after != EvaluationClaim::from(after)
+    {
+        Err(Error::InvalidInput(
+            "coverage synthesis evaluation claims differ from exact checks".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_coverage_root(
+    artifact: &CoverageSynthesisArtifact,
+    costs: &[u64],
+    limits: CoverageSynthesisLimits,
+) -> Result<()> {
+    let mut oracle = |selected: &[usize]| {
+        survives(
+            &artifact.specification,
+            &artifact.actions,
+            selected,
+            limits.coverage,
+        )
+    };
+    verify_root_blockers(
+        &artifact.root_blockers,
+        costs,
+        artifact.lower_bound_cost,
+        &mut oracle,
+    )
+}
+
+fn verify_coverage_status(
+    artifact: &CoverageSynthesisArtifact,
+    costs: &[u64],
+    selected_cost: u64,
+    after: &CoveragePlanEvaluation,
+    limits: CoverageSynthesisLimits,
+) -> Result<()> {
+    match artifact.status {
+        CoverageSynthesisStatus::Optimal => {
+            verify_optimal_coverage(artifact, costs, selected_cost, after, limits)
+        }
+        CoverageSynthesisStatus::Infeasible => {
+            verify_infeasible_coverage(artifact, costs, after, limits)
+        }
+        CoverageSynthesisStatus::SearchIncomplete => {
+            verify_incomplete_coverage(artifact, selected_cost, after)
+        }
+    }
+}
+
+fn verify_optimal_coverage(
+    artifact: &CoverageSynthesisArtifact,
+    costs: &[u64],
+    selected_cost: u64,
+    after: &CoveragePlanEvaluation,
+    limits: CoverageSynthesisLimits,
+) -> Result<()> {
+    if !after.criterion_holds
+        || artifact.lower_bound_cost != Some(selected_cost)
+        || artifact.upper_bound_cost != Some(selected_cost)
+    {
+        return Err(Error::InvalidInput(
+            "optimal coverage result has an invalid incumbent or bound".into(),
+        ));
+    }
+    verify_checked_coverage_proof(
+        artifact,
+        costs,
+        Some(selected_cost),
+        limits,
+        "optimal coverage result has no proof tree",
+    )
+}
+
+fn verify_infeasible_coverage(
+    artifact: &CoverageSynthesisArtifact,
+    costs: &[u64],
+    after: &CoveragePlanEvaluation,
+    limits: CoverageSynthesisLimits,
+) -> Result<()> {
+    if !artifact.selected.is_empty()
+        || artifact.lower_bound_cost.is_some()
+        || artifact.upper_bound_cost.is_some()
+        || after.criterion_holds
+    {
+        return Err(Error::InvalidInput(
+            "infeasible coverage result has an incumbent or finite bound".into(),
+        ));
+    }
+    verify_checked_coverage_proof(
+        artifact,
+        costs,
+        None,
+        limits,
+        "infeasible coverage result has no proof tree",
+    )
+}
+
+fn verify_incomplete_coverage(
+    artifact: &CoverageSynthesisArtifact,
+    selected_cost: u64,
+    after: &CoveragePlanEvaluation,
+) -> Result<()> {
+    let invalid_gap = artifact
+        .lower_bound_cost
+        .zip(artifact.upper_bound_cost)
+        .is_some_and(|(lower, upper)| lower > upper);
+    if artifact.proof.is_some()
+        || artifact.proof_work != ProofWork::default()
+        || artifact.upper_bound_cost.is_some() != after.criterion_holds
+        || artifact
+            .upper_bound_cost
+            .is_some_and(|cost| cost != selected_cost)
+        || invalid_gap
+    {
+        Err(Error::InvalidInput(
+            "incomplete coverage result has an invalid gap".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_checked_coverage_proof(
+    artifact: &CoverageSynthesisArtifact,
+    costs: &[u64],
+    cutoff: Option<u64>,
+    limits: CoverageSynthesisLimits,
+    missing_message: &str,
+) -> Result<()> {
+    let proof = artifact
+        .proof
+        .as_ref()
+        .ok_or_else(|| Error::InvalidInput(missing_message.into()))?;
+    let mut oracle = |selected: &[usize]| {
+        survives(
+            &artifact.specification,
+            &artifact.actions,
+            selected,
+            limits.coverage,
+        )
+    };
+    let work = verify_proof(
+        proof,
+        costs,
+        artifact.max_activations.min(artifact.actions.len()),
+        cutoff,
+        limits.proof(),
+        &mut oracle,
+    )?;
+    if work != artifact.proof_work {
+        Err(Error::InvalidInput(
+            "coverage proof work differs from the checked tree".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_coverage_proof_checks(artifact: &CoverageSynthesisArtifact) -> Result<()> {
+    let wrong = artifact
+        .proof
+        .as_ref()
+        .is_some_and(|proof| proof_topology_checks(proof) != artifact.proof_work.checks);
+    if wrong {
+        Err(Error::InvalidInput(
+            "coverage proof check count differs from its tree".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_build_inputs(
+    specification: &CoverageSpecification,
+    actions: &[CoverageAction],
+    limits: CoverageSynthesisLimits,
+) -> Result<()> {
+    specification.validate(limits.coverage)?;
+    validate_source(specification, limits)?;
+    validate_actions(specification, actions, limits.coverage)?;
+    if limits.max_oracle_calls == 0 || limits.max_search_nodes == 0 {
+        Err(Error::InvalidInput(
+            "coverage synthesis search limits must be positive".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn solve_coverage_search(
+    specification: &CoverageSpecification,
+    actions: &[CoverageAction],
+    costs: &[u64],
+    max_activations: usize,
+    limits: CoverageSynthesisLimits,
+) -> Result<CoverageSearchData> {
+    if specification.components(actions)?.len() > 1 {
+        let composition =
+            compose_coverage_frontiers(specification, actions, max_activations, limits)?;
+        Ok(composed_search_data(&composition))
+    } else {
+        let search = minimize_antitone(
+            costs,
+            max_activations,
+            SearchLimits {
+                oracle_calls: limits.max_oracle_calls,
+                search_nodes: limits.max_search_nodes,
+            },
+            |selected| survives(specification, actions, selected, limits.coverage),
+        )?;
+        Ok(monolithic_search_data(search))
+    }
+}
+
+fn composed_search_data(composition: &CoverageComposition) -> CoverageSearchData {
+    let (status, selected, lower_bound, upper_bound) = match composition.status() {
+        CoverageCompositionStatus::Optimal => (
+            CoverageSynthesisStatus::Optimal,
+            composition.selected().to_vec(),
+            composition.cost(),
+            composition.cost(),
+        ),
+        CoverageCompositionStatus::Infeasible => {
+            (CoverageSynthesisStatus::Infeasible, Vec::new(), None, None)
+        }
+        CoverageCompositionStatus::SearchIncomplete => (
+            CoverageSynthesisStatus::SearchIncomplete,
+            Vec::new(),
+            Some(0),
+            None,
+        ),
+    };
+    CoverageSearchData {
+        status,
+        selected,
+        lower_bound,
+        upper_bound,
+        oracle_calls: composition.oracle_calls(),
+        search_nodes: composition.search_nodes(),
+        cache_hits: composition.cache_hits(),
+        root_blockers: Vec::new(),
+    }
+}
+
+fn monolithic_search_data(search: SearchResult) -> CoverageSearchData {
+    CoverageSearchData {
+        status: coverage_status(search.status),
+        selected: search.selected,
+        lower_bound: search.lower_bound,
+        upper_bound: search.upper_bound,
+        oracle_calls: search.oracle_calls,
+        search_nodes: search.search_nodes,
+        cache_hits: search.cache_hits,
+        root_blockers: search.root_blockers,
+    }
+}
+
+fn coverage_status(status: SearchStatus) -> CoverageSynthesisStatus {
+    match status {
+        SearchStatus::Optimal => CoverageSynthesisStatus::Optimal,
+        SearchStatus::Infeasible => CoverageSynthesisStatus::Infeasible,
+        SearchStatus::Incomplete => CoverageSynthesisStatus::SearchIncomplete,
+    }
+}
+
+fn build_coverage_proof(
+    specification: &CoverageSpecification,
+    actions: &[CoverageAction],
+    costs: &[u64],
+    max_activations: usize,
+    search: &CoverageSearchData,
+    limits: CoverageSynthesisLimits,
+) -> Result<BuiltCoverageProof> {
+    if search.status == CoverageSynthesisStatus::SearchIncomplete {
+        return Ok(BuiltCoverageProof {
+            proof: None,
+            work: ProofWork::default(),
+        });
+    }
+    let cutoff = coverage_proof_cutoff(search.status, search.upper_bound)?;
+    let mut oracle =
+        |selected: &[usize]| survives(specification, actions, selected, limits.coverage);
+    let (proof, work) = build_proof(
+        costs,
+        max_activations.min(actions.len()),
+        cutoff,
+        limits.proof(),
+        &mut oracle,
+    )?;
+    Ok(BuiltCoverageProof {
+        proof: Some(proof),
+        work,
+    })
+}
+
+fn coverage_proof_cutoff(
+    status: CoverageSynthesisStatus,
+    upper_bound: Option<u64>,
+) -> Result<Option<u64>> {
+    match status {
+        CoverageSynthesisStatus::Optimal => upper_bound
+            .map(Some)
+            .ok_or_else(|| Error::InvalidInput("optimal coverage result has no cost".into())),
+        CoverageSynthesisStatus::Infeasible | CoverageSynthesisStatus::SearchIncomplete => Ok(None),
     }
 }
 
@@ -1357,23 +1779,9 @@ fn validate_actions(
     let fence: BTreeSet<_> = specification.fence.vertices().iter().copied().collect();
     let mut vertices = BTreeSet::new();
     if actions.len() > limits.max_actions
-        || actions.iter().any(|action| {
-            action.vertex >= specification.vertex_count
-                || action.cost == 0
-                || action.states.is_empty()
-                || action
-                    .states
-                    .iter()
-                    .any(|state| *state >= specification.states.len())
-                || fence.contains(&action.vertex)
-                || !vertices.insert(action.vertex)
-                || action.states.iter().any(|state| {
-                    specification.states[*state]
-                        .base_vertices
-                        .binary_search(&action.vertex)
-                        .is_ok()
-                })
-        })
+        || actions
+            .iter()
+            .any(|action| invalid_coverage_action(specification, action, &fence, &mut vertices))
     {
         return Err(Error::InvalidInput(
             "coverage actions exceed their limit or are not canonical activations".into(),
@@ -1384,6 +1792,33 @@ fn validate_actions(
             .ok_or_else(|| Error::InvalidInput("coverage action cost sum overflows".into()))
     })?;
     Ok(())
+}
+
+fn invalid_coverage_action(
+    specification: &CoverageSpecification,
+    action: &CoverageAction,
+    fence: &BTreeSet<usize>,
+    vertices: &mut BTreeSet<usize>,
+) -> bool {
+    let invalid_state = action
+        .states
+        .iter()
+        .any(|state| *state >= specification.states.len());
+    if action.vertex >= specification.vertex_count
+        || action.cost == 0
+        || action.states.is_empty()
+        || invalid_state
+        || fence.contains(&action.vertex)
+        || !vertices.insert(action.vertex)
+    {
+        return true;
+    }
+    action.states.iter().any(|state| {
+        specification.states[*state]
+            .base_vertices
+            .binary_search(&action.vertex)
+            .is_ok()
+    })
 }
 
 fn visit_combinations<F>(
@@ -1445,25 +1880,37 @@ fn union_sets(parent: &mut [usize], left: usize, right: usize) {
 fn encode_source(output: &mut Vec<u8>, source: &CoverageSource) -> Result<()> {
     match source {
         CoverageSource::Finite => output.push(0),
-        CoverageSource::Affine {
-            scenario,
-            edges,
-            start,
-            end,
-        } => {
-            output.push(1);
-            output.extend_from_slice(&scenario.to_be_bytes());
-            output.extend_from_slice(&start.to_bits().to_be_bytes());
-            output.extend_from_slice(&end.to_bits().to_be_bytes());
-            put_usize(output, edges.len())?;
-            for edge in edges {
-                put_usize(output, edge.u)?;
-                put_usize(output, edge.v)?;
-                output.extend_from_slice(&edge.intercept.to_bits().to_be_bytes());
-                output.extend_from_slice(&edge.velocity.to_bits().to_be_bytes());
-            }
-        }
+        CoverageSource::Affine { .. } => encode_affine_source(output, source)?,
     }
+    Ok(())
+}
+
+fn encode_affine_source(output: &mut Vec<u8>, source: &CoverageSource) -> Result<()> {
+    let CoverageSource::Affine {
+        scenario,
+        edges,
+        start,
+        end,
+    } = source
+    else {
+        return Ok(());
+    };
+    output.push(1);
+    output.extend_from_slice(&scenario.to_be_bytes());
+    output.extend_from_slice(&start.to_bits().to_be_bytes());
+    output.extend_from_slice(&end.to_bits().to_be_bytes());
+    put_usize(output, edges.len())?;
+    for edge in edges {
+        encode_affine_edge(output, edge)?;
+    }
+    Ok(())
+}
+
+fn encode_affine_edge(output: &mut Vec<u8>, edge: &KineticEdge) -> Result<()> {
+    put_usize(output, edge.u)?;
+    put_usize(output, edge.v)?;
+    output.extend_from_slice(&edge.intercept.to_bits().to_be_bytes());
+    output.extend_from_slice(&edge.velocity.to_bits().to_be_bytes());
     Ok(())
 }
 
@@ -1473,36 +1920,49 @@ fn decode_source(
 ) -> Result<CoverageSource> {
     match reader.u8()? {
         0 => Ok(CoverageSource::Finite),
-        1 => {
-            let scenario = reader.u64()?;
-            let start = f64::from_bits(reader.u64()?);
-            let end = f64::from_bits(reader.u64()?);
-            let count = reader.bounded_usize("affine edge count", limits.kinetic.max_edges)?;
-            if count > reader.remaining() / 32 {
-                return Err(Error::InvalidInput(
-                    "coverage affine edges exceed the remaining bytes".into(),
-                ));
-            }
-            let mut edges = Vec::with_capacity(count);
-            for _ in 0..count {
-                edges.push(KineticEdge {
-                    u: reader.usize()?,
-                    v: reader.usize()?,
-                    intercept: f64::from_bits(reader.u64()?),
-                    velocity: f64::from_bits(reader.u64()?),
-                });
-            }
-            Ok(CoverageSource::Affine {
-                scenario,
-                edges,
-                start,
-                end,
-            })
-        }
+        1 => decode_affine_source(reader, limits),
         _ => Err(Error::InvalidInput(
             "coverage source kind is invalid".into(),
         )),
     }
+}
+
+fn decode_affine_source(
+    reader: &mut Reader<'_>,
+    limits: CoverageSynthesisLimits,
+) -> Result<CoverageSource> {
+    let scenario = reader.u64()?;
+    let start = f64::from_bits(reader.u64()?);
+    let end = f64::from_bits(reader.u64()?);
+    let edges = decode_affine_edges(reader, limits)?;
+    Ok(CoverageSource::Affine {
+        scenario,
+        edges,
+        start,
+        end,
+    })
+}
+
+fn decode_affine_edges(
+    reader: &mut Reader<'_>,
+    limits: CoverageSynthesisLimits,
+) -> Result<Vec<KineticEdge>> {
+    let count = reader.bounded_usize("affine edge count", limits.kinetic.max_edges)?;
+    if count > reader.remaining() / 32 {
+        return Err(Error::InvalidInput(
+            "coverage affine edges exceed the remaining bytes".into(),
+        ));
+    }
+    (0..count).map(|_| decode_affine_edge(reader)).collect()
+}
+
+fn decode_affine_edge(reader: &mut Reader<'_>) -> Result<KineticEdge> {
+    Ok(KineticEdge {
+        u: reader.usize()?,
+        v: reader.usize()?,
+        intercept: f64::from_bits(reader.u64()?),
+        velocity: f64::from_bits(reader.u64()?),
+    })
 }
 
 fn encode_evaluation(output: &mut Vec<u8>, claim: EvaluationClaim) -> Result<()> {
@@ -1534,25 +1994,31 @@ fn encode_proof(output: &mut Vec<u8>, proof: &ProofNode) -> Result<()> {
         ProofNode::Cost => output.push(1),
         ProofNode::SurvivingMaximum => output.push(2),
         ProofNode::SurvivingSelectionLimit => output.push(3),
-        ProofNode::BlockerBound { kind, blockers } => {
-            output.push(4);
-            output.push(match kind {
-                BoundKind::Cost => 1,
-                BoundKind::Selections => 2,
-            });
-            put_usize(output, blockers.len())?;
-            for blocker in blockers {
-                encode_usizes(output, blocker)?;
-            }
-        }
-        ProofNode::Branch { blocker, children } => {
-            output.push(5);
-            encode_usizes(output, blocker)?;
-            put_usize(output, children.len())?;
-            for child in children {
-                encode_proof(output, child)?;
-            }
-        }
+        ProofNode::BlockerBound { kind, blockers } => encode_bound_node(output, *kind, blockers)?,
+        ProofNode::Branch { blocker, children } => encode_branch_node(output, blocker, children)?,
+    }
+    Ok(())
+}
+
+fn encode_bound_node(output: &mut Vec<u8>, kind: BoundKind, blockers: &[Vec<usize>]) -> Result<()> {
+    output.push(4);
+    output.push(match kind {
+        BoundKind::Cost => 1,
+        BoundKind::Selections => 2,
+    });
+    encode_coverage_root_blockers(output, blockers)
+}
+
+fn encode_branch_node(
+    output: &mut Vec<u8>,
+    blocker: &[usize],
+    children: &[ProofNode],
+) -> Result<()> {
+    output.push(5);
+    encode_usizes(output, blocker)?;
+    put_usize(output, children.len())?;
+    for child in children {
+        encode_proof(output, child)?;
     }
     Ok(())
 }
@@ -1565,6 +2031,24 @@ fn decode_proof(
     work: &mut ProofWork,
     limits: CoverageSynthesisLimits,
 ) -> Result<ProofNode> {
+    record_decoded_proof_node(work, depth, limits)?;
+    match reader.u8()? {
+        1 => Ok(ProofNode::Cost),
+        2 => Ok(ProofNode::SurvivingMaximum),
+        3 => Ok(ProofNode::SurvivingSelectionLimit),
+        4 => decode_bound_node(reader, action_count, work, limits),
+        5 => decode_branch_node(reader, action_count, depth, work, limits),
+        _ => Err(Error::InvalidInput(
+            "coverage proof node kind is invalid".into(),
+        )),
+    }
+}
+
+fn record_decoded_proof_node(
+    work: &mut ProofWork,
+    depth: usize,
+    limits: CoverageSynthesisLimits,
+) -> Result<()> {
     work.nodes = work
         .nodes
         .checked_add(1)
@@ -1572,66 +2056,101 @@ fn decode_proof(
     if work.nodes > limits.max_proof_nodes.min(FORMAT_MAX_PROOF_NODES)
         || depth > limits.max_proof_depth
     {
-        return Err(Error::InvalidInput(
+        Err(Error::InvalidInput(
             "coverage proof exceeds its node or depth limit".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_bound_node(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    work: &mut ProofWork,
+    limits: CoverageSynthesisLimits,
+) -> Result<ProofNode> {
+    Ok(ProofNode::BlockerBound {
+        kind: decode_bound_kind(reader)?,
+        blockers: decode_proof_blockers(reader, action_count, work, limits)?,
+    })
+}
+
+fn decode_bound_kind(reader: &mut Reader<'_>) -> Result<BoundKind> {
+    match reader.u8()? {
+        1 => Ok(BoundKind::Cost),
+        2 => Ok(BoundKind::Selections),
+        _ => Err(Error::InvalidInput(
+            "coverage proof bound kind is invalid".into(),
+        )),
+    }
+}
+
+fn decode_proof_blockers(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    work: &mut ProofWork,
+    limits: CoverageSynthesisLimits,
+) -> Result<Vec<Vec<usize>>> {
+    let count = reader.bounded_usize("proof blocker count", limits.max_proof_terms)?;
+    let mut blockers = Vec::with_capacity(count);
+    for _ in 0..count {
+        let blocker = decode_indices(reader, action_count, limits.max_proof_terms)?;
+        add_coverage_proof_terms(work, blocker.len(), limits)?;
+        blockers.push(blocker);
+    }
+    Ok(blockers)
+}
+
+fn decode_branch_node(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    depth: usize,
+    work: &mut ProofWork,
+    limits: CoverageSynthesisLimits,
+) -> Result<ProofNode> {
+    let blocker = decode_indices(reader, action_count, limits.max_proof_terms)?;
+    add_coverage_proof_terms(work, blocker.len(), limits)?;
+    let count = reader.bounded_usize("proof child count", action_count)?;
+    if count != blocker.len() {
+        return Err(Error::InvalidInput(
+            "coverage branch child count differs from its blocker".into(),
         ));
     }
-    match reader.u8()? {
-        1 => Ok(ProofNode::Cost),
-        2 => Ok(ProofNode::SurvivingMaximum),
-        3 => Ok(ProofNode::SurvivingSelectionLimit),
-        4 => {
-            let kind = match reader.u8()? {
-                1 => BoundKind::Cost,
-                2 => BoundKind::Selections,
-                _ => {
-                    return Err(Error::InvalidInput(
-                        "coverage proof bound kind is invalid".into(),
-                    ));
-                }
-            };
-            let count = reader.bounded_usize("proof blocker count", limits.max_proof_terms)?;
-            let mut blockers = Vec::with_capacity(count);
-            for _ in 0..count {
-                let blocker = decode_indices(reader, action_count, limits.max_proof_terms)?;
-                work.terms = work.terms.checked_add(blocker.len()).ok_or_else(|| {
-                    Error::InvalidInput("coverage proof term count overflows".into())
-                })?;
-                if work.terms > limits.max_proof_terms.min(FORMAT_MAX_PROOF_TERMS) {
-                    return Err(Error::InvalidInput(
-                        "coverage proof terms exceed their limit".into(),
-                    ));
-                }
-                blockers.push(blocker);
-            }
-            Ok(ProofNode::BlockerBound { kind, blockers })
-        }
-        5 => {
-            let blocker = decode_indices(reader, action_count, limits.max_proof_terms)?;
-            work.terms = work
-                .terms
-                .checked_add(blocker.len())
-                .ok_or_else(|| Error::InvalidInput("coverage proof term count overflows".into()))?;
-            if work.terms > limits.max_proof_terms.min(FORMAT_MAX_PROOF_TERMS) {
-                return Err(Error::InvalidInput(
-                    "coverage proof terms exceed their limit".into(),
-                ));
-            }
-            let child_count = reader.bounded_usize("proof child count", action_count)?;
-            if child_count != blocker.len() {
-                return Err(Error::InvalidInput(
-                    "coverage branch child count differs from its blocker".into(),
-                ));
-            }
-            let mut children = Vec::with_capacity(child_count);
-            for _ in 0..child_count {
-                children.push(decode_proof(reader, action_count, depth + 1, work, limits)?);
-            }
-            Ok(ProofNode::Branch { blocker, children })
-        }
-        _ => Err(Error::InvalidInput(
-            "coverage proof node kind is invalid".into(),
-        )),
+    let children = decode_proof_children(reader, action_count, count, depth + 1, work, limits)?;
+    Ok(ProofNode::Branch { blocker, children })
+}
+
+fn decode_proof_children(
+    reader: &mut Reader<'_>,
+    action_count: usize,
+    count: usize,
+    depth: usize,
+    work: &mut ProofWork,
+    limits: CoverageSynthesisLimits,
+) -> Result<Vec<ProofNode>> {
+    let mut children = Vec::with_capacity(count);
+    for _ in 0..count {
+        children.push(decode_proof(reader, action_count, depth, work, limits)?);
+    }
+    Ok(children)
+}
+
+fn add_coverage_proof_terms(
+    work: &mut ProofWork,
+    count: usize,
+    limits: CoverageSynthesisLimits,
+) -> Result<()> {
+    work.terms = work
+        .terms
+        .checked_add(count)
+        .ok_or_else(|| Error::InvalidInput("coverage proof term count overflows".into()))?;
+    if work.terms > limits.max_proof_terms.min(FORMAT_MAX_PROOF_TERMS) {
+        Err(Error::InvalidInput(
+            "coverage proof terms exceed their limit".into(),
+        ))
+    } else {
+        Ok(())
     }
 }
 
