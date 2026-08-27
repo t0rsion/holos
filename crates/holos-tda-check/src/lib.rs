@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 mod cohomology;
 mod cohomology_intervention;
 mod coverage;
+mod coverage_geometry;
 mod distributed;
 mod explicit;
 mod index;
@@ -29,6 +30,9 @@ pub use cohomology_intervention::{
 };
 pub use coverage::{
     VerifiedCoverage, VerifiedCoverageSource, VerifiedCoverageStatus, is_coverage, verify_coverage,
+};
+pub use coverage_geometry::{
+    VerifiedGeometryBoundCoverage, is_geometry_bound_coverage, verify_geometry_bound_coverage,
 };
 pub use distributed::{
     VerifiedDistributedInterface, is_distributed_interface, verify_distributed_interface,

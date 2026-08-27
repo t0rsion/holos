@@ -387,6 +387,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decoded.geometry().coordinates().len(), 1);
+        let independently_checked = holos_tda_check::verify_geometry_bound_coverage(
+            &bytes,
+            holos_tda_check::ProofLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(independently_checked.vertices, 5);
+        assert_eq!(independently_checked.pair_checks, 10);
 
         let mut changed = bytes;
         changed[20] ^= 1;

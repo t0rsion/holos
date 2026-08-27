@@ -97,6 +97,41 @@ pub fn verify_coverage(bytes: &[u8], limits: ProofLimits) -> Result<VerifiedCove
     Ok(coverage_summary(&decoded, checked))
 }
 
+pub(crate) fn verify_coverage_with_geometry_claim(
+    bytes: &[u8],
+    limits: ProofLimits,
+) -> Result<(VerifiedCoverage, CoverageGeometryClaim), ProofError> {
+    let decoded = decode_coverage(bytes, limits)?;
+    let checked = verify_claim(&decoded, limits)?;
+    if !matches!(decoded.claim.source, Source::Finite) {
+        return Err(ProofError::new(
+            "geometry binding accepts finite coverage states only",
+        ));
+    }
+    let summary = coverage_summary(&decoded, checked);
+    let claim = CoverageGeometryClaim {
+        vertex_count: decoded.claim.vertex_count,
+        broadcast_radius: decoded.claim.broadcast_radius,
+        sensing_radius: decoded.claim.sensing_radius,
+        fence: decoded.claim.fence.clone(),
+        state_edges: decoded
+            .claim
+            .states
+            .iter()
+            .map(|state| state.edges.iter().map(|edge| (edge.u, edge.v)).collect())
+            .collect(),
+    };
+    Ok((summary, claim))
+}
+
+pub(crate) struct CoverageGeometryClaim {
+    pub(crate) vertex_count: usize,
+    pub(crate) broadcast_radius: f64,
+    pub(crate) sensing_radius: f64,
+    pub(crate) fence: Vec<usize>,
+    pub(crate) state_edges: Vec<Vec<(usize, usize)>>,
+}
+
 struct DecodedCoverage {
     claim: Claim,
     producer_oracle_calls: usize,
@@ -109,6 +144,7 @@ struct DecodedCoverage {
 struct PhysicalHeader {
     vertex_count: usize,
     broadcast_radius: f64,
+    sensing_radius: f64,
     modulus: u32,
     fence: Vec<usize>,
 }
@@ -178,6 +214,7 @@ fn decode_coverage(bytes: &[u8], limits: ProofLimits) -> Result<DecodedCoverage,
     let claim = Claim {
         vertex_count: header.physical.vertex_count,
         broadcast_radius: header.physical.broadcast_radius,
+        sensing_radius: header.physical.sensing_radius,
         modulus: header.physical.modulus,
         fence: header.physical.fence,
         failable: header.failable,
@@ -267,6 +304,7 @@ fn decode_physical_header(
     Ok(PhysicalHeader {
         vertex_count,
         broadcast_radius,
+        sensing_radius,
         modulus,
         fence,
     })
@@ -779,6 +817,7 @@ enum Source {
 struct Claim {
     vertex_count: usize,
     broadcast_radius: f64,
+    sensing_radius: f64,
     modulus: u32,
     fence: Vec<usize>,
     failable: Vec<usize>,

@@ -8,10 +8,10 @@ use std::process::ExitCode;
 use holos_tda_check::{
     IndexProofState, ProofBundle, ProofLimits, VerifiedCoverageSource, VerifiedSynthesisSource,
     is_cohomology_intervention, is_coverage, is_distributed_interface, is_explicit_persistence,
-    is_index_snapshot, is_kinetic_zigzag, is_relative_interface, is_synthesis,
-    verify_cohomology_intervention, verify_coverage, verify_distributed_interface_with,
-    verify_explicit_persistence, verify_kinetic_zigzag, verify_relative_interface,
-    verify_synthesis,
+    is_geometry_bound_coverage, is_index_snapshot, is_kinetic_zigzag, is_relative_interface,
+    is_synthesis, verify_cohomology_intervention, verify_coverage,
+    verify_distributed_interface_with, verify_explicit_persistence, verify_geometry_bound_coverage,
+    verify_kinetic_zigzag, verify_relative_interface, verify_synthesis,
 };
 use sha2::Digest;
 
@@ -31,6 +31,7 @@ fn run() -> Result<(), String> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ArtifactKind {
+    GeometryBoundCoverage,
     Coverage,
     Synthesis,
     KineticZigzag,
@@ -52,8 +53,12 @@ fn artifact_kind(bytes: &[u8]) -> ArtifactKind {
 type ArtifactProbe = fn(&[u8]) -> bool;
 type ArtifactRunner = fn(&str, &[u8], &[std::ffi::OsString]) -> Result<(), String>;
 
-fn artifact_probes() -> [(ArtifactProbe, ArtifactKind); 8] {
+fn artifact_probes() -> [(ArtifactProbe, ArtifactKind); 9] {
     [
+        (
+            is_geometry_bound_coverage,
+            ArtifactKind::GeometryBoundCoverage,
+        ),
         (is_coverage, ArtifactKind::Coverage),
         (is_synthesis, ArtifactKind::Synthesis),
         (is_kinetic_zigzag, ArtifactKind::KineticZigzag),
@@ -78,8 +83,12 @@ fn run_artifact(
     runner(program, bytes, rest)
 }
 
-fn artifact_runners() -> [(ArtifactKind, ArtifactRunner); 9] {
+fn artifact_runners() -> [(ArtifactKind, ArtifactRunner); 10] {
     [
+        (
+            ArtifactKind::GeometryBoundCoverage,
+            run_geometry_bound_coverage,
+        ),
         (ArtifactKind::Coverage, run_coverage),
         (ArtifactKind::Synthesis, run_synthesis),
         (ArtifactKind::KineticZigzag, run_kinetic_zigzag),
@@ -90,6 +99,31 @@ fn artifact_runners() -> [(ArtifactKind, ArtifactRunner); 9] {
         (ArtifactKind::Index, run_index_adapter),
         (ArtifactKind::Trajectory, run_trajectory),
     ]
+}
+
+fn run_geometry_bound_coverage(
+    program: &str,
+    bytes: &[u8],
+    rest: &[std::ffi::OsString],
+) -> Result<(), String> {
+    require_single_artifact(
+        rest,
+        format!("usage for geometry-bound coverage: {program} ARTIFACT"),
+    )?;
+    let checked = verify_geometry_bound_coverage(bytes, ProofLimits::default())
+        .map_err(|error| error.to_string())?;
+    println!(
+        "verified planar coverage over Z/{} across {} states and {} sensors with {} exact pair checks, {:?} status, {} selected actions, and cost bounds {:?} to {:?}",
+        checked.coverage.modulus,
+        checked.states,
+        checked.vertices,
+        checked.pair_checks,
+        checked.coverage.status,
+        checked.coverage.selected,
+        checked.coverage.lower_bound_cost,
+        checked.coverage.upper_bound_cost,
+    );
+    Ok(())
 }
 
 fn run_distributed_adapter(
