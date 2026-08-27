@@ -17,6 +17,7 @@ mod cohomology;
 mod cohomology_intervention;
 mod coverage;
 mod distributed;
+mod explicit;
 mod index;
 mod kinetic_zigzag;
 mod relative;
@@ -32,6 +33,9 @@ pub use coverage::{
 pub use distributed::{
     VerifiedDistributedInterface, is_distributed_interface, verify_distributed_interface,
     verify_distributed_interface_with,
+};
+pub use explicit::{
+    VerifiedExplicitPersistence, is_explicit_persistence, verify_explicit_persistence,
 };
 pub use index::{IndexProofState, VerifiedIndexDelta, VerifiedIndexSnapshot, is_index_snapshot};
 pub use kinetic_zigzag::{VerifiedKineticZigzag, is_kinetic_zigzag, verify_kinetic_zigzag};

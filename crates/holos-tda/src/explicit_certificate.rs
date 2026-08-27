@@ -745,6 +745,14 @@ mod tests {
         let decoded =
             ExplicitReductionCertificate::decode(&bytes, CertificateLimits::default()).unwrap();
         assert!(diagrams_equal(certificate.diagram(), decoded.diagram()));
+        let checked = holos_tda_check::verify_explicit_persistence(
+            &bytes,
+            holos_tda_check::ProofLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(checked.max_homology_dimension, 1);
+        assert_eq!(checked.modulus, 2);
+        assert_eq!(checked.bars.len(), certificate.diagram().bars.len());
         bytes[20] ^= 1;
         assert!(
             ExplicitReductionCertificate::decode(&bytes, CertificateLimits::default()).is_err()

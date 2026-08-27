@@ -7,10 +7,11 @@ use std::process::ExitCode;
 
 use holos_tda_check::{
     IndexProofState, ProofBundle, ProofLimits, VerifiedCoverageSource, VerifiedSynthesisSource,
-    is_cohomology_intervention, is_coverage, is_distributed_interface, is_index_snapshot,
-    is_kinetic_zigzag, is_relative_interface, is_synthesis, verify_cohomology_intervention,
-    verify_coverage, verify_distributed_interface_with, verify_kinetic_zigzag,
-    verify_relative_interface, verify_synthesis,
+    is_cohomology_intervention, is_coverage, is_distributed_interface, is_explicit_persistence,
+    is_index_snapshot, is_kinetic_zigzag, is_relative_interface, is_synthesis,
+    verify_cohomology_intervention, verify_coverage, verify_distributed_interface_with,
+    verify_explicit_persistence, verify_kinetic_zigzag, verify_relative_interface,
+    verify_synthesis,
 };
 use sha2::Digest;
 
@@ -25,47 +26,86 @@ fn run() -> Result<(), String> {
     };
     let bytes = fs::read(&path).map_err(|error| format!("read {:?}: {error}", path))?;
     let rest = arguments.collect::<Vec<_>>();
-    match artifact_kind(&bytes) {
-        ArtifactKind::Coverage => run_coverage(&program, &bytes, &rest),
-        ArtifactKind::Synthesis => run_synthesis(&program, &bytes, &rest),
-        ArtifactKind::KineticZigzag => run_kinetic_zigzag(&program, &bytes, &rest),
-        ArtifactKind::Intervention => run_intervention(&program, &bytes, &rest),
-        ArtifactKind::Distributed => run_distributed(&bytes, &rest),
-        ArtifactKind::Relative => run_relative(&program, &bytes, &rest),
-        ArtifactKind::Index => run_index(&bytes, &rest),
-        ArtifactKind::Trajectory => run_trajectory(&program, &bytes, &rest),
-    }
+    run_artifact(artifact_kind(&bytes), &program, &bytes, &rest)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ArtifactKind {
     Coverage,
     Synthesis,
     KineticZigzag,
     Intervention,
     Distributed,
+    Explicit,
     Relative,
     Index,
     Trajectory,
 }
 
 fn artifact_kind(bytes: &[u8]) -> ArtifactKind {
-    if is_coverage(bytes) {
-        ArtifactKind::Coverage
-    } else if is_synthesis(bytes) {
-        ArtifactKind::Synthesis
-    } else if is_kinetic_zigzag(bytes) {
-        ArtifactKind::KineticZigzag
-    } else if is_cohomology_intervention(bytes) {
-        ArtifactKind::Intervention
-    } else if is_distributed_interface(bytes) {
-        ArtifactKind::Distributed
-    } else if is_relative_interface(bytes) {
-        ArtifactKind::Relative
-    } else if is_index_snapshot(bytes) {
-        ArtifactKind::Index
-    } else {
-        ArtifactKind::Trajectory
-    }
+    artifact_probes()
+        .iter()
+        .find_map(|(probe, kind)| probe(bytes).then_some(*kind))
+        .unwrap_or(ArtifactKind::Trajectory)
+}
+
+type ArtifactProbe = fn(&[u8]) -> bool;
+type ArtifactRunner = fn(&str, &[u8], &[std::ffi::OsString]) -> Result<(), String>;
+
+fn artifact_probes() -> [(ArtifactProbe, ArtifactKind); 8] {
+    [
+        (is_coverage, ArtifactKind::Coverage),
+        (is_synthesis, ArtifactKind::Synthesis),
+        (is_kinetic_zigzag, ArtifactKind::KineticZigzag),
+        (is_cohomology_intervention, ArtifactKind::Intervention),
+        (is_distributed_interface, ArtifactKind::Distributed),
+        (is_explicit_persistence, ArtifactKind::Explicit),
+        (is_relative_interface, ArtifactKind::Relative),
+        (is_index_snapshot, ArtifactKind::Index),
+    ]
+}
+
+fn run_artifact(
+    kind: ArtifactKind,
+    program: &str,
+    bytes: &[u8],
+    rest: &[std::ffi::OsString],
+) -> Result<(), String> {
+    let runner = artifact_runners()
+        .iter()
+        .find_map(|(candidate, runner)| (*candidate == kind).then_some(*runner))
+        .expect("every artifact kind has a runner");
+    runner(program, bytes, rest)
+}
+
+fn artifact_runners() -> [(ArtifactKind, ArtifactRunner); 9] {
+    [
+        (ArtifactKind::Coverage, run_coverage),
+        (ArtifactKind::Synthesis, run_synthesis),
+        (ArtifactKind::KineticZigzag, run_kinetic_zigzag),
+        (ArtifactKind::Intervention, run_intervention),
+        (ArtifactKind::Distributed, run_distributed_adapter),
+        (ArtifactKind::Explicit, run_explicit),
+        (ArtifactKind::Relative, run_relative),
+        (ArtifactKind::Index, run_index_adapter),
+        (ArtifactKind::Trajectory, run_trajectory),
+    ]
+}
+
+fn run_distributed_adapter(
+    _program: &str,
+    bytes: &[u8],
+    rest: &[std::ffi::OsString],
+) -> Result<(), String> {
+    run_distributed(bytes, rest)
+}
+
+fn run_index_adapter(
+    _program: &str,
+    bytes: &[u8],
+    rest: &[std::ffi::OsString],
+) -> Result<(), String> {
+    run_index(bytes, rest)
 }
 
 fn require_single_artifact(rest: &[std::ffi::OsString], usage: String) -> Result<(), String> {
@@ -226,6 +266,26 @@ fn run_relative(program: &str, bytes: &[u8], rest: &[std::ffi::OsString]) -> Res
         checked.core_cells,
         checked.reduction_columns,
         checked.bars,
+    );
+    Ok(())
+}
+
+fn run_explicit(program: &str, bytes: &[u8], rest: &[std::ffi::OsString]) -> Result<(), String> {
+    require_single_artifact(
+        rest,
+        format!("usage for an explicit persistence proof: {program} CERTIFICATE"),
+    )?;
+    let checked = verify_explicit_persistence(bytes, ProofLimits::default())
+        .map_err(|error| error.to_string())?;
+    println!(
+        "verified explicit persistence through dimension {} over Z/{} with {} vertices, {} simplices, {} change columns, {} change terms, and {} bars",
+        checked.max_homology_dimension,
+        checked.modulus,
+        checked.vertices,
+        checked.simplex_counts.iter().sum::<usize>(),
+        checked.change_columns,
+        checked.change_terms,
+        checked.bars.len(),
     );
     Ok(())
 }
