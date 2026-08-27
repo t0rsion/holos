@@ -38,6 +38,8 @@ pub mod coverage_synthesis;
 pub mod distances;
 /// Durable content-addressed execution for relative interfaces.
 pub mod distributed;
+/// Proof-carrying persistence for explicit scalar filtered complexes.
+pub mod explicit_certificate;
 /// Vertex-biconnected factorization of sparse flag filtrations.
 pub mod factorization;
 pub(crate) mod field;
@@ -140,6 +142,7 @@ pub use distributed::{
     ArtifactId, DistributedInterfaceCommit, DistributedInterfaceError,
     DistributedInterfaceManifest, DistributedInterfaceWork, DurableInterfaceStore,
 };
+pub use explicit_certificate::ExplicitReductionCertificate;
 pub use filtration::{
     ComplexLimits, CoordinateProjection, FilteredSimplex, FilteredSimplicialComplex,
     FiltrationError, FiltrationGrade, FlagComplexParams, LinearFiltrationGrade, ProductGrade,

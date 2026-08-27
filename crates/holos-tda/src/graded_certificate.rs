@@ -6,6 +6,7 @@
 //! diagram from the checked pivots. This module does not assign canonical
 //! identities to classes above H1.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use rustc_hash::FxHashMap;
@@ -14,6 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::certificate::{
     CertificateError, CertificateLimits, CertificateTerm, ChangeColumn, ReductionRepairMode,
 };
+use crate::filtration::{FilteredSimplicialComplex, ScalarGrade};
 use crate::{Bar, Diagram, RipsParams, SparseDistanceMatrix, rips_persistence_sparse};
 
 /// Work retained and recomputed in one boundary dimension.
@@ -104,7 +106,7 @@ pub struct GradedReductionCertificate {
     diagram: Diagram,
 }
 
-fn reduce_all_dimensions(
+pub(crate) fn reduce_all_dimensions(
     complex: &GradedComplex,
     max_dim: usize,
     modulus: u32,
@@ -349,16 +351,16 @@ impl GradedReductionCertificate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct SimplexKey(Vec<usize>);
+pub(crate) struct SimplexKey(pub(crate) Vec<usize>);
 
 #[derive(Debug, Clone)]
-struct FilteredSimplex {
-    key: SimplexKey,
-    value: f64,
+pub(crate) struct FilteredSimplex {
+    pub(crate) key: SimplexKey,
+    pub(crate) value: f64,
 }
 
-struct GradedComplex {
-    simplices: Vec<Vec<FilteredSimplex>>,
+pub(crate) struct GradedComplex {
+    pub(crate) simplices: Vec<Vec<FilteredSimplex>>,
     rows: Vec<BTreeMap<SimplexKey, usize>>,
 }
 
@@ -384,23 +386,47 @@ impl GradedComplex {
                 threshold,
                 simplex_limit(dimension, limits),
             )?;
-            next.sort_by(|left, right| {
-                left.value
-                    .total_cmp(&right.value)
-                    .then_with(|| right.key.0.iter().rev().cmp(left.key.0.iter().rev()))
-            });
+            next.sort_by(filtered_simplex_order);
             simplices.push(next);
         }
-        let rows = simplices
-            .iter()
-            .map(|dimension| {
-                dimension
-                    .iter()
-                    .enumerate()
-                    .map(|(position, simplex)| (simplex.key.clone(), position))
-                    .collect()
-            })
-            .collect();
+        let rows = simplex_rows(&simplices);
+        Ok(Self { simplices, rows })
+    }
+
+    pub(crate) fn from_filtered(
+        input: &FilteredSimplicialComplex<ScalarGrade>,
+        max_dim: usize,
+        limits: CertificateLimits,
+    ) -> Result<Self, CertificateError> {
+        if max_dim > limits.max_dimension || input.max_dimension() < max_dim + 1 {
+            return Err(CertificateError::new(
+                "explicit complex does not cover the requested homology dimensions",
+            ));
+        }
+        if input.vertex_labels().len() > limits.max_vertices {
+            return Err(CertificateError::new(
+                "explicit complex exceeds the vertex limit",
+            ));
+        }
+        let mut simplices = Vec::with_capacity(max_dim + 2);
+        for dimension in 0..=max_dim + 1 {
+            let source = &input.simplices()[dimension];
+            if source.len() > explicit_simplex_limit(dimension, limits) {
+                return Err(CertificateError::new(format!(
+                    "explicit complex dimension {dimension} exceeds its simplex limit"
+                )));
+            }
+            let mut ordered = source
+                .iter()
+                .map(|simplex| FilteredSimplex {
+                    key: SimplexKey(simplex.vertices().to_vec()),
+                    value: simplex.grade().value(),
+                })
+                .collect::<Vec<_>>();
+            ordered.sort_by(filtered_simplex_order);
+            simplices.push(ordered);
+        }
+        let rows = simplex_rows(&simplices);
         Ok(Self { simplices, rows })
     }
 
@@ -426,6 +452,32 @@ impl GradedComplex {
                 Ok(column)
             })
             .collect()
+    }
+}
+
+fn filtered_simplex_order(left: &FilteredSimplex, right: &FilteredSimplex) -> Ordering {
+    left.value
+        .total_cmp(&right.value)
+        .then_with(|| right.key.0.iter().rev().cmp(left.key.0.iter().rev()))
+}
+
+fn simplex_rows(simplices: &[Vec<FilteredSimplex>]) -> Vec<BTreeMap<SimplexKey, usize>> {
+    simplices
+        .iter()
+        .map(|dimension| {
+            dimension
+                .iter()
+                .enumerate()
+                .map(|(position, simplex)| (simplex.key.clone(), position))
+                .collect()
+        })
+        .collect()
+}
+
+fn explicit_simplex_limit(dimension: usize, limits: CertificateLimits) -> usize {
+    match dimension {
+        0 => limits.max_vertices,
+        _ => simplex_limit(dimension, limits),
     }
 }
 
@@ -523,11 +575,11 @@ impl SparseColumn {
     }
 }
 
-struct CheckedGraded {
-    diagram: Diagram,
+pub(crate) struct CheckedGraded {
+    pub(crate) diagram: Diagram,
 }
 
-fn check_all(
+pub(crate) fn check_all(
     complex: &GradedComplex,
     modulus: u32,
     columns: &[Vec<ChangeColumn>],
