@@ -97,6 +97,30 @@ pub struct AtlasArtifact {
     reduction: ReductionCertificate,
 }
 
+struct AtlasHeader {
+    modulus: u32,
+    vertex_count: usize,
+    threshold: Option<f64>,
+    bars: usize,
+    spaces: usize,
+    certificate_bytes: usize,
+    input_digest: [u8; 32],
+}
+
+#[derive(Default)]
+struct AtlasTotals {
+    basis: usize,
+    critical_pairs: usize,
+    terms: usize,
+}
+
+struct SpaceHeader {
+    id: IntervalGroupId,
+    interval: Bar,
+    basis: usize,
+    critical_pairs: usize,
+}
+
 /// A proof-carrying atlas adapted by dependency-directed reduction repair.
 #[derive(Debug, Clone)]
 pub struct AtlasArtifactRepair {
@@ -274,49 +298,9 @@ impl AtlasArtifact {
             .encode()
             .map_err(|error| AtlasArtifactError::new(error.to_string()))?;
         let mut out = Vec::new();
-        out.extend_from_slice(MAGIC);
-        put_u16(&mut out, WIRE_VERSION);
-        out.push(F64_BITS_CODEC);
-        put_u32(&mut out, self.modulus);
-        put_usize(&mut out, self.vertex_count, "vertex count")?;
-        put_optional_f64(&mut out, self.threshold);
-        put_usize(&mut out, self.explained.diagram.bars.len(), "bar count")?;
-        put_usize(&mut out, self.explained.spaces.len(), "space count")?;
-        put_usize(&mut out, reduction.len(), "certificate byte count")?;
-        out.extend_from_slice(&self.input_digest);
-        for bar in &self.explained.diagram.bars {
-            put_usize(&mut out, bar.dim, "bar dimension")?;
-            put_u64(&mut out, bar.birth.to_bits());
-            put_u64(&mut out, bar.death.to_bits());
-        }
-        for space in &self.explained.spaces {
-            out.extend_from_slice(space.id.as_bytes());
-            put_u64(&mut out, space.interval.birth.to_bits());
-            put_u64(&mut out, space.interval.death.to_bits());
-            put_usize(&mut out, space.basis.len(), "basis count")?;
-            put_usize(&mut out, space.critical_pairs.len(), "critical-pair count")?;
-            for pair in &space.critical_pairs {
-                encode_critical(&mut out, &pair.birth)?;
-                match &pair.death {
-                    None => out.push(0),
-                    Some(death) => {
-                        out.push(1);
-                        encode_critical(&mut out, death)?;
-                    }
-                }
-            }
-            for class in &space.basis {
-                out.extend_from_slice(class.id.as_bytes());
-                put_usize(&mut out, class.basis_index, "basis index")?;
-                put_u64(&mut out, class.cocycle.scale.to_bits());
-                put_usize(&mut out, class.cocycle.terms.len(), "cocycle term count")?;
-                for term in &class.cocycle.terms {
-                    put_usize(&mut out, term.u, "term endpoint")?;
-                    put_usize(&mut out, term.v, "term endpoint")?;
-                    put_u32(&mut out, term.coefficient);
-                }
-            }
-        }
+        encode_atlas_header(&mut out, self, reduction.len())?;
+        encode_bars(&mut out, &self.explained.diagram)?;
+        encode_spaces(&mut out, &self.explained.spaces)?;
         out.extend_from_slice(&reduction);
         Ok(out)
     }
@@ -327,170 +311,20 @@ impl AtlasArtifact {
         limits: AtlasDecodeLimits,
         mut certificate_limits: CertificateLimits,
     ) -> std::result::Result<Self, AtlasArtifactError> {
-        if bytes.len() > limits.max_bytes {
-            return Err(AtlasArtifactError::new(format!(
-                "{} bytes exceed the decoder limit {}",
-                bytes.len(),
-                limits.max_bytes
-            )));
-        }
+        validate_atlas_size(bytes, limits)?;
         let mut reader = Reader::new(bytes);
-        if reader.take(8)? != MAGIC {
-            return Err(AtlasArtifactError::new("wrong magic bytes"));
-        }
-        let version = reader.u16()?;
-        if version != WIRE_VERSION {
-            return Err(AtlasArtifactError::new(format!(
-                "unsupported wire version {version}"
-            )));
-        }
-        let codec = reader.u8()?;
-        if codec != F64_BITS_CODEC {
-            return Err(AtlasArtifactError::new(format!(
-                "unsupported scalar codec {codec}"
-            )));
-        }
-        let modulus = reader.u32()?;
-        let vertex_count = reader.bounded_usize("vertex count", limits.max_vertices)?;
-        let threshold = reader.optional_f64()?;
-        let bar_count = reader.bounded_usize("bar count", limits.max_bars)?;
-        let space_count = reader.bounded_usize("space count", limits.max_spaces)?;
-        let certificate_bytes =
-            reader.bounded_usize("certificate byte count", limits.max_certificate_bytes)?;
-        let input_digest = reader.array32()?;
-        let minimum = bar_count
-            .checked_mul(24)
-            .and_then(|bars| {
-                space_count
-                    .checked_mul(64)
-                    .and_then(|spaces| bars.checked_add(spaces))
-            })
-            .and_then(|records| records.checked_add(certificate_bytes))
-            .ok_or_else(|| AtlasArtifactError::new("minimum record bytes overflow usize"))?;
-        if minimum > reader.remaining() {
-            return Err(AtlasArtifactError::new(format!(
-                "record counts need at least {minimum} bytes, only {} remain",
-                reader.remaining()
-            )));
-        }
-        let mut bars = Vec::with_capacity(bar_count);
-        for _ in 0..bar_count {
-            bars.push(Bar {
-                dim: reader.usize()?,
-                birth: f64::from_bits(reader.u64()?),
-                death: f64::from_bits(reader.u64()?),
-            });
-        }
-        let mut spaces = Vec::with_capacity(space_count);
-        let mut basis_total = 0usize;
-        let mut critical_total = 0usize;
-        let mut term_total = 0usize;
-        for _ in 0..space_count {
-            let id = IntervalGroupId::from_bytes(reader.array32()?);
-            let interval = Bar {
-                dim: 1,
-                birth: f64::from_bits(reader.u64()?),
-                death: f64::from_bits(reader.u64()?),
-            };
-            let basis_count = reader.usize()?;
-            basis_total = basis_total
-                .checked_add(basis_count)
-                .ok_or_else(|| AtlasArtifactError::new("basis count overflows usize"))?;
-            if basis_total > limits.max_basis {
-                return Err(AtlasArtifactError::new(format!(
-                    "{basis_total} basis classes exceed the limit {}",
-                    limits.max_basis
-                )));
-            }
-            let critical_count = reader.usize()?;
-            critical_total = critical_total
-                .checked_add(critical_count)
-                .ok_or_else(|| AtlasArtifactError::new("critical-pair count overflows usize"))?;
-            if critical_total > limits.max_critical_pairs {
-                return Err(AtlasArtifactError::new(format!(
-                    "{critical_total} critical pairs exceed the limit {}",
-                    limits.max_critical_pairs
-                )));
-            }
-            let mut critical_pairs = Vec::with_capacity(critical_count);
-            for _ in 0..critical_count {
-                let birth = decode_critical(&mut reader, vertex_count)?;
-                let death = match reader.u8()? {
-                    0 => None,
-                    1 => Some(decode_critical(&mut reader, vertex_count)?),
-                    tag => {
-                        return Err(AtlasArtifactError::new(format!(
-                            "unknown optional-critical tag {tag}"
-                        )));
-                    }
-                };
-                critical_pairs.push(CriticalPair { birth, death });
-            }
-            let mut basis = Vec::with_capacity(basis_count);
-            for _ in 0..basis_count {
-                let basis_id = BasisClassId::from_bytes(reader.array32()?);
-                let basis_index = reader.usize()?;
-                let scale = f64::from_bits(reader.u64()?);
-                let count = reader.usize()?;
-                term_total = term_total
-                    .checked_add(count)
-                    .ok_or_else(|| AtlasArtifactError::new("cocycle term count overflows usize"))?;
-                if term_total > limits.max_terms {
-                    return Err(AtlasArtifactError::new(format!(
-                        "{term_total} cocycle terms exceed the limit {}",
-                        limits.max_terms
-                    )));
-                }
-                let term_bytes = count
-                    .checked_mul(20)
-                    .ok_or_else(|| AtlasArtifactError::new("cocycle term bytes overflow usize"))?;
-                if term_bytes > reader.remaining().saturating_sub(certificate_bytes) {
-                    return Err(AtlasArtifactError::new(
-                        "cocycle terms exceed the remaining record bytes",
-                    ));
-                }
-                let mut terms = Vec::with_capacity(count);
-                for _ in 0..count {
-                    terms.push(CocycleTerm {
-                        u: reader.usize()?,
-                        v: reader.usize()?,
-                        coefficient: reader.u32()?,
-                    });
-                }
-                basis.push(PersistentClass {
-                    id: basis_id,
-                    group_id: id,
-                    basis_index,
-                    interval,
-                    cocycle: Cocycle {
-                        modulus,
-                        scale,
-                        terms,
-                    },
-                });
-            }
-            spaces.push(PersistentClassSpace {
-                id,
-                interval,
-                basis,
-                critical_pairs,
-            });
-        }
-        let nested = reader.take(certificate_bytes)?;
-        certificate_limits.max_bytes = certificate_limits.max_bytes.min(certificate_bytes);
-        let reduction = ReductionCertificate::decode(nested, certificate_limits)
-            .map_err(|error| AtlasArtifactError::new(error.to_string()))?;
-        if reader.remaining() != 0 {
-            return Err(AtlasArtifactError::new(format!(
-                "{} trailing bytes after the envelope",
-                reader.remaining()
-            )));
-        }
+        decode_atlas_prefix(&mut reader)?;
+        let header = decode_atlas_header(&mut reader, limits)?;
+        validate_minimum_records(&reader, &header)?;
+        let bars = decode_bars(&mut reader, header.bars)?;
+        let spaces = decode_spaces(&mut reader, &header, limits)?;
+        let reduction = decode_nested_certificate(&mut reader, &header, &mut certificate_limits)?;
+        finish_atlas_decode(&reader)?;
         let artifact = Self {
-            vertex_count,
-            threshold,
-            modulus,
-            input_digest,
+            vertex_count: header.vertex_count,
+            threshold: header.threshold,
+            modulus: header.modulus,
+            input_digest: header.input_digest,
             explained: ExplainedDiagram {
                 diagram: Diagram { bars },
                 spaces,
@@ -544,160 +378,658 @@ impl AtlasArtifact {
         input: Option<&SparseDistanceMatrix>,
     ) -> std::result::Result<(), AtlasArtifactError> {
         let threshold = checked_threshold(self.threshold)?;
-        if let Some(input) = input {
-            if input.len() != self.vertex_count
-                || full_graph_digest(input, self.threshold) != self.input_digest
-            {
-                return Err(AtlasArtifactError::new(
-                    "complete input graph binding does not match",
-                ));
-            }
-            if threshold.is_finite()
-                && input
-                    .edges()
-                    .any(|(_, _, value)| value.is_nan() || value < 0.0)
-            {
-                return Err(AtlasArtifactError::new("input graph is not canonical"));
-            }
-        }
-        if self.reduction.vertex_count() != self.vertex_count
-            || self.reduction.threshold().map(f64::to_bits) != self.threshold.map(f64::to_bits)
-            || self.reduction.modulus() != self.modulus
-        {
-            return Err(AtlasArtifactError::new(
-                "reduction header differs from the atlas header",
-            ));
-        }
-        if !diagram_bits_equal(self.reduction.diagram(), &self.explained.diagram) {
-            return Err(AtlasArtifactError::new(
-                "reduction diagram differs from the atlas diagram",
-            ));
-        }
-        let mut canonical = self.explained.diagram.clone();
-        canonical.canonicalize();
-        if !diagram_bits_equal(&canonical, &self.explained.diagram) {
-            return Err(AtlasArtifactError::new("bars are not in canonical order"));
-        }
-        for (index, bar) in self.explained.diagram.bars.iter().enumerate() {
-            check_bar(bar).map_err(|error| {
-                AtlasArtifactError::new(format!("bar {index} is invalid: {error}"))
-            })?;
-        }
-        let mut h1_bars: Vec<_> = self
-            .explained
-            .diagram
-            .in_dim(1)
-            .map(|bar| (bar.birth.to_bits(), bar.death.to_bits()))
-            .collect();
-        let mut space_bars = Vec::new();
-        for (space_index, space) in self.explained.spaces.iter().enumerate() {
-            if space.basis.is_empty() || space.critical_pairs.len() != space.basis.len() {
-                return Err(AtlasArtifactError::new(format!(
-                    "space {space_index} has inconsistent multiplicity"
-                )));
-            }
-            let cocycles: Vec<_> = space
-                .basis
-                .iter()
-                .map(|class| class.cocycle.clone())
-                .collect();
-            if let Some(input) = input {
-                let canonical_basis = canonical_space_basis(input, self.modulus, &cocycles)
-                    .map_err(|error| AtlasArtifactError::new(error.to_string()))?;
-                if !cocycle_lists_bits_equal(&canonical_basis, &cocycles) {
-                    return Err(AtlasArtifactError::new(format!(
-                        "space {space_index} basis is not in canonical row-reduced form"
-                    )));
-                }
-            }
-            if group_id(space.interval, self.modulus, &cocycles) != space.id {
-                return Err(AtlasArtifactError::new(format!(
-                    "space {space_index} identifier does not match its basis"
-                )));
-            }
-            for (basis_index, class) in space.basis.iter().enumerate() {
-                if class.group_id != space.id
-                    || class.basis_index != basis_index
-                    || class.interval != space.interval
-                    || class.cocycle.modulus != self.modulus
-                    || basis_class_id(space.id, basis_index, &class.cocycle) != class.id
-                {
-                    return Err(AtlasArtifactError::new(format!(
-                        "space {space_index} basis {basis_index} is not canonical"
-                    )));
-                }
-                check_cocycle_shape(&class.cocycle, self.vertex_count).map_err(|error| {
-                    AtlasArtifactError::new(format!(
-                        "space {space_index} basis {basis_index} is invalid: {error}"
-                    ))
-                })?;
-                if let Some(input) = input {
-                    validate_h1_cocycle(input, &class.cocycle)
-                        .map_err(|error| AtlasArtifactError::new(error.to_string()))?;
-                }
-            }
-            for pair in &space.critical_pairs {
-                check_critical(&pair.birth, 2, self.vertex_count, space.interval.birth)?;
-                match (&pair.death, space.interval.is_essential()) {
-                    (None, true) => {}
-                    (Some(death), false) => {
-                        check_critical(death, 3, self.vertex_count, space.interval.death)?
-                    }
-                    _ => {
-                        return Err(AtlasArtifactError::new(format!(
-                            "space {space_index} critical pair has wrong death presence"
-                        )));
-                    }
-                }
-            }
-            if space
-                .critical_pairs
-                .windows(2)
-                .any(|pairs| !critical_pair_order(&pairs[0], &pairs[1]).is_lt())
-            {
-                return Err(AtlasArtifactError::new(format!(
-                    "space {space_index} critical pairs are not in canonical order"
-                )));
-            }
-            space_bars.extend(std::iter::repeat_n(
-                (
-                    space.interval.birth.to_bits(),
-                    space.interval.death.to_bits(),
-                ),
-                space.basis.len(),
-            ));
-        }
-        h1_bars.sort_unstable();
-        space_bars.sort_unstable();
-        if h1_bars != space_bars {
-            return Err(AtlasArtifactError::new(
-                "class-space intervals do not match the H1 diagram",
-            ));
-        }
-        for pair in self.explained.spaces.windows(2) {
-            let order = pair[0]
-                .interval
-                .birth
-                .total_cmp(&pair[1].interval.birth)
-                .then(pair[0].interval.death.total_cmp(&pair[1].interval.death))
-                .then(pair[0].id.cmp(&pair[1].id));
-            if !order.is_lt() {
-                return Err(AtlasArtifactError::new(
-                    "class spaces are not in strict canonical order",
-                ));
-            }
-        }
-        if let Some(input) = input {
-            for space in &self.explained.spaces {
-                for pair in &space.critical_pairs {
-                    check_critical_value(input, &pair.birth)?;
-                    if let Some(death) = &pair.death {
-                        check_critical_value(input, death)?;
-                    }
-                }
-            }
-        }
+        check_input_binding(self, input, threshold)?;
+        check_reduction_binding(self)?;
+        check_diagram_structure(&self.explained.diagram)?;
+        check_spaces_structure(self, input)?;
+        check_space_order(&self.explained.spaces)?;
+        check_critical_values(input, &self.explained.spaces)
+    }
+}
+
+fn check_input_binding(
+    artifact: &AtlasArtifact,
+    input: Option<&SparseDistanceMatrix>,
+    threshold: f64,
+) -> std::result::Result<(), AtlasArtifactError> {
+    let Some(input) = input else {
+        return Ok(());
+    };
+    if input.len() != artifact.vertex_count
+        || full_graph_digest(input, artifact.threshold) != artifact.input_digest
+    {
+        return Err(AtlasArtifactError::new(
+            "complete input graph binding does not match",
+        ));
+    }
+    if threshold.is_finite()
+        && input
+            .edges()
+            .any(|(_, _, value)| value.is_nan() || value < 0.0)
+    {
+        return Err(AtlasArtifactError::new("input graph is not canonical"));
+    }
+    Ok(())
+}
+
+fn check_reduction_binding(
+    artifact: &AtlasArtifact,
+) -> std::result::Result<(), AtlasArtifactError> {
+    if artifact.reduction.vertex_count() != artifact.vertex_count
+        || artifact.reduction.threshold().map(f64::to_bits) != artifact.threshold.map(f64::to_bits)
+        || artifact.reduction.modulus() != artifact.modulus
+    {
+        return Err(AtlasArtifactError::new(
+            "reduction header differs from the atlas header",
+        ));
+    }
+    if !diagram_bits_equal(artifact.reduction.diagram(), &artifact.explained.diagram) {
+        return Err(AtlasArtifactError::new(
+            "reduction diagram differs from the atlas diagram",
+        ));
+    }
+    Ok(())
+}
+
+fn check_diagram_structure(diagram: &Diagram) -> std::result::Result<(), AtlasArtifactError> {
+    let mut canonical = diagram.clone();
+    canonical.canonicalize();
+    if !diagram_bits_equal(&canonical, diagram) {
+        return Err(AtlasArtifactError::new("bars are not in canonical order"));
+    }
+    for (index, bar) in diagram.bars.iter().enumerate() {
+        check_bar(bar)
+            .map_err(|error| AtlasArtifactError::new(format!("bar {index} is invalid: {error}")))?;
+    }
+    Ok(())
+}
+
+fn check_spaces_structure(
+    artifact: &AtlasArtifact,
+    input: Option<&SparseDistanceMatrix>,
+) -> std::result::Result<(), AtlasArtifactError> {
+    let mut space_bars = Vec::new();
+    for (index, space) in artifact.explained.spaces.iter().enumerate() {
+        check_space_structure(artifact, input, index, space)?;
+        space_bars.extend(std::iter::repeat_n(
+            (
+                space.interval.birth.to_bits(),
+                space.interval.death.to_bits(),
+            ),
+            space.basis.len(),
+        ));
+    }
+    check_space_intervals(&artifact.explained.diagram, &mut space_bars)
+}
+
+fn check_space_structure(
+    artifact: &AtlasArtifact,
+    input: Option<&SparseDistanceMatrix>,
+    index: usize,
+    space: &PersistentClassSpace,
+) -> std::result::Result<(), AtlasArtifactError> {
+    if space.basis.is_empty() || space.critical_pairs.len() != space.basis.len() {
+        return Err(AtlasArtifactError::new(format!(
+            "space {index} has inconsistent multiplicity"
+        )));
+    }
+    let cocycles = space
+        .basis
+        .iter()
+        .map(|class| class.cocycle.clone())
+        .collect::<Vec<_>>();
+    check_canonical_basis(input, artifact.modulus, index, &cocycles)?;
+    if group_id(space.interval, artifact.modulus, &cocycles) != space.id {
+        return Err(AtlasArtifactError::new(format!(
+            "space {index} identifier does not match its basis"
+        )));
+    }
+    check_space_basis(artifact, input, index, space)?;
+    check_critical_pairs(artifact.vertex_count, index, space)
+}
+
+fn check_canonical_basis(
+    input: Option<&SparseDistanceMatrix>,
+    modulus: u32,
+    index: usize,
+    cocycles: &[Cocycle],
+) -> std::result::Result<(), AtlasArtifactError> {
+    let Some(input) = input else {
+        return Ok(());
+    };
+    let canonical = canonical_space_basis(input, modulus, cocycles)
+        .map_err(|error| AtlasArtifactError::new(error.to_string()))?;
+    if !cocycle_lists_bits_equal(&canonical, cocycles) {
+        Err(AtlasArtifactError::new(format!(
+            "space {index} basis is not in canonical row-reduced form"
+        )))
+    } else {
         Ok(())
+    }
+}
+
+fn check_space_basis(
+    artifact: &AtlasArtifact,
+    input: Option<&SparseDistanceMatrix>,
+    space_index: usize,
+    space: &PersistentClassSpace,
+) -> std::result::Result<(), AtlasArtifactError> {
+    for (basis_index, class) in space.basis.iter().enumerate() {
+        check_class_structure(artifact, space_index, basis_index, space, class)?;
+        if let Some(input) = input {
+            validate_h1_cocycle(input, &class.cocycle)
+                .map_err(|error| AtlasArtifactError::new(error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+fn check_class_structure(
+    artifact: &AtlasArtifact,
+    space_index: usize,
+    basis_index: usize,
+    space: &PersistentClassSpace,
+    class: &PersistentClass,
+) -> std::result::Result<(), AtlasArtifactError> {
+    if class.group_id != space.id
+        || class.basis_index != basis_index
+        || class.interval != space.interval
+        || class.cocycle.modulus != artifact.modulus
+        || basis_class_id(space.id, basis_index, &class.cocycle) != class.id
+    {
+        return Err(AtlasArtifactError::new(format!(
+            "space {space_index} basis {basis_index} is not canonical"
+        )));
+    }
+    check_cocycle_shape(&class.cocycle, artifact.vertex_count).map_err(|error| {
+        AtlasArtifactError::new(format!(
+            "space {space_index} basis {basis_index} is invalid: {error}"
+        ))
+    })
+}
+
+fn check_critical_pairs(
+    vertex_count: usize,
+    space_index: usize,
+    space: &PersistentClassSpace,
+) -> std::result::Result<(), AtlasArtifactError> {
+    for pair in &space.critical_pairs {
+        check_critical_pair(vertex_count, space_index, space.interval, pair)?;
+    }
+    if space
+        .critical_pairs
+        .windows(2)
+        .any(|pairs| !critical_pair_order(&pairs[0], &pairs[1]).is_lt())
+    {
+        return Err(AtlasArtifactError::new(format!(
+            "space {space_index} critical pairs are not in canonical order"
+        )));
+    }
+    Ok(())
+}
+
+fn check_critical_pair(
+    vertex_count: usize,
+    space_index: usize,
+    interval: Bar,
+    pair: &CriticalPair,
+) -> std::result::Result<(), AtlasArtifactError> {
+    check_critical(&pair.birth, 2, vertex_count, interval.birth)?;
+    match (&pair.death, interval.is_essential()) {
+        (None, true) => Ok(()),
+        (Some(death), false) => check_critical(death, 3, vertex_count, interval.death),
+        _ => Err(AtlasArtifactError::new(format!(
+            "space {space_index} critical pair has wrong death presence"
+        ))),
+    }
+}
+
+fn check_space_intervals(
+    diagram: &Diagram,
+    space_bars: &mut Vec<(u64, u64)>,
+) -> std::result::Result<(), AtlasArtifactError> {
+    let mut h1_bars = diagram
+        .in_dim(1)
+        .map(|bar| (bar.birth.to_bits(), bar.death.to_bits()))
+        .collect::<Vec<_>>();
+    h1_bars.sort_unstable();
+    space_bars.sort_unstable();
+    if h1_bars != *space_bars {
+        Err(AtlasArtifactError::new(
+            "class-space intervals do not match the H1 diagram",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn check_space_order(
+    spaces: &[PersistentClassSpace],
+) -> std::result::Result<(), AtlasArtifactError> {
+    for pair in spaces.windows(2) {
+        let order = pair[0]
+            .interval
+            .birth
+            .total_cmp(&pair[1].interval.birth)
+            .then(pair[0].interval.death.total_cmp(&pair[1].interval.death))
+            .then(pair[0].id.cmp(&pair[1].id));
+        if !order.is_lt() {
+            return Err(AtlasArtifactError::new(
+                "class spaces are not in strict canonical order",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_critical_values(
+    input: Option<&SparseDistanceMatrix>,
+    spaces: &[PersistentClassSpace],
+) -> std::result::Result<(), AtlasArtifactError> {
+    let Some(input) = input else {
+        return Ok(());
+    };
+    for space in spaces {
+        for pair in &space.critical_pairs {
+            check_critical_value(input, &pair.birth)?;
+            if let Some(death) = &pair.death {
+                check_critical_value(input, death)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn encode_atlas_header(
+    out: &mut Vec<u8>,
+    artifact: &AtlasArtifact,
+    certificate_bytes: usize,
+) -> std::result::Result<(), AtlasArtifactError> {
+    out.extend_from_slice(MAGIC);
+    put_u16(out, WIRE_VERSION);
+    out.push(F64_BITS_CODEC);
+    put_u32(out, artifact.modulus);
+    put_usize(out, artifact.vertex_count, "vertex count")?;
+    put_optional_f64(out, artifact.threshold);
+    put_usize(out, artifact.explained.diagram.bars.len(), "bar count")?;
+    put_usize(out, artifact.explained.spaces.len(), "space count")?;
+    put_usize(out, certificate_bytes, "certificate byte count")?;
+    out.extend_from_slice(&artifact.input_digest);
+    Ok(())
+}
+
+fn encode_bars(
+    out: &mut Vec<u8>,
+    diagram: &Diagram,
+) -> std::result::Result<(), AtlasArtifactError> {
+    for bar in &diagram.bars {
+        put_usize(out, bar.dim, "bar dimension")?;
+        put_u64(out, bar.birth.to_bits());
+        put_u64(out, bar.death.to_bits());
+    }
+    Ok(())
+}
+
+fn encode_spaces(
+    out: &mut Vec<u8>,
+    spaces: &[PersistentClassSpace],
+) -> std::result::Result<(), AtlasArtifactError> {
+    for space in spaces {
+        encode_space(out, space)?;
+    }
+    Ok(())
+}
+
+fn encode_space(
+    out: &mut Vec<u8>,
+    space: &PersistentClassSpace,
+) -> std::result::Result<(), AtlasArtifactError> {
+    out.extend_from_slice(space.id.as_bytes());
+    put_u64(out, space.interval.birth.to_bits());
+    put_u64(out, space.interval.death.to_bits());
+    put_usize(out, space.basis.len(), "basis count")?;
+    put_usize(out, space.critical_pairs.len(), "critical-pair count")?;
+    encode_critical_pairs(out, &space.critical_pairs)?;
+    encode_basis(out, &space.basis)
+}
+
+fn encode_critical_pairs(
+    out: &mut Vec<u8>,
+    pairs: &[CriticalPair],
+) -> std::result::Result<(), AtlasArtifactError> {
+    for pair in pairs {
+        encode_critical(out, &pair.birth)?;
+        encode_optional_critical(out, pair.death.as_ref())?;
+    }
+    Ok(())
+}
+
+fn encode_optional_critical(
+    out: &mut Vec<u8>,
+    critical: Option<&CriticalSimplex>,
+) -> std::result::Result<(), AtlasArtifactError> {
+    match critical {
+        None => out.push(0),
+        Some(critical) => {
+            out.push(1);
+            encode_critical(out, critical)?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_basis(
+    out: &mut Vec<u8>,
+    basis: &[PersistentClass],
+) -> std::result::Result<(), AtlasArtifactError> {
+    for class in basis {
+        encode_class(out, class)?;
+    }
+    Ok(())
+}
+
+fn encode_class(
+    out: &mut Vec<u8>,
+    class: &PersistentClass,
+) -> std::result::Result<(), AtlasArtifactError> {
+    out.extend_from_slice(class.id.as_bytes());
+    put_usize(out, class.basis_index, "basis index")?;
+    put_u64(out, class.cocycle.scale.to_bits());
+    put_usize(out, class.cocycle.terms.len(), "cocycle term count")?;
+    for term in &class.cocycle.terms {
+        put_usize(out, term.u, "term endpoint")?;
+        put_usize(out, term.v, "term endpoint")?;
+        put_u32(out, term.coefficient);
+    }
+    Ok(())
+}
+
+fn validate_atlas_size(
+    bytes: &[u8],
+    limits: AtlasDecodeLimits,
+) -> std::result::Result<(), AtlasArtifactError> {
+    if bytes.len() > limits.max_bytes {
+        Err(AtlasArtifactError::new(format!(
+            "{} bytes exceed the decoder limit {}",
+            bytes.len(),
+            limits.max_bytes
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_atlas_prefix(reader: &mut Reader<'_>) -> std::result::Result<(), AtlasArtifactError> {
+    if reader.take(8)? != MAGIC {
+        return Err(AtlasArtifactError::new("wrong magic bytes"));
+    }
+    let version = reader.u16()?;
+    if version != WIRE_VERSION {
+        return Err(AtlasArtifactError::new(format!(
+            "unsupported wire version {version}"
+        )));
+    }
+    let codec = reader.u8()?;
+    if codec != F64_BITS_CODEC {
+        return Err(AtlasArtifactError::new(format!(
+            "unsupported scalar codec {codec}"
+        )));
+    }
+    Ok(())
+}
+
+fn decode_atlas_header(
+    reader: &mut Reader<'_>,
+    limits: AtlasDecodeLimits,
+) -> std::result::Result<AtlasHeader, AtlasArtifactError> {
+    Ok(AtlasHeader {
+        modulus: reader.u32()?,
+        vertex_count: reader.bounded_usize("vertex count", limits.max_vertices)?,
+        threshold: reader.optional_f64()?,
+        bars: reader.bounded_usize("bar count", limits.max_bars)?,
+        spaces: reader.bounded_usize("space count", limits.max_spaces)?,
+        certificate_bytes: reader
+            .bounded_usize("certificate byte count", limits.max_certificate_bytes)?,
+        input_digest: reader.array32()?,
+    })
+}
+
+fn validate_minimum_records(
+    reader: &Reader<'_>,
+    header: &AtlasHeader,
+) -> std::result::Result<(), AtlasArtifactError> {
+    let minimum = header
+        .bars
+        .checked_mul(24)
+        .and_then(|bars| {
+            header
+                .spaces
+                .checked_mul(64)
+                .and_then(|spaces| bars.checked_add(spaces))
+        })
+        .and_then(|records| records.checked_add(header.certificate_bytes))
+        .ok_or_else(|| AtlasArtifactError::new("minimum record bytes overflow usize"))?;
+    if minimum > reader.remaining() {
+        Err(AtlasArtifactError::new(format!(
+            "record counts need at least {minimum} bytes, only {} remain",
+            reader.remaining()
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_bars(
+    reader: &mut Reader<'_>,
+    count: usize,
+) -> std::result::Result<Vec<Bar>, AtlasArtifactError> {
+    (0..count)
+        .map(|_| {
+            Ok(Bar {
+                dim: reader.usize()?,
+                birth: f64::from_bits(reader.u64()?),
+                death: f64::from_bits(reader.u64()?),
+            })
+        })
+        .collect()
+}
+
+fn decode_spaces(
+    reader: &mut Reader<'_>,
+    header: &AtlasHeader,
+    limits: AtlasDecodeLimits,
+) -> std::result::Result<Vec<PersistentClassSpace>, AtlasArtifactError> {
+    let mut totals = AtlasTotals::default();
+    let mut spaces = Vec::with_capacity(header.spaces);
+    for _ in 0..header.spaces {
+        spaces.push(decode_space(reader, header, &mut totals, limits)?);
+    }
+    Ok(spaces)
+}
+
+fn decode_space(
+    reader: &mut Reader<'_>,
+    atlas: &AtlasHeader,
+    totals: &mut AtlasTotals,
+    limits: AtlasDecodeLimits,
+) -> std::result::Result<PersistentClassSpace, AtlasArtifactError> {
+    let header = decode_space_header(reader, totals, limits)?;
+    let critical_pairs = decode_critical_pairs(reader, atlas.vertex_count, header.critical_pairs)?;
+    let basis = decode_basis(reader, atlas, &header, totals, limits)?;
+    Ok(PersistentClassSpace {
+        id: header.id,
+        interval: header.interval,
+        basis,
+        critical_pairs,
+    })
+}
+
+fn decode_space_header(
+    reader: &mut Reader<'_>,
+    totals: &mut AtlasTotals,
+    limits: AtlasDecodeLimits,
+) -> std::result::Result<SpaceHeader, AtlasArtifactError> {
+    let id = IntervalGroupId::from_bytes(reader.array32()?);
+    let interval = Bar {
+        dim: 1,
+        birth: f64::from_bits(reader.u64()?),
+        death: f64::from_bits(reader.u64()?),
+    };
+    let basis = reader.usize()?;
+    totals.basis = add_atlas_total(totals.basis, basis, limits.max_basis, "basis classes")?;
+    let critical_pairs = reader.usize()?;
+    totals.critical_pairs = add_atlas_total(
+        totals.critical_pairs,
+        critical_pairs,
+        limits.max_critical_pairs,
+        "critical pairs",
+    )?;
+    Ok(SpaceHeader {
+        id,
+        interval,
+        basis,
+        critical_pairs,
+    })
+}
+
+fn add_atlas_total(
+    total: usize,
+    add: usize,
+    maximum: usize,
+    label: &str,
+) -> std::result::Result<usize, AtlasArtifactError> {
+    let total = total
+        .checked_add(add)
+        .ok_or_else(|| AtlasArtifactError::new(format!("{label} count overflows usize")))?;
+    if total > maximum {
+        Err(AtlasArtifactError::new(format!(
+            "{total} {label} exceed the limit {maximum}"
+        )))
+    } else {
+        Ok(total)
+    }
+}
+
+fn decode_critical_pairs(
+    reader: &mut Reader<'_>,
+    vertex_count: usize,
+    count: usize,
+) -> std::result::Result<Vec<CriticalPair>, AtlasArtifactError> {
+    let mut pairs = Vec::with_capacity(count);
+    for _ in 0..count {
+        pairs.push(CriticalPair {
+            birth: decode_critical(reader, vertex_count)?,
+            death: decode_optional_critical(reader, vertex_count)?,
+        });
+    }
+    Ok(pairs)
+}
+
+fn decode_optional_critical(
+    reader: &mut Reader<'_>,
+    vertex_count: usize,
+) -> std::result::Result<Option<CriticalSimplex>, AtlasArtifactError> {
+    match reader.u8()? {
+        0 => Ok(None),
+        1 => decode_critical(reader, vertex_count).map(Some),
+        tag => Err(AtlasArtifactError::new(format!(
+            "unknown optional-critical tag {tag}"
+        ))),
+    }
+}
+
+fn decode_basis(
+    reader: &mut Reader<'_>,
+    atlas: &AtlasHeader,
+    space: &SpaceHeader,
+    totals: &mut AtlasTotals,
+    limits: AtlasDecodeLimits,
+) -> std::result::Result<Vec<PersistentClass>, AtlasArtifactError> {
+    let mut basis = Vec::with_capacity(space.basis);
+    for _ in 0..space.basis {
+        basis.push(decode_class(reader, atlas, space, totals, limits)?);
+    }
+    Ok(basis)
+}
+
+fn decode_class(
+    reader: &mut Reader<'_>,
+    atlas: &AtlasHeader,
+    space: &SpaceHeader,
+    totals: &mut AtlasTotals,
+    limits: AtlasDecodeLimits,
+) -> std::result::Result<PersistentClass, AtlasArtifactError> {
+    let id = BasisClassId::from_bytes(reader.array32()?);
+    let basis_index = reader.usize()?;
+    let scale = f64::from_bits(reader.u64()?);
+    let count = reader.usize()?;
+    totals.terms = add_atlas_total(totals.terms, count, limits.max_terms, "cocycle terms")?;
+    validate_term_bytes(reader, count, atlas.certificate_bytes)?;
+    let terms = decode_terms(reader, count)?;
+    Ok(PersistentClass {
+        id,
+        group_id: space.id,
+        basis_index,
+        interval: space.interval,
+        cocycle: Cocycle {
+            modulus: atlas.modulus,
+            scale,
+            terms,
+        },
+    })
+}
+
+fn validate_term_bytes(
+    reader: &Reader<'_>,
+    count: usize,
+    certificate_bytes: usize,
+) -> std::result::Result<(), AtlasArtifactError> {
+    let bytes = count
+        .checked_mul(20)
+        .ok_or_else(|| AtlasArtifactError::new("cocycle term bytes overflow usize"))?;
+    if bytes > reader.remaining().saturating_sub(certificate_bytes) {
+        Err(AtlasArtifactError::new(
+            "cocycle terms exceed the remaining record bytes",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_terms(
+    reader: &mut Reader<'_>,
+    count: usize,
+) -> std::result::Result<Vec<CocycleTerm>, AtlasArtifactError> {
+    (0..count)
+        .map(|_| {
+            Ok(CocycleTerm {
+                u: reader.usize()?,
+                v: reader.usize()?,
+                coefficient: reader.u32()?,
+            })
+        })
+        .collect()
+}
+
+fn decode_nested_certificate(
+    reader: &mut Reader<'_>,
+    header: &AtlasHeader,
+    limits: &mut CertificateLimits,
+) -> std::result::Result<ReductionCertificate, AtlasArtifactError> {
+    let nested = reader.take(header.certificate_bytes)?;
+    limits.max_bytes = limits.max_bytes.min(header.certificate_bytes);
+    ReductionCertificate::decode(nested, *limits)
+        .map_err(|error| AtlasArtifactError::new(error.to_string()))
+}
+
+fn finish_atlas_decode(reader: &Reader<'_>) -> std::result::Result<(), AtlasArtifactError> {
+    if reader.remaining() == 0 {
+        Ok(())
+    } else {
+        Err(AtlasArtifactError::new(format!(
+            "{} trailing bytes after the envelope",
+            reader.remaining()
+        )))
     }
 }
 
@@ -705,23 +1037,34 @@ fn check_bar(bar: &Bar) -> std::result::Result<(), &'static str> {
     if bar.dim > 1 {
         return Err("dimension exceeds one");
     }
+    check_bar_birth(bar)?;
+    check_bar_death(bar.death)?;
+    if bar.death.is_finite() && bar.death <= bar.birth {
+        return Err("finite death does not follow birth");
+    }
+    Ok(())
+}
+
+fn check_bar_birth(bar: &Bar) -> std::result::Result<(), &'static str> {
     if !bar.birth.is_finite() || bar.birth < 0.0 || is_negative_zero(bar.birth) {
         return Err("birth is not a canonical non-negative finite value");
     }
     if bar.dim == 0 && bar.birth.to_bits() != 0 {
         return Err("H0 birth is not positive zero");
     }
-    if bar.death.is_nan()
-        || bar.death < 0.0
-        || is_negative_zero(bar.death)
-        || (bar.death.is_infinite() && !bar.death.is_sign_positive())
-    {
-        return Err("death is not a canonical non-negative value");
-    }
-    if bar.death.is_finite() && bar.death <= bar.birth {
-        return Err("finite death does not follow birth");
-    }
     Ok(())
+}
+
+fn check_bar_death(death: f64) -> std::result::Result<(), &'static str> {
+    if death.is_nan()
+        || death < 0.0
+        || is_negative_zero(death)
+        || (death.is_infinite() && !death.is_sign_positive())
+    {
+        Err("death is not a canonical non-negative value")
+    } else {
+        Ok(())
+    }
 }
 
 fn is_negative_zero(value: f64) -> bool {
@@ -740,17 +1083,25 @@ fn check_cocycle_shape(
     }
     let mut previous = None;
     for term in &cocycle.terms {
-        if term.u >= term.v
-            || term.v >= vertex_count
-            || term.coefficient == 0
-            || term.coefficient >= cocycle.modulus
-            || previous.is_some_and(|edge| edge >= (term.u, term.v))
-        {
+        if !canonical_cocycle_term(term, previous, vertex_count, cocycle.modulus) {
             return Err("terms are not canonical");
         }
         previous = Some((term.u, term.v));
     }
     Ok(())
+}
+
+fn canonical_cocycle_term(
+    term: &CocycleTerm,
+    previous: Option<(usize, usize)>,
+    vertex_count: usize,
+    modulus: u32,
+) -> bool {
+    term.u < term.v
+        && term.v < vertex_count
+        && term.coefficient != 0
+        && term.coefficient < modulus
+        && previous.is_none_or(|edge| edge < (term.u, term.v))
 }
 
 fn checked_threshold(threshold: Option<f64>) -> std::result::Result<f64, AtlasArtifactError> {
