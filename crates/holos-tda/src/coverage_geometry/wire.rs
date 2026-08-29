@@ -21,7 +21,7 @@ impl Default for GeometryBoundCoverageDecodeLimits {
     }
 }
 
-/// A coverage proof bound to checked finite planar geometry.
+/// Coverage synthesis proof bound to checked finite planar geometry.
 #[derive(Debug, Clone)]
 pub struct GeometryBoundCoverageArtifact {
     geometry: CoverageGeometry,
@@ -53,7 +53,7 @@ impl GeometryBoundCoverageArtifact {
         &self.geometry
     }
 
-    /// Nested exact coverage and optimality proof.
+    /// Nested [`CoverageSynthesisArtifact`].
     pub fn coverage(&self) -> &CoverageSynthesisArtifact {
         &self.coverage
     }

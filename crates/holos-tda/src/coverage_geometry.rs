@@ -1,10 +1,8 @@
 //! Exact planar geometry bindings for finite coverage specifications.
 //!
-//! The ordinary coverage API checks the relative chain and radius inequality,
-//! but accepts the domain geometry as a caller declaration. This stricter
-//! profile uses the fence sensor coordinates as the polygonal domain boundary.
-//! It checks a simple nondegenerate polygon, containment of every sensor, and
-//! the complete Euclidean radius graph in each finite state.
+//! Fence sensor coordinates are the polygonal domain boundary. Binding checks
+//! a simple nondegenerate polygon, containment of every sensor, and the
+//! complete Euclidean radius graph in each finite state.
 
 mod wire;
 
@@ -78,6 +76,8 @@ pub struct CoverageGeometry {
 
 impl CoverageGeometry {
     /// Bind one coordinate vector to each canonical finite state.
+    ///
+    /// The specification source must be [`CoverageSource::Finite`].
     pub fn new(
         specification: &CoverageSpecification,
         coordinates: Vec<Vec<PlanarPoint>>,

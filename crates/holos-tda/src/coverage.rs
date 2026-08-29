@@ -2,8 +2,8 @@
 //!
 //! The algebraic criterion follows the controlled-boundary theorem of de
 //! Silva and Ghrist. A nonzero fence cycle must bound a two-chain in the
-//! active Rips complex. Under the declared geometric hypotheses, that
-//! relative class proves that the sensing discs cover the domain.
+//! active Rips complex. Physical coverage of the domain depends on
+//! [`PlanarCoverageModel`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -49,11 +49,11 @@ impl Default for CoverageLimits {
 /// Declared geometric contract for the planar controlled-boundary theorem.
 ///
 /// The constructor checks the exact radius inequality from assumption A2.
-/// The caller declares the domain hypotheses A3 and the geometric part of
-/// A4: the nodes lie in one compact connected planar domain, and the fence
-/// cycle maps to its connected piecewise-linear boundary. The checker can
-/// validate the graph, unique labels, fence edges, radii, and relative chain.
-/// It cannot recover the hidden domain from connectivity data.
+/// The caller declares A3: nodes lie in one compact connected planar domain.
+/// The caller declares geometric A4: the fence cycle maps to that domain's
+/// connected piecewise-linear boundary. The checker validates the graph,
+/// unique labels, fence edges, radii, and relative chain. It cannot recover
+/// the domain from connectivity data.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlanarCoverageModel {
     broadcast_radius: f64,
@@ -175,10 +175,8 @@ pub struct CoverageEvaluation {
 /// Check the planar controlled-boundary criterion on an induced active graph.
 ///
 /// `graph` contains every possible communication edge. `active_vertices`
-/// selects the nodes present in this state. The fence must be active and each
-/// consecutive fence pair must be a graph edge. The result is a sufficient
-/// physical coverage claim only under the geometric declaration carried by
-/// [`PlanarCoverageModel`].
+/// selects the nodes present in this state. The fence must be active, and each
+/// consecutive fence pair must be a graph edge.
 pub fn evaluate_planar_coverage(
     graph: &SparseDistanceMatrix,
     active_vertices: &[usize],

@@ -1,10 +1,9 @@
 //! Failure-tolerant specifications for exact relative coverage.
 //!
-//! A finite state contains every communication edge that can be used in that
-//! state and the sensor vertices active before a plan. An action activates one
-//! additional non-fence sensor in declared states. A plan is feasible only if
-//! the controlled-boundary criterion holds after every maximal allowed sensor
-//! failure in every state.
+//! A finite state lists its communication edges and the sensors active before
+//! a plan. An action activates one additional non-fence sensor in declared
+//! states. A plan is feasible only if the controlled-boundary criterion holds
+//! after every maximal allowed sensor failure in every state.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -98,6 +97,7 @@ pub enum CoverageSource {
     /// States were supplied directly. No claim is made between them.
     Finite,
     /// States are the complete threshold schedule of affine communication edges.
+    /// Affine edge weights need not have a Euclidean realization.
     Affine {
         /// Scenario identifier assigned to every compiled state.
         scenario: u64,
@@ -171,7 +171,7 @@ impl CoverageState {
     }
 }
 
-/// A finite or exact affine controlled-boundary coverage specification.
+/// Finite or affine coverage specification over [`PlanarCoverageModel`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoverageSpecification {
     vertex_count: usize,
@@ -214,7 +214,7 @@ impl CoverageSpecification {
         Ok(specification)
     }
 
-    /// Compile every graph needed for an all-time affine communication claim.
+    /// Compile the complete affine communication threshold schedule.
     #[allow(clippy::too_many_arguments)]
     pub fn from_kinetic(
         filtration: &KineticFiltration,
@@ -265,7 +265,7 @@ impl CoverageSpecification {
         self.vertex_count
     }
 
-    /// Controlled-boundary radius model.
+    /// Declared planar coverage model.
     pub fn model(&self) -> PlanarCoverageModel {
         self.model
     }
@@ -483,7 +483,7 @@ pub struct CoveragePlanEvaluation {
     pub counterexample: Option<CoverageCounterexample>,
 }
 
-/// Evaluate one plan under the complete bounded failure quantifier.
+/// Evaluate one plan against every maximal allowed sensor failure.
 pub fn evaluate_coverage_plan(
     specification: &CoverageSpecification,
     actions: &[CoverageAction],
@@ -698,7 +698,7 @@ impl From<&CoveragePlanEvaluation> for EvaluationClaim {
     }
 }
 
-/// Self-contained proof-carrying coverage synthesis result.
+/// Proof-carrying coverage synthesis result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoverageSynthesisArtifact {
     specification: CoverageSpecification,
@@ -834,7 +834,9 @@ impl CoverageSynthesisArtifact {
         Ok(artifact)
     }
 
-    /// Verify the semantic claims and proof without repeating producer search.
+    /// Verify the claim and proof tree.
+    ///
+    /// Verification does not rerun producer search.
     pub fn verify(&self, limits: CoverageSynthesisLimits) -> Result<()> {
         validate_coverage_artifact_inputs(self, limits)?;
         let (_, after) = checked_coverage_evaluations(self, limits.coverage)?;
@@ -879,17 +881,17 @@ impl CoverageSynthesisArtifact {
         self.upper_bound_cost
     }
 
-    /// Producer topology calls made during optimization.
+    /// Producer oracle calls made during search.
     pub fn producer_oracle_calls(&self) -> usize {
         self.producer_oracle_calls
     }
 
-    /// Producer branch nodes visited during optimization.
+    /// Producer branch nodes visited during search.
     pub fn producer_search_nodes(&self) -> usize {
         self.producer_search_nodes
     }
 
-    /// Topology checks required by the proof tree.
+    /// Coverage-predicate checks required by the proof tree.
     pub fn proof_topology_checks(&self) -> usize {
         self.proof_work.checks
     }

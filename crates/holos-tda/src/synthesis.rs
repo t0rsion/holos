@@ -52,7 +52,7 @@ pub struct SynthesisLimits {
     pub max_proof_depth: usize,
     /// Limits for each canonical cohomology computation.
     pub cohomology: CohomologyLimits,
-    /// Limits for replaying a bound affine trajectory.
+    /// Limits for replaying an affine trajectory.
     pub kinetic: KineticLimits,
 }
 
@@ -75,10 +75,10 @@ impl Default for SynthesisLimits {
     }
 }
 
-/// Origin of the finite states in a topological specification.
+/// Origin and completeness scope of the finite state list.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SynthesisSource {
-    /// States were supplied directly. The artifact makes no completeness claim outside them.
+    /// States were supplied directly. No completeness claim is made outside them.
     Finite,
     /// States are the complete fixed-scale schedule of an affine trajectory.
     Affine {
@@ -360,7 +360,7 @@ impl SynthesisAction {
 }
 
 impl TopologicalSpecification {
-    /// Decompose the exact problem by state-action incidence.
+    /// Decompose the state-action incidence relation into components.
     ///
     /// Each state predicate depends only on actions in its returned component.
     /// Components share neither an action nor a state obligation.
@@ -478,7 +478,7 @@ enum ProofNode {
     },
 }
 
-/// Self-contained proof-carrying synthesis result.
+/// Proof-carrying synthesis result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SynthesisArtifact {
     specification: TopologicalSpecification,
@@ -551,7 +551,7 @@ struct BuiltProof {
 }
 
 impl SynthesisArtifact {
-    /// Solve a minimum-cost action problem and build its independent proof tree.
+    /// Solve a minimum-cost action problem and build its proof tree.
     pub fn build(
         specification: TopologicalSpecification,
         actions: Vec<SynthesisAction>,
@@ -626,7 +626,7 @@ impl SynthesisArtifact {
         Ok(artifact)
     }
 
-    /// Verify the claim and proof tree without replaying branch-and-bound.
+    /// Verify the claim and proof tree.
     pub fn verify(&self, limits: SynthesisLimits) -> Result<()> {
         validate_problem(
             &self.specification,

@@ -1,4 +1,8 @@
 //! Exact component frontiers for failure-tolerant coverage synthesis.
+//!
+//! [`crate::CoverageSpecification::components`] splits the state-action
+//! incidence graph. Each local search returns nondominated activation-cost
+//! plans. [`compose_coverage_frontiers`] combines them under `max_activations`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -13,9 +17,9 @@ use crate::{
 /// Completeness status of a compositional coverage calculation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoverageCompositionStatus {
-    /// Every component frontier is complete, and the returned plan is optimal.
+    /// Every component frontier is complete. The returned plan is optimal.
     Optimal,
-    /// Every component frontier is complete, but no plan meets the activation limit.
+    /// Every component frontier is complete. No plan meets the activation limit.
     Infeasible,
     /// A producer work limit stopped at least one component search.
     SearchIncomplete,
@@ -56,7 +60,7 @@ impl CoverageFrontierEntry {
     }
 }
 
-/// Complete nondominated plan frontier for one incidence component.
+/// Nondominated plan frontier for one incidence component.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverageComponentFrontier {
     component: CoverageComponent,
@@ -126,9 +130,10 @@ impl CoverageComposition {
 
 /// Build exact component frontiers and compose a minimum-cost global plan.
 ///
-/// The state-action incidence graph defines the components. Each local search
-/// covers every activation limit that can contribute to the global plan. The
-/// final dynamic program enforces `max_activations` across all components.
+/// Each local search runs at every activation count up to `max_activations`.
+/// The dynamic program then picks one frontier entry per component under that
+/// limit. A producer work limit returns
+/// [`CoverageCompositionStatus::SearchIncomplete`].
 pub fn compose_coverage_frontiers(
     specification: &CoverageSpecification,
     actions: &[CoverageAction],
