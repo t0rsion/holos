@@ -662,7 +662,7 @@ fn reconstruct_input(
         let (u, v) = step.edge();
         (u, v, step.value())
     }));
-    input.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+    input.sort_unstable_by_key(|edge| (edge.0, edge.1));
     validate_edges(certificate.vertex_count(), &input, "reconstructed input")?;
     if input.len() != certificate.input_edge_count() {
         return Err(ArtifactError::new(format!(
