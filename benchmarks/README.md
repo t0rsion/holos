@@ -12,10 +12,10 @@ diagrams do not match is void.
 
 ## Study scope
 
-The tracked harness covers the public engine and collapse studies. One v0.7
-research harness will cover the integrated proof, synthesis, and coverage
-claims. Historical one-release drivers and records remain in the local
-archive. They do not define a public v0.7 claim.
+The tracked harness covers the public engine and collapse studies. The v0.7
+research harness covers the integrated proof, synthesis, and coverage paths.
+Historical one-release drivers and records remain in the local archive. They
+do not define a public v0.7 claim.
 
 `research_bench.sh` is the v0.7 certified-workflow study. It measures exact
 portfolio production and linked checking, explicit-complex production and
