@@ -15,9 +15,7 @@ use crate::{Error, Result};
 /// lower triangle, `n(n-1)/2` entries, and is the form every constructor
 /// builds. The full form holds both triangles row-major, `n * n` entries,
 /// so that a cofacet diameter fold reads one contiguous row per simplex
-/// vertex instead of one strided column. A dense run converts to the full
-/// form when [`crate::DenseStorage`] selects it. Both forms answer every
-/// query identically.
+/// vertex instead of one strided column.
 #[derive(Debug, Clone)]
 pub struct DistanceMatrix {
     n: usize,
@@ -118,8 +116,6 @@ impl DistanceMatrix {
 
     /// Count the pairs that enter the complex at `threshold`: finite and at
     /// or below it. One pass over the condensed triangle, no allocation.
-    /// This is the predicate the engine applies to an edge, so the count is
-    /// the edge count of the filtered complex.
     pub(crate) fn count_edges_at(&self, threshold: f64) -> usize {
         (1..self.n)
             .map(|i| {
@@ -133,14 +129,13 @@ impl DistanceMatrix {
 
     /// The thresholded graph: the pairs [`DistanceMatrix::count_edges_at`]
     /// counts, over the same vertex set. A vertex with no edge keeps its
-    /// place and its essential H0 bar, because `n` sizes the graph.
+    /// place and its essential H0 bar.
     ///
-    /// The conversion writes the compressed neighbor block directly. One
-    /// pass over the lower triangle counts the degrees, and a second pass
-    /// files each kept pair under both of its endpoints. Row `i` reaches
-    /// vertex `v` before any later row does, and it lists the neighbors
-    /// below `v` in ascending order, so every list comes out sorted and the
-    /// conversion needs no sort.
+    /// One pass over the lower triangle counts the degrees, and a second
+    /// pass files each kept pair under both of its endpoints. Row `i`
+    /// reaches vertex `v` before any later row does, and it lists the
+    /// neighbors below `v` in ascending order, so every list comes out
+    /// sorted.
     pub(crate) fn to_sparse_at(&self, threshold: f64) -> Result<SparseDistanceMatrix> {
         let n = self.n;
         if n > u32::MAX as usize {
@@ -194,10 +189,9 @@ impl DistanceMatrix {
         })
     }
 
-    /// Return the minimum over i of the maximum over j of d(i,j). Past that
-    /// radius the complex is a cone and acquires no further homology, so it
-    /// is the default threshold. It does not change the full persistence
-    /// result.
+    /// Minimum over i of the maximum over j of d(i, j). Past that radius
+    /// the complex is a cone and acquires no further homology. This is the
+    /// default threshold.
     pub fn enclosing_radius(&self) -> f64 {
         if self.n < 2 {
             return 0.0;
@@ -257,7 +251,7 @@ impl PointCloudParams {
         }
     }
 
-    /// Set the worker count. Zero runs serially.
+    /// Set the worker count. Zero and one both run serially.
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads;
         self
@@ -571,11 +565,6 @@ impl DistanceMatrix {
     /// The same distances in the full row-major form. Every constructor
     /// builds the compact form, so this is the only way a run reaches the
     /// full one.
-    ///
-    /// The caller keeps the compact matrix, so the conversion holds
-    /// `n * n + n(n-1)/2` entries at once: one and a half times the full
-    /// form, three times the compact one. That peak lasts as long as the
-    /// dense run.
     pub(crate) fn to_square(&self) -> Self {
         #[cfg(test)]
         SQUARE_BUILDS.with(|c| c.set(c.get() + 1));
@@ -596,9 +585,9 @@ impl DistanceMatrix {
     }
 }
 
-/// Sparse dissimilarities: only listed pairs have finite distance. Every
-/// unlisted pair is an absent edge (+inf) that never enters the filtration.
-/// No metric assumptions, same entry rules as [`DistanceMatrix`].
+/// Sparse dissimilarities: only listed pairs have finite distance. An
+/// unlisted pair is an absent edge (+inf). No metric assumptions, same
+/// entry rules as [`DistanceMatrix`].
 ///
 /// The neighbor lists live in one compressed block: an offset for each
 /// vertex, then the neighbor vertices as `u32` and their distances in two
@@ -705,7 +694,7 @@ impl SparseDistanceMatrix {
         self.n == 0
     }
 
-    /// Number of stored (present) edges.
+    /// Number of stored edges.
     pub fn num_edges(&self) -> usize {
         self.indices.len() / 2
     }
@@ -913,10 +902,9 @@ const INLINE_VERTS: usize = 16;
 
 /// Untimed event counters for the sparse cofacet enumerator.
 ///
-/// Only a test build has them. Everywhere else the `note_*` functions are
-/// empty, so the shipped enumerator carries no counter code and no counter
-/// state. The counts are thread-local because the test binary runs tests
-/// on several threads at once.
+/// Only a test build has them. Elsewhere the `note_*` functions are empty.
+/// The counts are thread-local because the test binary runs tests on
+/// several threads at once.
 #[cfg(test)]
 mod counters {
     use std::cell::Cell;
@@ -1006,8 +994,7 @@ mod counters {
     pub(super) fn note_vacuous_bound() {}
 }
 
-/// What the solver needs from a distance source. Dense and sparse inputs
-/// share the whole engine through this trait. An absent pair reads as +inf.
+/// What the solver needs from a distance source. An absent pair reads as +inf.
 pub(crate) trait Distances {
     fn len(&self) -> usize;
     fn get(&self, i: usize, j: usize) -> f64;
@@ -1026,12 +1013,13 @@ pub(crate) trait Distances {
     /// Enumerate cofacets of `simplex` (vertex set `verts`, ascending) in
     /// dimension `dim`, in strictly descending index order. `f` runs on each
     /// cofacet. With `upper_only`, restrict to cofacets whose added vertex
-    /// exceeds every simplex vertex. Over all d-simplices that generates each
-    /// (d+1)-simplex exactly once. Diameters may exceed the threshold or be
-    /// infinite: the caller filters. `f` may short-circuit with `Break`.
+    /// exceeds every simplex vertex. Over all d-simplices, that restriction
+    /// generates each (d+1)-simplex exactly once. Diameters may exceed the
+    /// threshold or be infinite: the caller filters. `f` may short-circuit
+    /// with `Break`.
     ///
     /// The default walks the full combinadic cofacet set. A sparse source
-    /// overrides it to visit only common neighbors.
+    /// visits only common neighbors.
     #[inline]
     fn for_each_cofacet<T>(
         &self,
@@ -1055,14 +1043,12 @@ pub(crate) trait Distances {
 
     /// [`Distances::for_each_cofacet`] restricted to the cofacets whose
     /// diameter is at or below `bound`. Those reach `f` in the same order and
-    /// with the same bits as the unrestricted walk gives them; the rest never
-    /// reach `f` at all. `bound` must be at or above `simplex.diameter`.
+    /// with the same bits as the unrestricted walk. `bound` must be at or
+    /// above `simplex.diameter`.
     ///
     /// A cofacet diameter is the largest of the simplex diameter and the
     /// distances from the added vertex to the simplex vertices, so the fold
-    /// can stop at the first distance above the bound. A caller that drops
-    /// the cofacets above a bound then pays for one distance in place of the
-    /// whole fold.
+    /// can stop at the first distance above the bound.
     #[inline]
     #[allow(clippy::too_many_arguments)]
     fn for_each_cofacet_bounded<T>(
@@ -1172,8 +1158,7 @@ impl Distances for DistanceMatrix {
         }
     }
 
-    /// The dense walk, with a diameter fold that reads the storage form
-    /// directly instead of going through [`DistanceMatrix::get`].
+    /// The dense walk. The diameter fold reads the storage form directly.
     ///
     /// Both forms take the vertices in ascending position, as the default
     /// does, so the diameters and the stopping point match bit for bit.
@@ -1318,9 +1303,8 @@ impl Distances for SparseDistanceMatrix {
     /// The index, the position `k`, and the diameter match the dense
     /// default bit for bit. The index recurrence is the one
     /// [`CofacetIter::advance`] runs, and the diameter folds the same
-    /// values in the same order. The enumeration omits the cofacets whose
-    /// diameter is infinite, which are exactly the ones with an absent
-    /// edge.
+    /// values in the same order. The enumeration omits cofacets whose
+    /// diameter is infinite.
     ///
     /// Under `BOUNDED` the merge drops a candidate as soon as one of its
     /// distances exceeds `bound`. The cursors of the lists it did not reach
@@ -2339,9 +2323,6 @@ mod tests {
         assert_eq!(got, expected, "cofacets of the bounded walk");
     }
 
-    // The dense source overrides the walk; `Counting` does not, so it runs
-    // the default body on the same distances. The two must agree in bits and
-    // in order, bounded and unbounded alike.
     // Under `upper_only` the merge stops at the first candidate that is not
     // above every simplex vertex. The fixture puts two qualifying candidates
     // above the edge {2, 3} and two failing ones below it, so a walk that
@@ -2457,6 +2438,9 @@ mod tests {
         }
     }
 
+    // The dense source overrides the walk; `Counting` does not, so it runs
+    // the default body on the same distances. The two must agree in bits and
+    // in order, bounded and unbounded alike.
     #[test]
     fn the_dense_walk_matches_the_default_fold() {
         let mut rng = Rng::new(0x9e37_79b9);

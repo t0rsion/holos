@@ -1,7 +1,7 @@
 //! Vertex-biconnected factorization of sparse flag filtrations.
 //!
-//! The blocks are computed on the graph at the terminal level. Every clique
-//! with at least two vertices lies in one vertex-biconnected block. The
+//! The blocks are computed on the terminal graph. Every clique with at
+//! least two vertices lies in one vertex-biconnected block. The
 //! positive-dimensional flag chain groups therefore split over those blocks.
 //! H0 does not split at articulation vertices, so the engine computes it once
 //! on the whole graph.

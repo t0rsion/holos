@@ -8,18 +8,17 @@ use rayon::prelude::*;
 
 use crate::{Diagram, DistanceMatrix, Error, Result, SparseDistanceMatrix};
 
-/// Bytes one window of a file holds. A reader parses one window at a time,
-/// so it holds one window and the parsed values, not the whole text. On a
-/// 36 MiB L3 a window this size is still cache-warm when its parse starts.
+/// Bytes one window of a file holds. On a 36 MiB L3 a window this size is
+/// still cache-warm when its parse starts.
 const WINDOW_BYTES: usize = 16 << 20;
 
 /// Feed the text of `path` to `on_window`, one window at a time, in file
 /// order. A window ends after a newline or at the end of the file, so no
 /// line spans two windows. `on_window` gets the 1-based number of the
 /// window's first line and the window text, and returns the number of
-/// newlines it saw, which the parse counts anyway. With `threads` above one, a
-/// second thread reads the next window while `on_window` parses the
-/// current one; at one thread the reads and the parses alternate.
+/// newlines it saw. With `threads` above one, a second thread reads the
+/// next window while `on_window` parses the current one; at one thread the
+/// reads and the parses alternate.
 fn for_each_window(
     path: &Path,
     threads: usize,
@@ -78,7 +77,6 @@ fn for_each_window(
         for buf in full_rx {
             let buf = buf.map_err(io_err)?;
             consume(&buf)?;
-            // A closed return channel means the reader has finished.
             let _ = empty_tx.send(buf);
         }
         Ok(())
@@ -269,8 +267,8 @@ fn parse_workers(text: &str, threads: usize, min_bytes: usize) -> usize {
 }
 
 /// Split `text` into `workers` slices, each ending just after a `\n` or at
-/// the end of the text. No line spans two slices, so a slice parses on its
-/// own. A slice is empty when the text holds fewer lines than workers.
+/// the end of the text. No line spans two slices. A slice is empty when
+/// the text holds fewer lines than workers.
 fn line_chunks(text: &str, workers: usize) -> Vec<&str> {
     let bytes = text.as_bytes();
     let mut chunks = Vec::with_capacity(workers);
@@ -294,11 +292,9 @@ fn line_chunks(text: &str, workers: usize) -> Vec<&str> {
 /// on `pool`, or inline when `pool` is `None`.
 ///
 /// `parse_chunk` takes the 1-based number of the chunk's first line, counted
-/// from `first_line`, and the chunk text, so it names the lines a serial
-/// parse of the whole text names. The outputs come back in file order. Read
-/// them in that order and the first error in file order is the one you
-/// report. The line numbers cost one pass over the text, which counts the
-/// newlines of every chunk.
+/// from `first_line`, and the chunk text. Outputs come back in file order.
+/// The first error in file order is the one a caller reports. Line numbers
+/// cost one pass over the text, which counts the newlines of every chunk.
 fn map_line_chunks<T: Send>(
     pool: Option<&rayon::ThreadPool>,
     text: &str,
@@ -338,9 +334,9 @@ fn map_line_chunks<T: Send>(
     (results, lineno - first_line)
 }
 
-/// The parse of one input: a pool of the caller's workers, built once, and
-/// the values gathered so far. Every reader and every text parser feeds
-/// windows to one of these; a text parser feeds one window.
+/// Worker pool for one input, built once. Every reader and every text
+/// parser feeds windows through one of these; a text parser feeds one
+/// window.
 struct Parse {
     threads: usize,
     /// The smallest text that splits; tests lower it to split short texts.
@@ -405,8 +401,8 @@ pub fn read_point_cloud(path: &Path, threads: usize) -> Result<Vec<Vec<f64>>> {
 ///
 /// `threads` is the worker budget for the parse. With more than one thread
 /// and a text of at least one mebibyte, the parse splits into one line
-/// chunk per thread. The points and the error message are the same either
-/// way.
+/// chunk per thread. The points and the error message do not depend on the
+/// worker count.
 pub fn parse_point_cloud(name: &str, text: &str, threads: usize) -> Result<Vec<Vec<f64>>> {
     let mut sink = PointSink::new(threads);
     sink.window(name, 1, text)?;
@@ -473,7 +469,7 @@ struct PointChunk {
     /// Line number of the chunk's first point. Zero when it read none.
     first_line: usize,
     points: Vec<Vec<f64>>,
-    /// The line the chunk stopped on. Its points end just before that line.
+    /// Parse error from the first bad line, if any.
     error: Option<Error>,
 }
 
@@ -532,11 +528,9 @@ pub fn read_lower_distance_matrix(path: &Path, threads: usize) -> Result<Distanc
 /// `text`, in file order, in the format `read_lower_distance_matrix` reads.
 /// `name` prefixes every error message; a reader passes the file path.
 ///
-/// `threads` is the worker budget for the parse. With more than one thread
-/// and a text of at least one mebibyte, the parse splits into one line
-/// chunk per thread. The numbers and the error message are the same either
-/// way. A file that holds all its numbers on one line stays serial, because
-/// a chunk ends at a newline.
+/// `threads` is the worker budget for the parse. The numbers and the error
+/// message do not depend on the worker count. A file that holds all its
+/// numbers on one line stays serial, because a chunk ends at a newline.
 pub fn parse_condensed(name: &str, text: &str, threads: usize) -> Result<Vec<f64>> {
     let mut sink = CondensedSink::new(threads);
     sink.window(name, 1, text)?;
@@ -632,10 +626,8 @@ pub type Triplet = (usize, usize, f64);
 /// and the triplets in file order. `name` prefixes every error message; a
 /// reader passes the file path.
 ///
-/// `threads` is the worker budget for the parse. With more than one thread
-/// and a text of at least one mebibyte, the parse splits into one line
-/// chunk per thread. The triplets and the error message are the same either
-/// way.
+/// `threads` is the worker budget for the parse. The triplets and the error
+/// message do not depend on the worker count.
 pub fn parse_triplets(name: &str, text: &str, threads: usize) -> Result<(usize, Vec<Triplet>)> {
     let mut sink = TripletSink::new(threads);
     sink.window(name, 1, text)?;
@@ -763,9 +755,8 @@ pub enum OutputFormat {
 /// Write a diagram to `w` in the given format.
 ///
 /// `max_dim` fixes how many dimension headers the ripser format prints, so
-/// empty top dimensions still appear. The syntax matches ripser. The header
-/// count follows holos's effective dimension (ripser clamps at n-2, holos at
-/// n-1). The bars themselves are the same either way.
+/// empty top dimensions still appear. The header count follows holos's
+/// effective dimension (ripser clamps at n-2, holos at n-1).
 pub fn write_diagram<W: Write>(
     w: &mut W,
     diagram: &Diagram,
