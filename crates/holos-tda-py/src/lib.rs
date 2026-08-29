@@ -1072,7 +1072,7 @@ fn rips_sparse_classes(
     })
 }
 
-/// Compiled sparse graph atlas with portable proof bytes.
+/// Compiled sparse graph atlas with `HOLOSATL` bytes.
 #[pyclass(name = "SparseAtlas")]
 struct PySparseAtlas {
     input: SparseDistanceMatrix,
@@ -1244,7 +1244,7 @@ fn load_sparse_atlas(
     })
 }
 
-/// Immutable exact persistence over filtered separator interfaces.
+/// Immutable persistence over filtered separator interfaces.
 #[pyclass(name = "SparseIndex")]
 struct PySparseIndex {
     index: PersistenceIndex,

@@ -24,7 +24,7 @@ def _edge_key(edge):
 
 
 class StrictSparseProgram:
-    """Stateful strict derivatives along one fixed sparse graph topology.
+    """Stateful strict derivatives along a fixed sparse graph topology.
 
     The input edge weights must be distinct. No weight may equal the fixed
     threshold. A call can still repair a reduction region. The returned

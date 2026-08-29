@@ -11,9 +11,9 @@ module computes strict finite H1 endpoint derivatives for distinct edge
 weights.
 
 `SparseIndex` maintains immutable persistence versions over separator
-interfaces through the configured dimension. It composes exact relative
-filtered cores, applies atomic active-topology patches, and emits independently
-checkable proof records.
+interfaces through the configured dimension. It composes relative filtered
+cores, applies atomic active-topology patches, and emits proof records for
+the separate checker.
 
 `kinetic_zigzag` computes exact fixed-scale class dynamics for affine edge
 weights. It returns a `HOLOSZZ` artifact for the separate checker.

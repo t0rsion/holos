@@ -108,8 +108,7 @@ def compile_relative_interface(n, triplets, protected=(), max_dim=1,
                                threshold=None, modulus=2):
     """Compile a proof-carrying chain core relative to protected vertices.
 
-    The protected vertices induce the separator subcomplex. The returned
-    artifact is accepted by ``holos-check``.
+    The protected vertices induce the separator subcomplex.
     """
     artifact, bars, work = _core.compile_relative_interface(
         int(n),
@@ -919,7 +918,7 @@ class PointAtlas:
 
 
 class SparseIndex:
-    """Versioned exact persistence for a sparse graph.
+    """Versioned persistence for a sparse graph.
 
     The listed edges form a fixed envelope. Updates inside that envelope
     path-copy changed relative cores and share the rest. An envelope change
@@ -1137,8 +1136,8 @@ class SparseProgram:
     def fork(self, n, alternatives):
         """Advance independent alternatives from the current state.
 
-        The current program does not change. Each returned branch can receive
-        later updates independently.
+        The current program does not change. Each returned branch can
+        receive later updates.
         """
         raw = [_triplets(alternative) for alternative in alternatives]
         return [
@@ -1175,7 +1174,7 @@ def compile_sparse_index(n, triplets, max_dim=1, threshold=None, modulus=2,
                          separator_width=4,
                          separator_search_limit=100_000,
                          leaf_vertices=4, interface_policy="relative"):
-    """Compile a versioned exact sparse persistence index."""
+    """Compile a versioned sparse persistence index."""
     inner = _core.compile_sparse_index(
         int(n), _triplets(triplets), int(max_dim), threshold, modulus, threads,
         int(separator_width), int(separator_search_limit), int(leaf_vertices),
@@ -1204,7 +1203,7 @@ def compile_points_atlas(points, threshold, modulus=2, threads=1,
 
 
 def compile_sparse_program(n, triplets, threshold=None, modulus=2, threads=1):
-    """Compile a checked compositional H0 and H1 persistence program."""
+    """Compile a checked H0 and H1 persistence program."""
     inner = _core.compile_sparse_program(
         int(n), _triplets(triplets), threshold, modulus, threads)
     return SparseProgram(inner)
@@ -1234,7 +1233,7 @@ def compile_sparse_proof(n, initial, updates, threshold=None,
 
 
 def verify_program_trace(artifact):
-    """Independently check ``HOLOSDLT`` bytes and return step counts."""
+    """Check ``HOLOSDLT`` bytes and return step counts."""
     steps, reused, repaired, recompiled = _core.verify_program_trace(
         bytes(artifact))
     return {
@@ -1246,7 +1245,7 @@ def verify_program_trace(artifact):
 
 
 def verify_intervention(artifact):
-    """Independently check ``HOLOSINT`` bytes and return its claim."""
+    """Check ``HOLOSINT`` bytes and return its claim."""
     return _intervention(_core.verify_intervention(bytes(artifact)))
 
 
