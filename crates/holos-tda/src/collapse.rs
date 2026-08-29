@@ -9,25 +9,26 @@
 //!
 //! Four schedules exist. [`collapse_dense`] and [`collapse_sparse`] run
 //! the serial schedule: passes over the edges with immediate deletion.
-//! This is what [`crate::rips_persistence`] and the CLI run by default,
-//! and in the registered studies the fastest end to end on most inputs;
+//! [`crate::rips_persistence`] and the CLI use this schedule by default.
+//! In the registered studies it is the fastest on most inputs.
 //! [`crate::CollapseSchedule`] selects the others.
 //! [`collapse_dense_ordered_parallel`] and
-//! [`collapse_sparse_ordered_parallel`] run the ordered schedule: the same
-//! removals, tested speculatively in parallel, so their output is the
-//! serial one, field for field, at every worker count. Both schedules
-//! write an algorithm version 1 certificate.
+//! [`collapse_sparse_ordered_parallel`] run the ordered schedule. They
+//! perform the same removals, tested speculatively in parallel. Their
+//! output is the serial one, field for field, at every worker count.
+//! Serial and ordered both write an algorithm version 1 certificate.
 //! [`collapse_dense_rounds_parallel`] and
-//! [`collapse_sparse_rounds_parallel`] run the rounds schedule, which
-//! writes a version 2 certificate: each round tests the live edges against
-//! a frozen graph and deletes a batch of provably independent removals,
-//! also byte-identical at every worker count. All are deterministic given
-//! the vertex labeling. [`collapse_dense_adaptive`] and
-//! [`collapse_sparse_adaptive`] run the version 3 schedule. It ranks live
-//! removals by the triangles or tetrahedra they remove, and can return a
-//! certified partial collapse at a declared work limit. No reduced graph
-//! is canonical. A relabeling or schedule change can move the surviving
-//! set, but never the barcode.
+//! [`collapse_sparse_rounds_parallel`] run the rounds schedule. It writes
+//! a version 2 certificate. Each round tests live edges against a frozen
+//! graph and deletes a batch of provably independent removals. The output is
+//! byte-identical at every worker count. All four schedules are
+//! deterministic given the vertex labeling.
+//! [`collapse_dense_adaptive`] and [`collapse_sparse_adaptive`] run the
+//! version 3 schedule. It ranks live removals by the triangles or
+//! tetrahedra they remove. With a declared work limit it can return a
+//! certified partial collapse. No reduced graph is canonical. A
+//! relabeling or schedule change can move the surviving set. The barcode
+//! does not change.
 
 mod adaptive;
 mod ordered;
@@ -62,8 +63,7 @@ use crate::{DistanceMatrix, Error, Result, SparseDistanceMatrix};
 /// first favors removals that destroy more tetrahedra, then uses the
 /// triangle count as a tie breaker. Each planned removal is tested again
 /// against the current graph. The score guides the order only. Every
-/// removal passes the same filtration-wide predicate and preserves
-/// persistence in every dimension.
+/// removal passes the same filtration-wide predicate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CollapseObjective {
@@ -128,7 +128,7 @@ impl AdaptiveCollapseParams {
 pub enum SchedulePosition {
     /// A serial or ordered version 1 pass.
     Pass(usize),
-    /// A snapshot-parallel version 2 round.
+    /// A rounds-schedule version 2 round.
     Round(usize),
     /// An unstructured version 3 removal sequence.
     Sequence(usize),
@@ -182,9 +182,8 @@ impl RemovalStep {
 /// Replayable record of one collapse run.
 ///
 /// The certificate plus the collapsed matrix reconstruct the thresholded
-/// input, and [`verify`] can replay and check every removal. The
-/// certificate is not a chain map: it certifies that the removals preserve
-/// the diagram, and does not transport representatives.
+/// input. [`verify`] can replay and check every removal. The certificate
+/// is not a chain map and does not transport representatives.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollapseCertificate {
     algorithm_version: u32,
@@ -208,7 +207,7 @@ impl CollapseCertificate {
 
     /// Downstream objective for an adaptive version 3 run.
     ///
-    /// Versions 1 and 2 return `None` because their schedules do not rank
+    /// Versions 1 and 2 return `None`. Those schedules do not rank
     /// removals by a downstream-work estimate.
     pub fn objective(&self) -> Option<CollapseObjective> {
         self.objective
@@ -226,8 +225,7 @@ impl CollapseCertificate {
 
     /// Adaptive work units consumed by the schedule.
     ///
-    /// Versions 1 and 2 report zero because their historical certificates
-    /// did not define this counter.
+    /// Versions 1 and 2 report zero.
     pub fn work_used(&self) -> u64 {
         self.work_used
     }
@@ -338,8 +336,7 @@ pub struct CollapseStats {
 }
 
 impl CollapseStats {
-    /// Counters before the first schedule stage: nothing tested, nothing removed,
-    /// and every input edge still an output edge.
+    /// Counters with `input_edges` set and every input edge still an output edge.
     fn new(input_edges: usize) -> Self {
         CollapseStats {
             input_edges,
@@ -353,8 +350,7 @@ impl CollapseStats {
 ///
 /// Zero on the serial and rounds schedules, which have no speculative
 /// phases to separate. The ordered schedule reports the parallel test
-/// phase, the serial retirement walk, and the repairs inside it, so a
-/// study can weigh repair cost against predicate cost directly. Timings
+/// phase, the serial retirement walk, and the repairs inside it. Timings
 /// are diagnostics: they vary between runs and never affect an output
 /// field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -369,13 +365,12 @@ pub struct CollapseTimings {
     pub repair_ns: u64,
 }
 
-/// A collapsed filtration: the reduced graph, the certificate that the
-/// reduction preserves the diagram, run counters, and wall-clock timings.
+/// Reduced graph, collapse certificate, run counters, and wall-clock timings.
 ///
-/// Pass the matrix straight to [`crate::rips_persistence_sparse`]. One
-/// collapse can serve many downstream runs: the reduction is independent of
-/// modulus, homology dimension, optimization toggles, and thread count.
-/// The schedule does change which edges survive.
+/// The matrix is the input to [`crate::rips_persistence_sparse`]. The
+/// reduction does not depend on modulus, homology dimension, optimization
+/// toggles, or solver thread count. The schedule does change which edges
+/// survive.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CollapsedRips {
@@ -444,8 +439,9 @@ struct Prepared {
     run: Run,
 }
 
-/// Which execution produced a run. It fixes the two output fields the
-/// three executions do not share.
+/// Which execution produced a run.
+///
+/// It sets the certificate version and the adaptive stopping fields.
 #[derive(Clone, Copy)]
 enum Execution {
     /// The serial version 1 run: certificate version 1, and the physical
@@ -467,7 +463,7 @@ enum Execution {
     },
 }
 
-/// Collect the thresholded input and index it. The three executions start
+/// Collect the thresholded input and index it. Every execution starts
 /// here, so they see the same edge order and the same terminal level.
 fn prepare<D: Distances>(dist: &D, threshold: Option<f64>) -> Result<Prepared> {
     validate_threshold(threshold)?;
@@ -943,12 +939,10 @@ fn collapse_impl<D: Distances>(dist: &D, threshold: Option<f64>) -> Result<Colla
     let mut stats = CollapseStats::new(edges.len());
     let mut steps: Vec<RemovalStep> = Vec::new();
     let mut scratch = Scratch::default();
-    // A failed verdict can change only when an edge inside the test's own
-    // neighborhood goes away, so later passes retest only edges marked by
-    // `mark_dirty`, or every live edge again after a removal whose
-    // neighborhood was too large to mark finely. Both are supersets of the
-    // edges whose verdicts could have changed, so the removal sequence, and
-    // with it the certificate, is identical to retesting everything.
+    // A failed verdict can change only after an edge in its neighborhood
+    // is removed. Later passes retest dirty edges, or every live edge
+    // after a MARK_LIMIT bail. Both sets cover every edge whose verdict
+    // could have changed, so the certificate matches a full retest.
     let mut dirty: Vec<bool> = vec![false; edges.len()];
     let mut test_all = true;
     loop {

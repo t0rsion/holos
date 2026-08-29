@@ -1,4 +1,4 @@
-//! Deterministic score-ordered collapse schedule.
+//! Adaptive version 3 collapse schedule.
 
 use super::*;
 use std::cmp::Ordering;
@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 /// Score of one removable edge in the current graph.
 ///
 /// The heap compares `primary`, then `secondary`. The raw clique counts
-/// travel with the entry so the run records what each selected removal
+/// stay on the entry so the run records what each selected removal
 /// destroyed without recomputing the score.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Score {

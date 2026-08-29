@@ -1,15 +1,15 @@
 //! The rounds schedule: frozen-graph rounds with deterministic greedy
 //! batches, written as algorithm version 2 certificates.
 //!
-//! Each round tests the live edges against a frozen copy of the graph,
-//! orders the removable ones by the frozen priority, selects a greedy
-//! maximal set of pairwise non-conflicting edges, and deletes the batch.
-//! Two edges conflict when one lies inside the subgraph induced by the
-//! other's closed common neighborhood. The matrix and certificate are
-//! identical at every worker count, including one, field for field.
+//! Each round tests the live edges against a frozen copy of the graph.
+//! It orders the removable ones by the frozen priority, then selects a
+//! greedy maximal set of pairwise non-conflicting edges and deletes the
+//! batch. Two edges conflict when one lies inside the subgraph induced
+//! by the other's closed common neighborhood. The matrix and certificate
+//! are identical at every worker count, including one, field for field.
 //!
-//! The rounds graph is not the serial graph: the schedules differ, and
-//! neither output is canonical. Both preserve the barcode exactly.
+//! The rounds graph is not the serial graph. The schedules differ, and
+//! neither output is canonical.
 
 use rayon::prelude::*;
 
@@ -23,10 +23,9 @@ use crate::{DistanceMatrix, Result, SparseDistanceMatrix};
 
 /// Collapse a dense distance matrix with the rounds schedule.
 ///
-/// `threshold` follows the engine's rule: `None` means the enclosing
-/// radius. `threads` of 0 or 1 run one worker; the result does not depend
-/// on the worker count. A standalone call owns its thread pool for the
-/// duration.
+/// `threshold` follows the same rule as [`super::collapse_dense`].
+/// `threads` of 0 or 1 run one worker. The result does not depend on the
+/// worker count. A standalone call owns its thread pool.
 pub fn collapse_dense_rounds_parallel(
     dist: &DistanceMatrix,
     threshold: Option<f64>,
@@ -37,7 +36,7 @@ pub fn collapse_dense_rounds_parallel(
 
 /// Collapse a sparse distance matrix with the rounds schedule.
 ///
-/// Same contract as [`collapse_dense_rounds_parallel`]; `None` keeps every
+/// Same contract as [`collapse_dense_rounds_parallel`]. `None` keeps every
 /// listed edge.
 pub fn collapse_sparse_rounds_parallel(
     dist: &SparseDistanceMatrix,

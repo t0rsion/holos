@@ -2,8 +2,8 @@
 //!
 //! A portfolio runs each listed schedule, verifies every removal, counts the
 //! surviving flag simplices, and selects the lexicographic minimum. The claim
-//! is exact over the declared candidates. It is not a claim that the selected
-//! trace is globally optimal over all valid collapse sequences.
+//! is exact over the declared candidates. It does not rank traces outside
+//! that list.
 
 use std::cmp::Ordering;
 
@@ -23,7 +23,7 @@ use crate::{Error, Result, SparseDistanceMatrix};
 pub enum CollapsePortfolioCandidate {
     /// Serial version 1 collapse.
     Serial,
-    /// Snapshot-round version 2 collapse with a worker budget.
+    /// Rounds schedule, algorithm version 2, with a worker budget.
     Rounds {
         /// Worker count for the schedule.
         threads: usize,
@@ -50,7 +50,7 @@ pub enum CollapsePortfolioObjective {
     /// dimensions 1 through `q + 1`, then compares those counts from high to
     /// low dimension.
     ReductionColumns {
-        /// Highest homology dimension served by the reduced graph.
+        /// Highest homology dimension the reduced graph is scored for.
         max_homology_dimension: usize,
     },
 }

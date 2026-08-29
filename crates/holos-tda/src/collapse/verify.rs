@@ -1,9 +1,9 @@
 //! Independent checker for [`CollapseCertificate`].
 //!
 //! The checker re-derives the thresholded input and replays every
-//! recorded removal against the spec text. It shares no sweep,
-//! scheduling, or witness-selection code with the collapser. It is slow
-//! by design: its job is to catch a wrong collapse.
+//! recorded removal. It shares no sweep, scheduling, or witness-selection
+//! code with the collapser. It is slow by design: its job is to catch a
+//! wrong collapse.
 //!
 //! The checker dispatches on the certificate's algorithm version.
 //! Version 1 replays the serial schedule: each step is checked against
@@ -11,8 +11,8 @@
 //! schedule: steps are grouped by round, every check in a round runs
 //! against the graph as it stood before the round, and the round's edges
 //! are deleted only after the whole round passes. Version 3 replays an
-//! unstructured adaptive sequence. It checks the safety of every removal,
-//! but it does not reproduce or certify the ranking policy.
+//! unstructured adaptive sequence. It checks the safety of every removal.
+//! It does not reproduce or certify the ranking policy.
 //!
 //! A passing certificate establishes:
 //!
@@ -20,13 +20,13 @@
 //!   level, and input and output edge counts all match the input, the
 //!   output matrix, and each other.
 //! - Replay safety: each step removes a live edge with the recorded
-//!   value, and at every critical value of the reference graph the
-//!   active witness apex satisfies the domination inequalities. The
-//!   reference graph is the current replay state for version 1 and the
-//!   pre-round snapshot for version 2. Every witness segment starts at
-//!   an independently recomputed critical value at or below the terminal
-//!   level, so every segment is the active segment at its own start and
-//!   no segment escapes the apex check.
+//!   value. At every critical value of the reference graph the active
+//!   witness apex satisfies the domination inequalities. The reference
+//!   graph is the current replay state for version 1 and the pre-round
+//!   graph for version 2. Every witness segment starts at an independently
+//!   recomputed critical value at or below the terminal level. Every
+//!   segment is therefore the active segment at its own start, and no
+//!   segment escapes the apex check.
 //! - Witness-rule fidelity: the segments are exactly what the frozen
 //!   selection rule produces on the reference graph. A kept apex still
 //!   dominates. A new segment opens only where the previous apex stopped
@@ -38,7 +38,7 @@
 //!   combinadic index of the endpoint pair.
 //! - Round independence, version 2 only: for every ordered pair of steps
 //!   in one round, the closed common neighborhood of the first edge,
-//!   taken in the snapshot, does not contain both endpoints of the
+//!   taken in the pre-round graph, does not contain both endpoints of the
 //!   second. A round that groups conflicting removals is rejected even
 //!   when replaying its steps one after the other would succeed.
 //! - Output and fixed point: after the last step the live edges equal the
@@ -47,13 +47,11 @@
 //!   `BudgetLimited` makes no fixed-point claim.
 //!
 //! The checker does not certify that a run followed the production
-//! scheduling policy. A complete certificate proves a fixed-point result,
-//! but it may reach that result through a different safe trace. Version 2
+//! scheduling policy. A complete certificate proves a fixed-point result.
+//! It may reach that result through a different safe trace. Version 2
 //! does not require each round to be a greedy-maximal batch. Version 3 does
 //! not check that the highest-scoring removal came first. Only a full
-//! production re-run establishes the canonical production trace. The test
-//! suite compares production certificates against reference runs where
-//! that distinction matters.
+//! production re-run establishes the canonical production trace.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -91,10 +89,8 @@ impl std::error::Error for VerifyError {}
 /// Check a certificate against the dense input it claims to describe.
 ///
 /// `threshold` must be the value passed to the collapse. On success the
-/// certificate replays cleanly, the replayed graph equals
-/// `result.matrix`, and every recorded removal is safe. A complete
-/// certificate also proves that no further edge is removable. A
-/// budget-limited certificate makes no fixed-point claim.
+/// certificate replays cleanly and the replayed graph equals
+/// `result.matrix`.
 pub fn verify_dense(
     dist: &DistanceMatrix,
     threshold: Option<f64>,
@@ -147,8 +143,8 @@ pub fn verify_sparse(
 
 /// Check a portable artifact against the dense input it claims to describe.
 ///
-/// This first checks the artifact's cryptographic graph bindings, then
-/// performs the same independent replay as [`verify_dense`].
+/// Checks the artifact's cryptographic graph bindings first, then runs the
+/// same independent replay as [`verify_dense`].
 pub fn verify_dense_artifact(
     dist: &DistanceMatrix,
     threshold: Option<f64>,
@@ -178,8 +174,8 @@ pub fn verify_dense_artifact(
 
 /// Check a portable artifact against the sparse input it claims to describe.
 ///
-/// This first checks the artifact's cryptographic graph bindings, then
-/// performs the same independent replay as [`verify_sparse`].
+/// Checks the artifact's cryptographic graph bindings first, then runs the
+/// same independent replay as [`verify_sparse`].
 pub fn verify_sparse_artifact(
     dist: &SparseDistanceMatrix,
     threshold: Option<f64>,
@@ -734,9 +730,8 @@ fn in_closed_common(adj: &[BTreeMap<usize, f64>], u: usize, v: usize, x: usize) 
     near_u && near_v
 }
 
-/// Replay a version 2 certificate: snapshot rounds. Each round is checked
-/// in full against the pre-round graph; deletions apply only after the
-/// whole round passes.
+/// Replay a version 2 certificate. Each round is checked in full against
+/// the pre-round graph. Deletions apply only after the whole round passes.
 fn replay_rounds(
     adj: &mut [BTreeMap<usize, f64>],
     n: usize,

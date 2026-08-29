@@ -3,11 +3,11 @@
 //!
 //! Workers test windows of due edges in parallel against a frozen graph
 //! state. The retirement walk then commits them strictly in the serial
-//! order: it reuses a cached verdict only when no removal committed since
-//! the test conflicts with it, and recomputes an invalidated verdict once
-//! against the current graph. Every worker count therefore produces the
-//! serial matrix and certificate, field for field, floats bit for bit.
-//! Only the work counters and the timings depend on the window and
+//! order. It reuses a cached verdict only when no later committed
+//! removal conflicts with the test. It recomputes an invalidated verdict
+//! once against the current graph. Every worker count therefore produces
+//! the serial matrix and certificate, field for field, floats bit for
+//! bit. Only the work counters and the timings depend on the window and
 //! worker configuration.
 
 use std::time::{Duration, Instant};
@@ -46,14 +46,10 @@ fn nanos(d: Duration) -> u64 {
     u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
 }
 
-/// Run the ordered schedule on a dense distance matrix.
+/// Collapse a dense distance matrix with the ordered schedule.
 ///
-/// Workers test a window of due edges in parallel, then the run retires
-/// them in serial order. `threshold` follows the engine's rule: `None` means the
-/// enclosing radius. The output equals the output of
-/// [`super::collapse_dense`] at any `threads`; 0 and 1 run the serial
-/// implementation. A standalone call owns its thread pool for the
-/// duration.
+/// The output equals [`super::collapse_dense`] at any `threads`. 0 and 1
+/// run the serial implementation. A standalone call owns its thread pool.
 pub fn collapse_dense_ordered_parallel(
     dist: &DistanceMatrix,
     threshold: Option<f64>,
@@ -62,9 +58,9 @@ pub fn collapse_dense_ordered_parallel(
     collapse_ordered_owned(dist, threshold, threads, None)
 }
 
-/// Run the ordered schedule on a sparse distance matrix.
+/// Collapse a sparse distance matrix with the ordered schedule.
 ///
-/// Same contract as [`collapse_dense_ordered_parallel`]; `None` keeps
+/// Same contract as [`collapse_dense_ordered_parallel`]. `None` keeps
 /// every listed edge.
 pub fn collapse_sparse_ordered_parallel(
     dist: &SparseDistanceMatrix,
@@ -74,11 +70,11 @@ pub fn collapse_sparse_ordered_parallel(
     collapse_ordered_owned(dist, threshold, threads, None)
 }
 
-/// Run the ordered schedule on a dense distance matrix with a forced
+/// Collapse a dense distance matrix with the ordered schedule and a forced
 /// window size.
 ///
 /// Hidden and unstable. It exists for the invariance gates, which cross
-/// worker counts with window sizes; the window is not public API and no
+/// worker counts with window sizes. The window is not public API and no
 /// output field depends on it. A `window` of 0 becomes 1.
 #[doc(hidden)]
 pub fn collapse_dense_ordered_with_window(
@@ -90,7 +86,7 @@ pub fn collapse_dense_ordered_with_window(
     collapse_ordered_owned(dist, threshold, threads, Some(window.max(1)))
 }
 
-/// Run the ordered schedule on a sparse distance matrix with a forced
+/// Collapse a sparse distance matrix with the ordered schedule and a forced
 /// window size.
 ///
 /// Same contract as [`collapse_dense_ordered_with_window`]: hidden,
@@ -106,7 +102,7 @@ pub fn collapse_sparse_ordered_with_window(
 }
 
 /// Build an owned pool for the call and run the ordered collapse on it.
-/// One worker has nothing to speculate on, so it runs the shipped serial
+/// One worker has nothing to speculate on, so it runs the serial
 /// implementation.
 fn collapse_ordered_owned<D: Distances + Sync>(
     dist: &D,
@@ -143,10 +139,7 @@ pub(crate) fn collapse_ordered_in<D: Distances + Sync>(
 
 /// The serial version 1 run, reported as an ordered run. Its logical
 /// trace is its own test sequence, so the logical count is the physical
-/// count.
-///
-/// The run has no stages, so it keeps the window counters at zero and the
-/// default timings the serial implementation reports.
+/// count. Window counters stay at zero.
 fn serial<D: Distances>(dist: &D, threshold: Option<f64>) -> Result<CollapsedRips> {
     super::collapse_impl(dist, threshold)
 }
