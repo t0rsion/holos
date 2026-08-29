@@ -1,10 +1,9 @@
 //! Proof-carrying persistence for explicit scalar filtered complexes.
 //!
-//! The implicit Vietoris-Rips engine remains the fast graph path. This module
-//! is the certified extension boundary for another complex builder. A caller
-//! supplies every simplex and face through [`FilteredSimplicialComplex`]. The
-//! certificate records a filtration-compatible unit-triangular basis change
-//! in each boundary dimension and a diagram derived from checked pivots.
+//! The caller supplies every simplex and face as a
+//! [`FilteredSimplicialComplex`]. The certificate records a
+//! filtration-compatible unit-triangular basis change in each boundary
+//! dimension. The diagram is derived from checked pivots.
 
 use sha2::{Digest, Sha256};
 
@@ -17,7 +16,7 @@ const MAGIC: &[u8; 8] = b"HOLOSEXP";
 const VERSION: u16 = 1;
 const F64_BITS_CODEC: u8 = 1;
 
-/// A dimension-generic algebraic certificate for an explicit filtration.
+/// A dimension-generic `D V = R` certificate for an explicit filtration.
 #[derive(Debug, Clone)]
 pub struct ExplicitReductionCertificate {
     complex: FilteredSimplicialComplex<ScalarGrade>,
@@ -32,8 +31,8 @@ impl ExplicitReductionCertificate {
     /// Build and check an explicit reduction certificate.
     ///
     /// The complex must contain simplex groups through dimension
-    /// `max_homology_dimension + 1`. Empty groups are valid and state that no
-    /// cofaces occur in that dimension.
+    /// `max_homology_dimension + 1`. An empty group records that no cofaces
+    /// occur in that dimension.
     pub fn build(
         complex: &FilteredSimplicialComplex<ScalarGrade>,
         max_homology_dimension: usize,

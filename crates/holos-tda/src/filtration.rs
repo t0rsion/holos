@@ -1,8 +1,7 @@
 //! Explicit filtered simplicial complexes and filtration grades.
 //!
-//! The implicit Vietoris-Rips engine remains the fast path for ordinary
-//! persistence. This module defines the checked exchange boundary used by
-//! relative interfaces and by future complex builders.
+//! Relative interfaces and explicit certificates take
+//! [`FilteredSimplicialComplex`] values.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -45,7 +44,7 @@ pub trait FiltrationGrade: Clone + Eq {
 /// A filtration grade with one canonical total order.
 pub trait LinearFiltrationGrade: FiltrationGrade + Ord {}
 
-/// A finite, non-negative scalar filtration grade.
+/// A finite, non-negative scalar filtration grade with a canonical total order.
 ///
 /// The value is stored as canonical IEEE 754 bits. Negative zero is stored as
 /// positive zero, so equality and ordering agree.
@@ -88,8 +87,8 @@ impl LinearFiltrationGrade for ScalarGrade {}
 
 /// A coordinatewise filtration grade with `N` parameters.
 ///
-/// This type represents the product partial order. It does not invent a total
-/// order for incomparable grades.
+/// Grades use the product partial order. Incomparable grades have no total
+/// order. Scalar persistence requires a [`ScalarProjection`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProductGrade<const N: usize> {
     coordinates: [ScalarGrade; N],
@@ -201,7 +200,7 @@ pub struct FilteredSimplicialComplex<G> {
 }
 
 impl<G: FiltrationGrade> FilteredSimplicialComplex<G> {
-    /// Validate an explicit complex grouped by simplex dimension.
+    /// Construct a checked explicit complex grouped by simplex dimension.
     pub fn new(
         vertex_labels: Vec<usize>,
         mut simplices: Vec<Vec<FilteredSimplex<G>>>,

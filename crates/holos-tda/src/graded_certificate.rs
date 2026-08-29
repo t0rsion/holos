@@ -43,7 +43,7 @@ impl GradedReductionRepairWork {
         &self.dimensions
     }
 
-    /// Columns retained without another reduction pass.
+    /// Columns retained without reduction.
     pub fn columns_reused(&self) -> usize {
         self.dimensions.iter().map(|work| work.columns_reused).sum()
     }
@@ -199,7 +199,7 @@ fn graded_repair_mode(work: &GradedReductionRepairWork) -> ReductionRepairMode {
 impl GradedReductionCertificate {
     /// Produce an exact certificate through the requested homology dimension.
     ///
-    /// The explicit producer materializes flag simplices through dimension
+    /// The producer materializes flag simplices through dimension
     /// `max_dim + 1`. [`CertificateLimits`] bounds each simplex collection
     /// before reduction.
     pub fn build(
@@ -262,7 +262,7 @@ impl GradedReductionCertificate {
         })
     }
 
-    /// Verify every boundary factorization without calling the persistence solver.
+    /// Verify every `D V = R` relation without calling the persistence solver.
     pub fn verify(
         &self,
         input: &SparseDistanceMatrix,
@@ -271,7 +271,7 @@ impl GradedReductionCertificate {
         Ok(self.verify_parts(input, limits)?.1.diagram)
     }
 
-    /// Highest homology dimension certified by this record.
+    /// Highest certified homology dimension.
     pub fn max_dim(&self) -> usize {
         self.max_dim
     }
@@ -299,7 +299,7 @@ impl GradedReductionCertificate {
             .map(Vec::as_slice)
     }
 
-    /// All boundary dimensions in ascending simplex dimension.
+    /// Change-of-basis columns in ascending simplex dimension.
     pub fn graded_columns(&self) -> &[Vec<ChangeColumn>] {
         &self.columns
     }
