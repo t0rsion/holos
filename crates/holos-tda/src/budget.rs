@@ -19,9 +19,8 @@ pub(crate) enum Region {
     Sort,
     /// Testing dim-0 cycle edges for a zero-apparent cofacet. Work is the
     /// cycle edge count, or the bound the dim-0 walk has before it counts
-    /// them. On the activation rows the count also picks the walk's shape:
-    /// one worker walks one diameter group at a time, more than one walks
-    /// a block of sorted edges at a time.
+    /// them. On the activation rows the count also picks the walk's block
+    /// size: one worker uses a smaller block.
     Prefilter,
     /// Cofacet assembly of one dimension. Work is the source simplex count.
     Assemble,
@@ -30,7 +29,7 @@ pub(crate) enum Region {
 }
 
 impl Region {
-    /// Work one worker needs before it earns its share of the split.
+    /// Work per worker before the region splits.
     const fn work_per_worker(self) -> usize {
         match self {
             Region::Sort => 10_000,
@@ -42,7 +41,7 @@ impl Region {
 }
 
 /// Workers to put on `work` units of `region` under a budget of `threads`.
-/// The result is 1 (the serial path) up to `threads`, and never more.
+/// The result is 1 (the serial path) up to `threads`.
 pub(crate) fn workers(region: Region, work: usize, threads: usize) -> usize {
     if threads <= 1 {
         return 1;

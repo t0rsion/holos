@@ -20,8 +20,7 @@ pub(crate) struct Entry {
     pub(crate) payload: u64,
 }
 
-/// An [`Entry`] in heap order, held as the single 128-bit key that order
-/// sorts by.
+/// An [`Entry`] packed as the 128-bit key the heap sorts by.
 ///
 /// Heap order matches ripser's working-column priority queue: pop the cofacet
 /// minimal in the (d+1)-simplex order, smallest diameter then largest index.
@@ -31,13 +30,12 @@ pub(crate) struct Entry {
 ///
 /// The key is the complement of the diameter bits over the payload. Every
 /// diameter is a maximum of validated distances, so it is not NaN, not
-/// negative, and has no negative zero; on those values the IEEE bit pattern
-/// read as `u64` orders as `total_cmp` does, and complementing it puts the
-/// largest diameter first. That makes one comparison one integer compare
-/// instead of a compare of two fields. `Coeffs::pack` debug-asserts the
-/// invariant, `bits_order_matches_total_cmp` pins it, and
-/// `bit_keys::the_key_order_matches_the_old_comparator` traces the whole
-/// cancellation against the field comparator it replaced.
+/// negative, and has no negative zero. On those values the IEEE bit pattern
+/// read as `u64` orders as `total_cmp` does. Complementing it puts the
+/// largest diameter first. One comparison is one integer compare.
+/// `Coeffs::pack` debug-asserts the invariant, `bits_order_matches_total_cmp`
+/// pins it, and `bit_keys::heap_traces_agree_under_both_comparators` traces
+/// the cancellation against the field comparator it replaced.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct HeapEntry(u128);
 
@@ -50,7 +48,7 @@ impl HeapEntry {
         HeapEntry(u128::from(!entry.diameter.to_bits()) << 64 | u128::from(entry.payload))
     }
 
-    /// The entry the key holds. The key is a bijection, so this is exact.
+    /// The entry the key holds. The key is a bijection.
     #[inline]
     pub(crate) fn entry(self) -> Entry {
         Entry {
@@ -81,9 +79,8 @@ impl PartialOrd for HeapEntry {
 /// Untimed comparison counter for the working-column heap.
 ///
 /// Only a test build has it. Everywhere else `note_comparison` is empty, so
-/// the shipped comparator carries no counter code and no counter state. The
-/// count is thread-local, because the test binary runs tests on several
-/// threads at once.
+/// the shipped comparator carries no counter. The count is thread-local,
+/// because the test binary runs tests on several threads at once.
 #[cfg(test)]
 pub(crate) mod counters {
     use std::cell::Cell;

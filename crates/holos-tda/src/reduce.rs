@@ -228,7 +228,6 @@ pub(crate) struct Engine<'a, C: Coeffs, D: Distances> {
     /// The filtration threshold, with `+inf` replaced by `f64::MAX`. A
     /// diameter is in the complex exactly when it is at or below this value:
     /// `+inf` fails against `f64::MAX`, and no finite diameter exceeds it.
-    /// That folds the finiteness test into the threshold test.
     effective_threshold: f64,
     pub(crate) max_dim: usize,
     pub(crate) params: &'a RipsParams,
@@ -278,7 +277,6 @@ impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
         let max_dim = params.max_dim.min(n.saturating_sub(1));
         let bt = BinomialTable::new(n, max_dim + 2)?;
         // Packing the coefficient into the entry leaves fewer index bits.
-        // Check that every simplex index the run can produce still fits.
         if bt.get(n, max_dim + 2) > ops.max_index() {
             return Err(crate::Error::IndexOverflow { n, dim: max_dim });
         }
@@ -287,8 +285,6 @@ impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
         } else {
             threshold
         };
-        // Adjacency rows for the dim-0 apparent test, when the graph is
-        // dense enough for the rows to fit the per-edge budget.
         let adjacency = (max_dim > 0 && params.use_apparent_pairs && params.use_adjacency_rows)
             .then(|| crate::adjacency::Adjacency::build(dist, effective_threshold))
             .flatten();
@@ -479,14 +475,14 @@ impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
     }
 
     /// The dim-0 walk with the apparent test on activation rows. The walk
-    /// takes the sorted edges one diameter at a time: it first sets the bit
-    /// of every edge of that diameter in both ends' rows, so the rows hold
-    /// exactly the edges at or below the diameter under test, then it walks
-    /// the group. For a cycle edge `(u, v)` the largest common bit of the two
-    /// rows is the largest `w` with both other edges at or below the
-    /// diameter, which is the youngest cofacet of equal diameter; the facet
-    /// check reads at most two distances from `adjacency`. The columns and
-    /// their order are those of the plain walk.
+    /// takes the sorted edges in blocks closed at a diameter boundary: it
+    /// first sets the bit of every edge of the block in both ends' rows, then
+    /// it walks the block. Rows may also hold later edges in the block; the
+    /// test checks each candidate against the diameter under test. For a
+    /// cycle edge `(u, v)` the largest common bit of the two rows with both
+    /// other edges at or below the diameter is the youngest cofacet of equal
+    /// diameter. The facet check reads at most two distances from
+    /// `adjacency`. The columns and their order are those of the plain walk.
     fn dim0_pairs_by_rows(
         &self,
         sorted: &[u128],
@@ -495,12 +491,9 @@ impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
     ) -> Vec<Simplex> {
         let cycle_bound = sorted.len().saturating_sub(self.n.saturating_sub(1));
         let workers = self.workers(Region::Prefilter, cycle_bound);
-        // A block of edges at a time, closed at a diameter boundary. The
-        // rows then also hold the block's later edges, and the test verifies
-        // each candidate against the diameter under test, so a block never
-        // changes an answer. Serial blocks are small: the walk pays a loop
-        // per block, and a large block gives the serial test more candidates
-        // above the diameter to reject.
+        // Serial blocks are small: the walk pays a loop per block, and a
+        // large block gives the serial test more candidates above the
+        // diameter to reject.
         let block = if workers > 1 {
             DIM0_ROWS_BLOCK
         } else {
@@ -1094,10 +1087,10 @@ impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
     /// Enumerate the coboundary of `column` and return its pivot, as
     /// ripser's init_coboundary_and_get_pivot does. When the emergent
     /// shortcut fires, the pivot comes back without building the working
-    /// column, so `working_cob` stays as the caller left it and a pivot
-    /// beside an empty `working_cob` marks that case. `has_pivot` answers
-    /// whether a given cofacet index is already a claimed pivot; a caller
-    /// whose answer can go stale must test the pivot again itself.
+    /// column. `working_cob` stays as the caller left it. A pivot beside an
+    /// empty `working_cob` marks that case. `has_pivot` answers whether a
+    /// given cofacet index is already a claimed pivot. A caller whose
+    /// answer can go stale must test the pivot again itself.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn init_coboundary(
         &self,
@@ -1167,8 +1160,7 @@ impl<'a, C: Coeffs + Sync, D: Distances + Sync> Engine<'a, C, D> {
         verts: &mut Vec<usize>,
     ) {
         self.bt.unrank(column.index, dim, self.n, verts);
-        // The cofacets go into the vector the heap owns and one heapify
-        // orders them, as in [`Engine::init_coboundary`].
+        // Same heapify as [`Engine::init_coboundary`].
         let mut heap = std::mem::take(working_cob).into_vec();
         self.dist.for_each_cofacet_bounded(
             &self.bt,
@@ -1425,9 +1417,7 @@ fn previous_float(value: f64) -> f64 {
 
 /// The working-column construction of 0.5.0, kept verbatim as the reference
 /// the shipped construction is tested against. It sifts each cofacet into the
-/// heap as it arrives. Do not change it: its worth is that it is the old
-/// body, and the tests in this file require the shipped construction to pop
-/// the same entries in the same order.
+/// heap as it arrives.
 #[cfg(test)]
 impl<C: Coeffs + Sync, D: Distances + Sync> Engine<'_, C, D> {
     /// The facet diameter of 0.6, kept as the reference the table-based
@@ -1445,8 +1435,7 @@ impl<C: Coeffs + Sync, D: Distances + Sync> Engine<'_, C, D> {
     /// The zero-pivot facet search of 0.6, kept verbatim as the reference
     /// the shipped search is tested against. It takes the facet index from
     /// `FacetIter`, which searches for the vertex it drops, and the facet
-    /// diameter from the distance source. Do not change it: its worth is
-    /// that it is the old body.
+    /// diameter from the distance source.
     pub(crate) fn zero_pivot_facet_reference(
         &self,
         vertices: &[usize],
@@ -1882,7 +1871,6 @@ mod tests {
                     reference.add(&a);
                     shipped.add(&b);
 
-                    // The parallel rebuild, on the same column.
                     let mut a = Built::default();
                     let mut b = Built::default();
                     heap_a.clear();

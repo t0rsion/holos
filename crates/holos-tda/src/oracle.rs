@@ -20,8 +20,8 @@ struct OracleReduction {
     pivots: Vec<Option<usize>>,
 }
 
-/// Textbook persistence of the Rips filtration over Z/2. It shares no code
-/// with the solver path. Feasible only for small inputs.
+/// Textbook persistence of the Rips filtration over Z/2. Feasible only for
+/// small inputs.
 pub fn rips_persistence_oracle(
     dist: &DistanceMatrix,
     max_dim: usize,

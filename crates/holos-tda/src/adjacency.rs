@@ -6,8 +6,8 @@
 //! is a word-wise AND of two rows scanned from the top, and each candidate costs
 //! two constant-time distance reads. The neighbor-list merge visits every entry
 //! of both lists instead. The rows cost `n * n / 8` bytes plus half that for
-//! the rank index, so the engine builds them only when that is at most the size
-//! of the graph itself.
+//! the rank index. The engine builds them only when they fit the per-edge
+//! budget.
 
 use crate::distances::Distances;
 
@@ -50,8 +50,7 @@ impl Adjacency {
 
     /// Build the rows from every edge of `dist` at or below `threshold`, or
     /// `None` when the rows and the walk's activation rows together would
-    /// take more than [`ADJACENCY_BYTES_PER_EDGE`] bytes an edge, which is
-    /// what the graph itself costs.
+    /// take more than [`ADJACENCY_BYTES_PER_EDGE`] bytes an edge.
     pub(crate) fn build<D: Distances>(dist: &D, threshold: f64) -> Option<Self> {
         Self::build_gated(dist, threshold, MIN_CYCLE_EDGES)
     }
@@ -126,8 +125,7 @@ impl Adjacency {
 }
 
 /// Activation rows: one bit per ordered pair, set as the dim-0 walk passes
-/// each edge, so the rows hold the edges at or below the diameter under
-/// test.
+/// each edge.
 pub(crate) struct Rows {
     words: usize,
     bits: Vec<u64>,
@@ -151,9 +149,9 @@ impl Rows {
 
     /// True when the youngest cofacet of `(u, v)` with the edge's diameter
     /// pairs with the edge. Every edge at or below the diameter is set, and
-    /// possibly some above it, so the scan takes the largest common bit whose
-    /// two edges are at or below the diameter, reading them from `adjacency`;
-    /// that is the cofacet's added vertex `w`, and the facet check reuses the
+    /// possibly some above it. The scan takes the largest common bit whose
+    /// two edges are at or below the diameter, reading them from `adjacency`.
+    /// That bit is the cofacet's added vertex `w`. The facet check reuses the
     /// two distances. `u < v`.
     pub(crate) fn pairs_edge(&self, adjacency: &Adjacency, u: usize, v: usize, d: f64) -> bool {
         debug_assert!(u < v);

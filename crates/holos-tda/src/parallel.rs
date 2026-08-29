@@ -3,7 +3,7 @@
 //! shared table under column-order priority. A column whose pivot is held by
 //! a larger-indexed column evicts that owner and re-queues it. A column that
 //! finds a smaller-indexed owner reduces against it. The table converges to
-//! the unique reduced pivot set, so the barcode is identical to the serial
+//! the unique reduced pivot set. The barcode is identical to the serial
 //! engine at every thread count.
 //!
 //! Each pivot's V-column lives in its table entry, so a reader observes an
@@ -70,11 +70,16 @@ fn claim(table: &Table, index: u64, owner: Owner) -> Claim {
     }
 }
 
-/// One field on a cache line of its own. Two workers that hammer two
+/// One field on a cache line of its own. Two workers that write two
 /// separate counters must not share a line, or each write costs the other a
 /// miss. The alignment covers the adjacent-line prefetch as well.
 #[repr(align(128))]
 struct Padded<T>(T);
+
+/// Idle polls a worker spends yielding before it sleeps.
+const IDLE_YIELDS: u32 = 32;
+/// The sleep doubles from one microsecond this many times, then holds.
+const IDLE_SLEEP_DOUBLINGS: u32 = 7;
 
 /// Columns awaiting reduction. An atomic counter dispenses the initial
 /// `0..len` lock-free. A mutex holds the rare displaced columns to
@@ -84,11 +89,6 @@ struct Padded<T>(T);
 /// The three shared counters sit on separate cache lines. A worker writes
 /// `next` on every column, so a `pending` on the same line would cost every
 /// other worker a miss per column.
-/// Idle polls a worker spends yielding before it sleeps.
-const IDLE_YIELDS: u32 = 32;
-/// The sleep doubles from one microsecond this many times, then holds.
-const IDLE_SLEEP_DOUBLINGS: u32 = 7;
-
 struct WorkQueue {
     /// The next undispensed column.
     next: Padded<AtomicUsize>,
@@ -505,10 +505,10 @@ mod tests {
     }
 
     /// The pivot registry the workers converge to must not depend on how many
-    /// of them there are, nor on the block the queue hands out. The check is
-    /// wider than the diagram: it compares the pivot index, the coefficient,
-    /// the owning column, and the diameter bits, and it compares the first
-    /// three against the serial reducer as well.
+    /// of them there are. The check is wider than the diagram: it compares
+    /// the pivot index, the coefficient, the owning column, and the diameter
+    /// bits, and it compares the first three against the serial reducer as
+    /// well.
     fn assert_registry_is_worker_invariant(dist: &DistanceMatrix, label: &str) {
         let mut serial_params = RipsParams::new(1);
         serial_params.threads = 1;
