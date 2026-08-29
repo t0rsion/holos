@@ -260,7 +260,7 @@ type CoverageRecord = (
 type PortfolioRecord = (Vec<u8>, usize, Vec<(String, Vec<u64>, usize)>);
 type ExplicitRecord = (Vec<u8>, Bars, Vec<usize>, Vec<usize>);
 
-// The argument list mirrors the Python keyword signature one-to-one.
+// Keyword arguments match the Python signature.
 #[allow(clippy::too_many_arguments)]
 fn params(
     max_dim: usize,
@@ -362,7 +362,7 @@ fn display_err(error: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 
-/// Essential bars keep death = f64::INFINITY. pyo3 converts it to math.inf.
+/// pyo3 converts essential death `f64::INFINITY` to `math.inf`.
 fn to_bars(mut diagram: holos_tda::Diagram) -> Bars {
     diagram.canonicalize();
     diagram
@@ -854,11 +854,11 @@ fn rips_points(
     })
 }
 
-/// Reorder a `pdist` layout into the layout the core constructor wants.
+/// Reorder SciPy `pdist` data into the core lower-triangle layout.
 ///
-/// SciPy's `pdist` emits the upper triangle row by row (d01, d02, ..., d12,
-/// ...). The core constructor wants the lower triangle (d10, d20, d21, ...).
-/// The Python contract is the pdist one.
+/// `pdist` emits the upper triangle row by row (d01, d02, ..., d12, ...).
+/// The constructor stores the lower triangle (d10, d20, d21, ...).
+/// The Python contract is the pdist layout.
 fn pdist_to_lower(data: Vec<f64>) -> Result<Vec<f64>, holos_tda::Error> {
     let m = data.len();
     let n = ((1.0 + 8.0 * m as f64).sqrt() as usize).div_ceil(2);
@@ -914,7 +914,7 @@ fn rips_condensed(
     })
 }
 
-// The argument list mirrors the Python keyword signature one-to-one.
+// Keyword arguments match the Python signature.
 #[allow(clippy::too_many_arguments)]
 #[pyfunction]
 #[pyo3(signature = (n, triplets, max_dim=1, threshold=None, modulus=2, threads=1, factorization="off", collapse_edges=false, collapse_schedule="serial", collapse_objective="h2", collapse_work_limit=None))]
@@ -1252,7 +1252,7 @@ struct PySparseIndex {
 
 #[pymethods]
 impl PySparseIndex {
-    /// Canonical `HOLOSIP` bytes for the complete current version.
+    /// Canonical `HOLOSIP` bytes for the current version.
     #[getter]
     fn snapshot<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let proof = IndexSnapshotProof::from_index(&self.index).map_err(display_err)?;
@@ -1260,7 +1260,7 @@ impl PySparseIndex {
         Ok(PyBytes::new(py, &bytes))
     }
 
-    /// Content identifier of the current immutable root.
+    /// Content identifier of the current root.
     #[getter]
     fn version(&self) -> String {
         digest_string(&self.index.version())
@@ -1346,7 +1346,7 @@ impl PySparseIndex {
             .collect()
     }
 
-    /// Create and install an exact next version.
+    /// Install an exact next version.
     #[pyo3(signature = (n, triplets, correspondence=true))]
     fn update(
         &mut self,
@@ -2913,7 +2913,7 @@ fn verify_intervention(py: Python<'_>, artifact: Vec<u8>) -> PyResult<Interventi
     })
 }
 
-/// Compiled Euclidean point atlas with a checked displacement radius.
+/// Compiled Euclidean point atlas with a conservative displacement radius.
 #[pyclass(name = "PointAtlas")]
 struct PyPointAtlas {
     points: Vec<Vec<f64>>,
@@ -2943,7 +2943,7 @@ impl PyPointAtlas {
         py.detach(|| point_sensitivity_records(&self.atlas))
     }
 
-    /// Evaluate points inside the checked displacement radius.
+    /// Evaluate points inside the conservative displacement radius.
     fn evaluate(&self, py: Python<'_>, points: Vec<Vec<f64>>) -> PyResult<AtlasResult> {
         py.detach(|| {
             self.atlas

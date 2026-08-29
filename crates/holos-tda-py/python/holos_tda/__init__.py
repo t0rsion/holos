@@ -1,9 +1,8 @@
 """Vietoris-Rips persistent homology with a ripser-class engine.
 
-Thin Python bindings over the ``holos-tda`` Rust crate. Each function returns
-the persistence diagram as a list of ``(dim, birth, death)`` tuples in
-canonical order: by dimension, then birth, then death. Essential classes
-have ``death == math.inf``.
+Diagram functions return ``(dim, birth, death)`` tuples in canonical order:
+by dimension, then birth, then death. Essential classes have
+``death == math.inf``.
 """
 
 import sys
@@ -111,10 +110,6 @@ def compile_relative_interface(n, triplets, protected=(), max_dim=1,
 
     The protected vertices induce the separator subcomplex. The returned
     artifact is accepted by ``holos-check``.
-
-    Returns:
-        A dictionary with ``artifact``, ``bars``, ``input_cells``,
-        ``cancellations``, and ``core_cells``.
     """
     artifact, bars, work = _core.compile_relative_interface(
         int(n),
@@ -158,7 +153,7 @@ def cohomology_space(n, triplets, dimension, scale, modulus=2):
     """Compute a canonical fixed-scale cohomology basis.
 
     Terms use ``([v0, ..., vq], coefficient)`` on oriented simplices.
-    The basis works in any bounded dimension, including H0.
+    The space is defined in any bounded dimension, including H0.
     """
     identifier, simplex_counts, basis = _core.fixed_cohomology(
         int(n),
@@ -282,7 +277,8 @@ def kinetic_zigzag(n, edges, start, end, dimension, scale, modulus=2):
 def intervene_cohomology(n, scenarios, candidates, dimension, scale,
                          max_edits, modulus=2, oracle_limit=1_000_000,
                          node_limit=1_000_000):
-    """Certify one minimum-cost edit across declared graph scenarios.
+    """Certify one minimum-cost set of candidate edges across declared
+    graph scenarios.
 
     Each scenario is ``(triplets, target)``. Each candidate is
     ``(u, v, positive_cost)``. The target is a position in that scenario's
@@ -316,7 +312,7 @@ def relative_coverage(n, triplets, active, fence, broadcast_radius,
     """Check one relative fence-filling coverage criterion.
 
     The result implies physical coverage only under the controlled-boundary
-    domain, sensor-placement, fence, and communication assumptions.
+    domain, placement, fence, and communication assumptions.
     """
     holds, witness, active_edges, active_triangles = (
         _core.check_relative_coverage(
@@ -381,8 +377,9 @@ def synthesize_coverage(n, states, fence, candidates, broadcast_radius,
 
     A candidate is ``(vertex, positive_cost)`` for all states or
     ``(vertex, positive_cost, state_indices)`` for explicit support. Fence
-    sensors are active automatically. The physical conclusion is conditional
-    on the controlled-boundary geometric assumptions.
+    sensors are active automatically. Physical coverage is conditional on
+    the controlled-boundary domain, placement, fence, and communication
+    assumptions.
     """
     values = _core.synthesize_finite_coverage(
         int(n),
@@ -436,8 +433,9 @@ def synthesize_affine_coverage(n, edges, start, end, fence, candidates,
     """Certify coverage over a complete affine communication schedule.
 
     Each edge is ``(u, v, intercept, velocity)``. Encoded weights are exact
-    dyadic affine values. The function does not prove Euclidean realization.
-    Physical coverage is conditional on the controlled-boundary assumptions.
+    dyadic affine values. The result does not prove Euclidean realization.
+    Physical coverage is conditional on the controlled-boundary domain,
+    placement, fence, and communication assumptions.
     """
     values = _core.synthesize_affine_coverage(
         int(n),
@@ -499,8 +497,8 @@ def synthesize_affine_cohomology(n, edges, start, end, candidates,
 
     Each trajectory edge is ``(u, v, intercept, velocity)``. The result
     certifies a Rips cohomology rank condition at both endpoints, every exact
-    threshold event, and every open threshold cell. It does not by itself
-    certify physical sensor coverage.
+    threshold event, and every open threshold cell. It does not certify
+    physical sensor coverage.
     """
     values = _core.synthesize_affine_cohomology(
         int(n),
@@ -537,9 +535,6 @@ def rips_points(points, max_dim=1, threshold=None, modulus=2, threads=1,
         collapse_objective: ``"h1"`` or ``"h2"`` for the adaptive schedule.
         collapse_work_limit: maximum adaptive removability tests. ``None``
             runs to a fixed point.
-
-    Returns:
-        List of ``(dim, birth, death)`` tuples.
     """
     return _core.rips_points([list(map(float, p)) for p in points],
                              max_dim, threshold, modulus, threads,
@@ -555,28 +550,8 @@ def rips_condensed(data, max_dim=1, threshold=None, modulus=2, threads=1,
     """Compute Rips persistence of a condensed distance matrix.
 
     The layout is upper-triangular and row-major, the same as
-    ``scipy.spatial.distance.pdist``.
-
-    Args:
-        data: flat sequence of the ``n(n-1)/2`` pairwise distances.
-        max_dim: highest homology dimension to compute.
-        threshold: truncate the filtration at this scale. ``None`` uses the
-            enclosing radius.
-        modulus: coefficient field Z/p; must be a prime below 32768.
-        threads: reduction worker threads. 1 runs the serial engine. The
-            diagram is identical at any thread count.
-        factorization: ``"auto"``, ``"off"``, or ``"force"`` for the
-            vertex-biconnected sparse-graph split. The default is ``"off"``.
-        collapse_edges: collapse dominated edges before the engine runs.
-            The diagram is identical either way.
-        collapse_schedule: ``"serial"``, ``"ordered"``, ``"rounds"``, or
-            ``"adaptive"``. The default is ``"serial"``.
-        collapse_objective: ``"h1"`` or ``"h2"`` for the adaptive schedule.
-        collapse_work_limit: maximum adaptive removability tests. ``None``
-            runs to a fixed point.
-
-    Returns:
-        List of ``(dim, birth, death)`` tuples.
+    ``scipy.spatial.distance.pdist``. ``data`` is the ``n(n-1)/2`` pairwise
+    distances. Other keyword arguments match ``rips_points``.
     """
     return _core.rips_condensed(list(map(float, data)),
                                 max_dim, threshold, modulus, threads,
@@ -591,29 +566,10 @@ def rips_sparse(n, triplets, max_dim=1, threshold=None, modulus=2, threads=1,
                 collapse_objective="h2", collapse_work_limit=None):
     """Compute Rips persistence of a sparse distance matrix.
 
+    ``n`` is the vertex count. ``triplets`` are ``(i, j, distance)`` entries.
     Pairs not listed are absent at every scale. With ``threshold=None``, all
-    listed edges enter the filtration.
-
-    Args:
-        n: number of points.
-        triplets: iterable of ``(i, j, distance)`` entries.
-        max_dim: highest homology dimension to compute.
-        threshold: truncate the filtration at this scale.
-        modulus: coefficient field Z/p; must be a prime below 32768.
-        threads: reduction worker threads. 1 runs the serial engine. The
-            diagram is identical at any thread count.
-        factorization: ``"auto"``, ``"off"``, or ``"force"`` for the
-            vertex-biconnected sparse-graph split. The default is ``"off"``.
-        collapse_edges: collapse dominated edges before the engine runs.
-            The diagram is identical either way.
-        collapse_schedule: ``"serial"``, ``"ordered"``, ``"rounds"``, or
-            ``"adaptive"``. The default is ``"serial"``.
-        collapse_objective: ``"h1"`` or ``"h2"`` for the adaptive schedule.
-        collapse_work_limit: maximum adaptive removability tests. ``None``
-            runs to a fixed point.
-
-    Returns:
-        List of ``(dim, birth, death)`` tuples.
+    listed edges enter the filtration. Other keyword arguments match
+    ``rips_points``.
     """
     return _core.rips_sparse(n, [(int(i), int(j), float(d)) for i, j, d in triplets],
                              max_dim, threshold, modulus, threads,
@@ -623,7 +579,6 @@ def rips_sparse(n, triplets, max_dim=1, threshold=None, modulus=2, threads=1,
 
 
 def _class_result(raw):
-    """Convert the extension's compact records to named dictionaries."""
     bars, records = raw
     classes = []
     for group_id, class_id, basis_index, birth, death, modulus, scale, terms in records:
@@ -642,7 +597,6 @@ def _class_result(raw):
 
 
 def _class_record(record):
-    """Expand one compact extension class record."""
     group_id, class_id, basis_index, birth, death, modulus, scale, terms = record
     return {
         "group_id": group_id,
@@ -658,7 +612,6 @@ def _class_record(record):
 
 
 def _atlas_result(raw):
-    """Expand one compact atlas evaluation."""
     bars, raw_spaces, raw_sensitivities = raw
     spaces = []
     for lineage, group_id, birth, death, basis, critical in raw_spaces:
@@ -695,7 +648,6 @@ def _atlas_result(raw):
 
 
 def _event_record(record):
-    """Expand one compact validity-region event."""
     kind, first, second, old_first, new_first, old_second, new_second = record
     return {
         "kind": kind,
@@ -709,7 +661,6 @@ def _event_record(record):
 
 
 def _program_result(raw):
-    """Expand a compositional program result."""
     bars, raw_spaces = raw
     spaces = []
     for group_id, birth, death, basis, critical in raw_spaces:
@@ -768,7 +719,6 @@ def _continuation(raw):
 
 
 def _correspondence(raw):
-    """Expand one exact common-subcomplex class relation."""
     (old_space, new_space, scale, old_rank, new_rank, old_image_rank,
      new_image_rank, relation_rank, basis) = raw
     return {
@@ -802,7 +752,6 @@ def _correspondence(raw):
 
 
 def _program_update(raw):
-    """Expand one checked program update."""
     mode, events, continuation, correspondence, work, result = raw
     return {
         "mode": mode,
@@ -934,7 +883,7 @@ class PointAtlas:
 
     @property
     def coordinate_radius(self):
-        """Return the certified per-point Euclidean displacement radius."""
+        """Return the conservative per-point Euclidean displacement radius."""
         return self._inner.coordinate_radius
 
     def result(self):
@@ -958,7 +907,7 @@ class PointAtlas:
         return records
 
     def evaluate(self, points):
-        """Evaluate points inside the certified displacement radius."""
+        """Evaluate points inside the conservative displacement radius."""
         rows = [list(map(float, point)) for point in points]
         return _atlas_result(self._inner.evaluate(rows))
 
@@ -1307,10 +1256,10 @@ def rips_points_classes(points, max_dim=1, threshold=None, modulus=2,
                         collapse_work_limit=None):
     """Compute a diagram and one canonical H1 basis cocycle per positive bar.
 
-    The result is ``(bars, classes)``. Each class is a dictionary with its
-    class-space identifier, basis identifier, interval, field, representative
-    scale, and ``(u, v, c)`` terms. Equal intervals share one ``group_id``.
-    A finite class is represented immediately below its death.
+    The result is ``(bars, classes)``. Each class record includes ``group_id``,
+    ``id``, ``basis_index``, ``birth``, ``death``, ``essential``, ``modulus``,
+    ``scale``, and ``terms``. Equal intervals share one ``group_id``. A finite
+    class is represented immediately below its death.
     """
     raw = _core.rips_points_classes(
         [list(map(float, point)) for point in points], max_dim, threshold,
@@ -1323,7 +1272,7 @@ def rips_condensed_classes(data, max_dim=1, threshold=None, modulus=2,
                            threads=1, factorization="off", collapse_edges=False,
                            collapse_schedule="serial", collapse_objective="h2",
                            collapse_work_limit=None):
-    """Compute a diagram and stable H1 cocycles from condensed distances."""
+    """Compute a diagram and canonical H1 cocycles from condensed distances."""
     raw = _core.rips_condensed_classes(
         list(map(float, data)), max_dim, threshold, modulus, threads,
         factorization, collapse_edges, collapse_schedule, collapse_objective,
@@ -1335,7 +1284,7 @@ def rips_sparse_classes(n, triplets, max_dim=1, threshold=None, modulus=2,
                         threads=1, factorization="off", collapse_edges=False,
                         collapse_schedule="serial", collapse_objective="h2",
                         collapse_work_limit=None):
-    """Compute a diagram and stable H1 cocycles from sparse distances."""
+    """Compute a diagram and canonical H1 cocycles from sparse distances."""
     raw = _core.rips_sparse_classes(
         n, [(int(i), int(j), float(distance)) for i, j, distance in triplets],
         max_dim, threshold, modulus, threads, factorization, collapse_edges,

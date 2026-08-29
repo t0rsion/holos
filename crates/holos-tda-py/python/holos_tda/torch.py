@@ -27,9 +27,8 @@ class StrictSparseProgram:
     """Stateful strict derivatives along one fixed sparse graph topology.
 
     The input edge weights must be distinct. No weight may equal the fixed
-    threshold. These rules keep every edge comparison strict. A call can
-    still repair a reduction region, and the returned derivative then uses
-    the newly checked critical pairs.
+    threshold. A call can still repair a reduction region. The returned
+    derivative then uses the newly checked critical pairs.
     """
 
     def __init__(self, n, edges, weights, threshold=None, modulus=2,

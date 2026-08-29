@@ -1,6 +1,7 @@
-"""Smoke tests for the built holos-tda wheel. Plain asserts, no test
-framework. Run as `python py/tests/smoke.py` in an env with the wheel
-installed."""
+"""Smoke tests for the built holos-tda wheel.
+
+Plain asserts, no test framework. Run with the wheel installed.
+"""
 
 import math
 import subprocess
@@ -74,8 +75,8 @@ cyc = [(0, 1, 1.0), (1, 2, 1.0), (2, 3, 1.0), (0, 3, 1.0)]
 assert holos_tda.rips_sparse(4, cyc, threads=2) == holos_tda.rips_sparse(4, cyc)
 assert holos_tda.rips_sparse(4, cyc, factorization="force") == holos_tda.rips_sparse(4, cyc)
 
-# Explain profile: equal diagram, one stable cocycle, and the same class after
-# certified collapse and reverse lifting.
+# Equal diagram, one stable cocycle, and the same class after certified
+# collapse and reverse lifting.
 bars, classes = holos_tda.rips_points_classes(sq, max_dim=1, modulus=3)
 assert bars == holos_tda.rips_points(sq, max_dim=1, modulus=3)
 assert len(classes) == 1
@@ -165,9 +166,7 @@ assert relative["artifact"].startswith(b"HOLOSRI\0")
 assert relative["input_cells"] >= relative["core_cells"]
 assert len([bar for bar in relative["bars"] if bar[0] == 1]) == 1
 
-# Fixed-scale cohomology, affine events, and weighted interventions
-# use the same dimension-generic contract. The octahedron boundary is an H2
-# sphere. Adding one antipodal edge fills it.
+# The octahedron boundary is an H2 sphere. Adding one antipodal edge fills it.
 cohomology = holos_tda.cohomology_space(
     6, octahedron, dimension=2, scale=2.0, modulus=5)
 assert cohomology["rank"] == 1
@@ -343,9 +342,8 @@ assert intervention["artifact"].startswith(b"HOLOSINT")
 checked = holos_tda.verify_intervention(intervention["artifact"])
 assert checked["target"] == intervention["target"]
 
-# The optional torch module imports without importing PyTorch in the base
-# package. Its call either returns an exact strict derivative or explains the
-# missing optional dependency.
+# The optional torch module does not import PyTorch from holos_tda.
+# The call returns a strict derivative or raises ImportError.
 from holos_tda.torch import finite_h1_intervals
 try:
     import torch

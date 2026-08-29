@@ -4,11 +4,11 @@ Python bindings for holos, a Vietoris-Rips persistent homology engine.
 The package installs the `holos-tda` CLI, which prints ripser-compatible
 output.
 
-The Python API also compiles checked sparse H0 and H1 persistence programs.
-`SparseProgram` reuses valid articulation-separated atoms, repairs invalid
-atoms, reports exact class continuation and work, and writes portable program,
-trace, and intervention artifacts. The optional `holos_tda.torch` module
-provides strict finite H1 endpoint derivatives for distinct edge weights.
+`SparseProgram` reuses valid articulation-separated atoms and repairs invalid
+atoms. It reports exact class continuation and work, and writes portable
+program, trace, and intervention artifacts. The optional `holos_tda.torch`
+module computes strict finite H1 endpoint derivatives for distinct edge
+weights.
 
 `SparseIndex` maintains immutable persistence versions over separator
 interfaces through the configured dimension. It composes exact relative
@@ -16,9 +16,7 @@ filtered cores, applies atomic active-topology patches, and emits independently
 checkable proof records.
 
 `kinetic_zigzag` computes exact fixed-scale class dynamics for affine edge
-weights. It returns open-cell and event nodes, restriction arrows,
-generalized ranks, interval multiplicities, and a self-contained `HOLOSZZ`
-artifact for the separate checker.
+weights. It returns a `HOLOSZZ` artifact for the separate checker.
 
 `intervene_cohomology` finds one minimum-cost set of candidate edges across
 declared graph scenarios. It returns an exact plan or a checked bound. The
