@@ -86,7 +86,7 @@ impl Default for AtlasDecodeLimits {
     }
 }
 
-/// Input binding, class atlas, and solver-independent reduction proof.
+/// Input binding, class atlas, and nested reduction certificate.
 #[derive(Debug, Clone)]
 pub struct AtlasArtifact {
     vertex_count: usize,
@@ -121,7 +121,7 @@ struct SpaceHeader {
     critical_pairs: usize,
 }
 
-/// A proof-carrying atlas adapted by dependency-directed reduction repair.
+/// A proof-carrying atlas after reduction repair.
 #[derive(Debug, Clone)]
 pub struct AtlasArtifactRepair {
     artifact: AtlasArtifact,
@@ -186,7 +186,7 @@ impl AtlasArtifact {
     ///
     /// The reduction reuses its longest valid simplex prefixes. Canonical
     /// class spaces are recomputed and checked against the repaired
-    /// reduction before the artifact is returned.
+    /// reduction.
     pub fn repair(
         &self,
         current: &SparseDistanceMatrix,
@@ -335,8 +335,7 @@ impl AtlasArtifact {
         Ok(artifact)
     }
 
-    /// Verify the proof and reconstruct the reusable atlas without calling
-    /// the persistence solver.
+    /// Verify the nested reduction and reconstruct the reusable atlas.
     pub fn verify(
         &self,
         input: &SparseDistanceMatrix,

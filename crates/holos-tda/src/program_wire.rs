@@ -129,8 +129,8 @@ pub struct ProgramArtifact {
 impl ProgramArtifact {
     /// Capture the current checked state of a compiled program.
     ///
-    /// This operation runs no persistence reduction. The returned artifact
-    /// binds the graph most recently supplied to the program.
+    /// Persistence reduction does not run. The artifact binds the graph
+    /// most recently supplied to the program.
     pub fn from_program(
         program: &PersistenceProgram,
     ) -> std::result::Result<Self, ProgramArtifactError> {
@@ -247,7 +247,7 @@ impl ProgramArtifact {
         Ok(artifact)
     }
 
-    /// Verify all atom proofs and reconstruct the program without the solver.
+    /// Verify all atom proofs and reconstruct the program.
     pub fn verify(
         &self,
         input: &SparseDistanceMatrix,

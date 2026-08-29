@@ -816,7 +816,7 @@ impl ReductionCertificate {
     /// Produce an exact H0 and H1 reduction certificate.
     ///
     /// The producer uses an explicit reference reduction. It is separate
-    /// from the implicit compute engine and is intentionally limited by
+    /// from the implicit compute engine and is limited by
     /// [`CertificateLimits`].
     pub fn build(
         input: &SparseDistanceMatrix,
@@ -906,8 +906,7 @@ impl ReductionCertificate {
     /// Reindex this reduction after a result-sensitive accepted update.
     ///
     /// No boundary column is reduced. Simplex identities remap every source
-    /// and target position in `V`, then the independent checker validates the
-    /// remapped factorization on the updated filtration.
+    /// and target position in `V`.
     pub fn reindex(
         &self,
         current: &SparseDistanceMatrix,
@@ -1055,7 +1054,7 @@ impl ReductionCertificate {
         Ok(certificate)
     }
 
-    /// Verify the certificate without calling the persistence solver.
+    /// Verify the change of basis, distinct pivots, and derived diagram.
     pub fn verify(
         &self,
         input: &SparseDistanceMatrix,
@@ -1066,7 +1065,7 @@ impl ReductionCertificate {
 
     /// Compile the checked factorization into a result-sensitive region.
     ///
-    /// The returned region can survive edge-order changes that do not break
+    /// The region stays valid under edge-order changes that do not break
     /// a filtration dependency in `V` or a reduced pivot in `R`.
     pub fn compile_region(
         &self,

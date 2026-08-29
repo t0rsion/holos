@@ -159,9 +159,8 @@ impl ExplainedDiagram {
 /// Compute a diagram and stable H1 classes from a sparse matrix.
 ///
 /// On a fixed graph, class production uses a fixed whole-graph reduction
-/// profile. This keeps class identifiers independent of worker count,
-/// structural routing, and optional reduction shortcuts. The ordinary
-/// compute API keeps those fast paths.
+/// profile. Class identifiers are independent of worker count, structural
+/// routing, and optional reduction shortcuts.
 pub fn rips_persistence_with_classes_sparse(
     matrix: &SparseDistanceMatrix,
     params: &RipsParams,
@@ -241,9 +240,8 @@ fn check_class_count(diagram: &Diagram, spaces: &[PersistentClassSpace]) -> Resu
 /// Lift stable H1 cocycles through a checked collapse trace.
 ///
 /// The input classes must describe `collapsed.matrix`. The returned classes
-/// use the reconstructed input vertex labels and edges. The function checks
-/// the collapse certificate independently, then checks every lifted cocycle
-/// on that original graph.
+/// use the reconstructed input vertex labels and edges. The collapse
+/// certificate and every lifted cocycle are checked on the original graph.
 pub fn lift_h1_classes(
     collapsed: &CollapsedRips,
     mut explained: ExplainedDiagram,

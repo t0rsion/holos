@@ -3,8 +3,8 @@
 //! An atlas fixes the vertex set, edge set, threshold membership, and weak
 //! order of all listed edge weights. Within that region, every Rips simplex
 //! keeps its filtration position. The persistence pairing, class-space basis,
-//! and critical simplices therefore stay fixed. Evaluation updates endpoint
-//! values without another persistence reduction.
+//! and critical simplices stay fixed. Evaluation updates endpoint values
+//! without another persistence reduction.
 
 use std::fmt;
 
@@ -57,7 +57,7 @@ impl fmt::Display for LineageId {
     }
 }
 
-/// Why an endpoint does or does not have one edge-weight derivative.
+/// Gradient of one barcode endpoint with respect to listed edge weights.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EndpointGradient {
@@ -140,9 +140,9 @@ pub enum TopologyEventKind {
 /// Whether an update reused an atlas or performed exact recomputation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateMode {
-    /// The certified region held, so no persistence reduction ran.
+    /// The certified region held. No persistence reduction ran.
     Reused,
-    /// At least one event invalidated the region, so holos recomputed.
+    /// An event invalidated the region. Persistence was recomputed.
     Recomputed,
 }
 
@@ -153,7 +153,7 @@ pub struct AtlasUpdate {
     pub atlas: PersistenceAtlas,
     /// Exact result at the new weights.
     pub evaluation: AtlasEvaluation,
-    /// Whether reduction was avoided.
+    /// Whether the atlas was reused or recomputed.
     pub mode: UpdateMode,
     /// Events that forced recomputation. Empty for a reused update.
     pub events: Vec<TopologyEvent>,
@@ -571,8 +571,7 @@ impl PersistenceAtlas {
     /// Evaluate only the exact H0 and H1 diagram without persistence
     /// reduction.
     ///
-    /// This path avoids rebuilding class-space records and their identifiers.
-    /// Use [`Self::evaluate`] when you also need cocycles or sensitivities.
+    /// Use [`Self::evaluate`] when cocycles or sensitivities are required.
     pub fn evaluate_diagram(&self, updated: &SparseDistanceMatrix) -> Result<Diagram> {
         let (values, events) = self.updated_values_and_events(updated);
         if let Some(event) = events.first() {
@@ -622,8 +621,8 @@ impl PersistenceAtlas {
         Ok(diagram)
     }
 
-    /// Reuse the atlas when possible. Otherwise, report the events and
-    /// perform an exact rebuild at the new weights.
+    /// When the region holds, reuse the atlas. Otherwise report the events
+    /// and rebuild at the new weights.
     pub fn update(&self, updated: &SparseDistanceMatrix) -> Result<AtlasUpdate> {
         let events = self.events(updated);
         if events.is_empty() {
@@ -670,9 +669,9 @@ pub struct PointEndpointGradient {
 pub struct PointClassSensitivity {
     /// Atlas lineage.
     pub lineage: LineageId,
-    /// Birth derivative. `None` means a distance tie prevents one gradient.
+    /// Birth derivative. `None` when a distance tie prevents one gradient.
     pub birth: Option<PointEndpointGradient>,
-    /// Death derivative. `None` means an essential death or distance tie.
+    /// Death derivative. `None` for an essential death or a distance tie.
     pub death: Option<PointEndpointGradient>,
 }
 
@@ -710,7 +709,7 @@ impl PointPersistenceAtlas {
         })
     }
 
-    /// Under this per-point Euclidean displacement, all pairwise distance
+    /// Conservative per-point Euclidean radius. Within it, pairwise distance
     /// relations and threshold memberships stay fixed.
     pub fn coordinate_radius(&self) -> f64 {
         self.coordinate_radius
@@ -764,8 +763,8 @@ impl PointPersistenceAtlas {
         self.atlas.evaluate(&updated)
     }
 
-    /// Recompile after a coordinate event. A point set inside the current
-    /// radius reuses the edge atlas; any other valid point set rebuilds it.
+    /// Reuse the atlas when the displacement is inside the current radius.
+    /// Any other valid point set rebuilds it.
     pub fn update(&self, points: &[Vec<f64>]) -> Result<PointAtlasUpdate> {
         if let Ok(evaluation) = self.evaluate(points) {
             return Ok(PointAtlasUpdate {
@@ -806,7 +805,7 @@ pub struct PointAtlasUpdate {
     pub atlas: PointPersistenceAtlas,
     /// Exact result at the new coordinates.
     pub evaluation: AtlasEvaluation,
-    /// Whether persistence reduction was avoided.
+    /// Whether the atlas was reused or recomputed.
     pub mode: UpdateMode,
 }
 

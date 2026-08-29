@@ -266,7 +266,7 @@ impl ProgramTraceArtifact {
         })
     }
 
-    /// Verify every reused step and checkpoint without the persistence solver.
+    /// Verify every reused step and every checkpoint.
     pub fn verify(
         &self,
         certificate_limits: CertificateLimits,

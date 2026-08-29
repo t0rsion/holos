@@ -225,8 +225,7 @@ impl TrajectoryArtifact {
         Ok(artifact)
     }
 
-    /// Verify all proofs and region transitions without the persistence
-    /// solver.
+    /// Verify all proofs and region transitions.
     pub fn verify(
         &self,
         certificate_limits: CertificateLimits,

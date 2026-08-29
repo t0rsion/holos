@@ -120,20 +120,20 @@ pub struct ProgramEvent {
 pub enum ProgramUpdateMode {
     /// All touched atoms retained their checked reductions.
     Reused,
-    /// At least one touched atom was rebuilt locally.
+    /// At least one touched atom was repaired or rebuilt locally.
     Repaired,
     /// The graph topology or threshold membership changed.
     Recompiled,
 }
 
-/// Whether an update computes exact relations to the preceding class spaces.
+/// Control over exact relations to the preceding class spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum CorrespondenceMode {
     /// Return exact relations on every common filtered subcomplex.
     #[default]
     Exact,
-    /// Maintain the exact current state but leave correspondence empty.
+    /// Keep the exact current state. Leave correspondence empty.
     Omit,
 }
 
@@ -153,7 +153,7 @@ pub enum ContinuationKind {
     Birth,
     /// An old space has no exact new basis vector.
     Death,
-    /// Some, but not all, vectors have an exact declared continuation.
+    /// A proper subset of the vectors has an exact declared continuation.
     Ambiguous,
 }
 
@@ -293,9 +293,8 @@ pub struct PersistenceProgram {
 impl PersistenceProgram {
     /// Compile a checked compositional H0 and H1 program.
     ///
-    /// Positive-dimensional persistence splits exactly at articulation
-    /// vertices. Each cyclic atom receives its own reduction certificate.
-    /// Graphs without a useful split remain one exact atom.
+    /// Each cyclic atom receives its own reduction certificate. Graphs
+    /// without a useful split remain one exact atom.
     pub fn compile(
         input: &SparseDistanceMatrix,
         params: &RipsParams,
@@ -370,7 +369,7 @@ impl PersistenceProgram {
 
     /// Advance an ordered batch atomically.
     ///
-    /// If one update fails, this method leaves the program unchanged.
+    /// If one update fails, the program is left unchanged.
     pub fn advance_batch(
         &mut self,
         updates: &[SparseDistanceMatrix],
@@ -395,7 +394,7 @@ impl PersistenceProgram {
 
     /// Advance independent alternatives from the current state.
     ///
-    /// Output order matches input order. The receiver does not change. With
+    /// Output order matches input order. The program is left unchanged. With
     /// more than one configured thread, alternatives run concurrently.
     pub fn branch(&self, alternatives: &[SparseDistanceMatrix]) -> Result<Vec<ProgramBranch>> {
         self.branch_with(alternatives, CorrespondenceMode::Exact)
@@ -497,10 +496,6 @@ impl PersistenceProgram {
     }
 
     /// Advance with explicit control over cross-state class correspondence.
-    ///
-    /// [`CorrespondenceMode::Omit`] keeps the exact diagram, class spaces,
-    /// proofs, events, and work counts. It leaves
-    /// [`ProgramUpdate::correspondence`] empty.
     pub fn advance_with(
         &mut self,
         updated: &SparseDistanceMatrix,
