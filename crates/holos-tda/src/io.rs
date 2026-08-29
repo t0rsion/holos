@@ -1317,8 +1317,9 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             let serial = parse_condensed("t", &bad, 1).unwrap_err().to_string();
-            assert_eq!(err.split(':').nth(2), serial.split(':').nth(2), "{err}");
-            assert!(err.contains(":405: not a number: \"x\""), "{err}");
+            let expected = ":405: not a number: \"x\"";
+            assert!(err.ends_with(expected), "{err}");
+            assert!(serial.ends_with(expected), "{serial}");
         }
     }
 
