@@ -32,14 +32,14 @@ published.
   requested bounded dimension.
 - Exact compositional interfaces for disjoint pieces, zero-filtration
   contractible intersections, and arbitrary protected subcomplexes. Local
-  content-addressed storage supports ordered folds and recovery without a
-  network or multi-writer claim.
+  content-addressed storage supports ordered folds and recovery. It does
+  not provide networking or multi-writer coordination.
 - Dimension-generic fixed-scale cohomology spaces, exact relations, affine
   event arrangements, kinetic zigzag intervals, and weighted interventions
   for named classes.
 - Exact weighted synthesis over finite and complete affine state schedules.
-  Proof trees certify optimal, infeasible, and incomplete results without
-  asking the checker to replay branch-and-bound search.
+  Proof trees certify optimal, infeasible, and incomplete results. The
+  checker does not rerun branch-and-bound search.
 - Relative planar coverage witnesses, maximal-failure reduction,
   state-action component composition, and minimum-cost activation synthesis.
 - CLI and Python entry points for the certified workflows. `holos-check`

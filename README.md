@@ -15,10 +15,10 @@ around that engine. The main new paths cover checked edge-collapse choice,
 explicit filtered complexes, reusable reductions, exact class dynamics,
 topological synthesis, and planar coverage.
 
-The project favors depth over a large catalog of complexes. It does not
-implement Mapper, Cech, alpha, cubical, or multiparameter persistence. The
-explicit filtered-complex API is the extension point for another complex
-builder. A scalar projection type does not compute a multiparameter module.
+The project does not implement Mapper, Cech, alpha, cubical, or
+multiparameter persistence. The explicit filtered-complex API is the
+extension point for another complex builder. A scalar projection type does
+not compute a multiparameter module.
 
 The crates.io package is `holos-tda`, the Rust library is `holos_tda`, and the
 binary is `holos`. The Python package and import are both `holos-tda` and
@@ -140,7 +140,7 @@ portfolio. It is not a global optimum over all valid collapse sequences.
 
 The serial and rounds schedules run to a fixed point. The adaptive schedule
 ranks valid removals by downstream triangle or tetrahedron work. A work limit
-returns a safe partial collapse. Every accepted removal preserves persistent
+returns a partial collapse. Every accepted removal preserves persistent
 homology in all dimensions.
 
 Python exposes the fixed serial, rounds, and adaptive portfolio:
@@ -291,8 +291,7 @@ applies bounded decoding before it allocates large collections.
 
 Independent means that `holos-tda-check` does not depend on `holos-tda`.
 The two crates still share the mathematical specification and byte formats.
-This is an implementation-independent replay check, not a proof-assistant
-verification.
+The check is not a proof-assistant verification.
 
 All portable artifacts use canonical ordering, explicit version bytes,
 resource limits, and a SHA-256 content digest. The digest detects content
