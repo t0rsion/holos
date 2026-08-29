@@ -651,8 +651,6 @@ fn collapse_preserves_the_diagram_when_disconnected() {
     assert_collapse_preserves_diagram("disconnected", &battery_disconnected(), 1.5, true);
 }
 
-// Certificate properties.
-
 #[test]
 fn certificate_properties_hold_on_every_battery_input() {
     let cases: [(&str, DistanceMatrix, f64); 5] = [
@@ -799,8 +797,6 @@ fn empty_graph_collapses_to_nothing() {
     assert_eq!(result.stats.epochs, 1, "passes");
     assert_eq!(result.stats.max_common_neighborhood, 0, "neighborhood");
 }
-
-// Named adversarial fixtures.
 
 /// A single fixed apex cannot certify edge (0, 1): vertex 2 is the only
 /// candidate at level 1, but it is not adjacent to vertex 3, which joins the
@@ -1185,8 +1181,7 @@ fn non_metric_domination_flip() {
 #[test]
 fn projective_plane_torsion() {
     // The 13-vertex RP^2 triangulation: H1 and H2 are Z/2, visible only at
-    // p = 2. The collapse must preserve the torsion answer at every modulus,
-    // so it cannot be quietly field-dependent.
+    // p = 2. The collapse must preserve the torsion answer at every modulus.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data/projective_plane.lower_distance_matrix");
     let dense = holos_tda::io::read_lower_distance_matrix(&path, 1).unwrap();
@@ -1373,8 +1368,6 @@ fn k64_64_plus_k4_mixed_yield() {
     }
 }
 
-// Public API surface.
-
 #[test]
 fn with_edge_collapse_sets_the_flag() {
     assert!(
@@ -1560,8 +1553,8 @@ fn sparse_edges_are_sorted_deduplicated_and_exact() {
     }
 }
 
-// Random fuzz: production certificates on mixed dense/sparse graphs must
-// pass the independent verifier, with enough removals to mean something.
+// Mixed dense and sparse graphs must pass the independent verifier.
+// The sample must remove more than 100 edges, or the loop never fired.
 #[test]
 fn random_certificates_pass_the_independent_verifier() {
     let palette = [0.0, 0.5, 1.0, 1.0, 2.0, 2.5, f64::INFINITY];

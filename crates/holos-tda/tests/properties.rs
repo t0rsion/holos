@@ -95,8 +95,7 @@ proptest! {
         max_dim in 0..=2usize,
         threshold in prop_oneof![Just(None), (0.5f64..3.0).prop_map(Some)],
     ) {
-        // Bits, not values: the routed run must reproduce the dense one
-        // exactly, and equal bits admits no rounding.
+        // Compare birth and death bits. Equal bits admits no rounding.
         let data = seed_data[..n * (n - 1) / 2].to_vec();
         let dist = DistanceMatrix::from_condensed(data).unwrap();
         let max_dim = max_dim.min(n - 2);

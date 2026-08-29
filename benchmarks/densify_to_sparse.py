@@ -14,10 +14,9 @@ both are repr() of the same math.dist result.
 
 The sparse reader takes the point count from the largest index it sees, so a
 trailing vertex with no edge would shrink the graph and drop an essential H0
-bar. Vertices are therefore relabelled: isolated vertices take the low
-indices, vertices with an edge follow in their original order. Relabelling
-moves no bar, because the barcode does not depend on the labelling. OUT_LOWER
-keeps the original labelling.
+bar. Vertices are therefore relabeled: isolated vertices take the low
+indices, vertices with an edge follow in their original order. Relabeling
+moves no bar. OUT_LOWER keeps the original labeling.
 
 Prints one metadata line of whitespace-separated key=value fields.
 """

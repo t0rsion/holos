@@ -5,8 +5,8 @@ Usage: gen_cloud.py N DIM SEED [FAMILY] > cloud.csv
 
 Families:
   cube      uniform in the unit cube (the default, and the 3-argument form)
-  sphere    uniform on the sphere of radius 0.5 centred at (0.5, ..., 0.5)
-  clusters  8 Gaussian clusters, sigma 0.05, centres uniform in [0.15, 0.85]
+  sphere    uniform on the sphere of radius 0.5 centered at (0.5, ..., 0.5)
+  clusters  8 Gaussian clusters, sigma 0.05, centers uniform in [0.15, 0.85]
   torus     uniform on a torus, major radius 0.35, minor radius 0.15, in the
             first three coordinates; further coordinates hold 0.5, so ambient
             padding leaves every distance unchanged
@@ -15,7 +15,7 @@ Families:
             equal distances are common and exact. SEED is unused
   duplicate 4 copies of each of ceil(N/4) cube points, truncated to N, so
             every group holds a zero distance
-  equal     N copies of the centre point. Every distance is zero. SEED is
+  equal     N copies of the center point. Every distance is zero. SEED is
             unused
 
 Stdlib only. The same (N, DIM, SEED, FAMILY) yields byte-identical output on

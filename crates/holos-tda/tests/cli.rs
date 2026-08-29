@@ -596,8 +596,8 @@ fn engine_setting_keeps_the_output() {
 
 #[test]
 fn dense_storage_setting_keeps_the_output() {
-    // The same square. Every storage form must print the same diagram on
-    // every engine, and an unknown name must be refused.
+    // Every storage form must print the same diagram on every engine, and
+    // an unknown name must be refused.
     let f = TempFile::new("storage.csv", "0 0\n1 0\n1 1\n0 1\n");
     let path = f.path().to_str().unwrap();
     let expected = stdout(&run(&[path, "--dim", "1"]));
@@ -1279,7 +1279,7 @@ fn version_reports_build_identity() {
         .and_then(|(_, rest)| rest.split_once(','))
         .map(|(h, _)| h)
         .unwrap_or_else(|| panic!("no '(hash, profile)' in: {text}"));
-    // Provenance-free source archives legitimately report "unknown".
+    // Source archives without git metadata report "unknown".
     assert!(
         hash == "unknown" || (hash.len() == 12 && hash.chars().all(|c| c.is_ascii_hexdigit())),
         "git hash neither 12-hex nor unknown: {text}"

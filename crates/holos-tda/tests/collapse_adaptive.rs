@@ -1,4 +1,6 @@
-//! Correctness gates for the adaptive version 3 collapse schedule.
+//! Adaptive version 3 collapse: dense and sparse certificates match, a
+//! complete run preserves the H1 and H2 diagrams, the pipeline matches the
+//! standalone path, and a rerun is identical.
 
 use holos_tda::collapse::verify::{verify_dense, verify_sparse};
 use holos_tda::collapse::{

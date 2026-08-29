@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sparse against dense on the same geometry. Build a k-nearest-neighbour graph
+# Sparse against dense on the same geometry. Build a k-nearest-neighbor graph
 # from a seeded cloud, then reduce it two ways: holos sparse on the kNN
 # triplets, and holos dense on the densified matrix (absent pairs = +inf,
 # threshold +inf). Reports wall time and peak RSS for each. Asserts the two
@@ -25,7 +25,7 @@ Environment:
   N            cloud size (points), default 300
   COORD_DIM    coordinate dimension, default 3
   SEED         cloud seed, default 42
-  K            neighbours per point, default 15
+  K            neighbors per point, default 15
   MAXDIM       max homology dimension, default 2
   THREADS      reducer thread count, default 1
   ALLOW_DIRTY  set to 1 to benchmark a dirty worktree (recorded as -DIRTY)

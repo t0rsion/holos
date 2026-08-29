@@ -1,12 +1,12 @@
-//! Version 2 collapse gates: the snapshot-round schedule.
+//! Version 2 collapse gates: the rounds schedule.
 //!
 //! The version 2 collapser tests every live edge against a frozen snapshot
 //! of the graph, orders the successes by the frozen priority, takes a greedy
 //! batch of pairwise non-conflicting edges, and deletes the batch. The gates
-//! here pin that schedule from three sides: an independent unpruned
-//! reference written from the specification, byte-identical output at every
-//! worker count, and bar-for-bar equality with the uncollapsed engine, the
-//! version 1 schedule, and the brute-force oracle.
+//! pin that schedule: an independent unpruned reference written from the
+//! specification, byte-identical output at every worker count, and bar-for-bar
+//! equality with the uncollapsed engine, the version 1 schedule, and the
+//! brute-force oracle.
 //!
 //! The version 2 output is not the version 1 output. Neither graph is
 //! canonical; only the barcode is.
@@ -581,8 +581,6 @@ fn assert_reference_match(name: &str, result: &CollapsedRips, reference: &RefRun
     );
 }
 
-// Fixture graphs.
-
 /// The complete graph on `n` vertices, every edge at distance 1.
 fn complete_matrix(n: usize) -> DistanceMatrix {
     let mut edges = Vec::new();
@@ -750,8 +748,6 @@ fn battery_ties() -> DistanceMatrix {
     DistanceMatrix::from_condensed(condensed).unwrap()
 }
 
-// The reference gate.
-
 #[test]
 fn production_matches_unpruned_v2_reference() {
     // Small tie-heavy graphs: zeros, repeated values, and absent pairs, over
@@ -829,8 +825,6 @@ fn production_matches_unpruned_v2_reference() {
     }
 }
 
-// The thread-invariance gate.
-
 /// Every worker count must give the same certificate, the same matrix, and
 /// the same counters, `edge_tests` included: the pruning rule is a function
 /// of the schedule, not of the worker count.
@@ -892,8 +886,6 @@ fn v2_is_thread_invariant() {
     assert_thread_invariant("fallback", &fallback_matrix(), Some(1.0));
     assert_thread_invariant("k64_64+k4", &bipartite_k4_dense(), None);
 }
-
-// The equality gates.
 
 /// Bar-for-bar equality of five paths: the uncollapsed engine, the
 /// convenience path, the standalone version 1 collapse, the standalone
@@ -1001,8 +993,6 @@ fn assert_fixture_barcode(
         );
     }
 }
-
-// Named round-structure fixtures.
 
 #[test]
 fn overlapping_but_commuting_read_sets() {

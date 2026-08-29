@@ -101,7 +101,7 @@ Environment:
                   holds one full build, so point it at a filesystem with
                   room to spare
   CARGO_TARGET_DIR
-                  cargo's own variable, honoured here: it moves the
+                  cargo's own variable, honored here: it moves the
                   working tree's build out of ./target the same way
   REBUILD_HIST    set to 1 to rebuild the historical checkouts even when
                   their binaries already exist

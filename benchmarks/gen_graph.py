@@ -14,7 +14,7 @@ synthetic generators satisfy no triangle inequality.
 
 Generators, each with its own meaning for PARAM:
   knn        PARAM = k. Uniform points in the unit cube, in three
-             dimensions. Every vertex keeps its k nearest neighbours, and
+             dimensions. Every vertex keeps its k nearest neighbors, and
              the edge set is the union of the two directions, so degrees
              run above k. Weights are Euclidean distances
   powerlaw   PARAM = m. Preferential attachment: each new vertex draws m
@@ -43,9 +43,9 @@ is the threshold-boundary tie case.
 
 The sparse reader takes the point count from the largest index it sees, so
 a trailing vertex with no edge would shrink the graph and drop an essential
-H0 bar. Vertices are therefore relabelled: isolated vertices take the low
-indices, vertices with an edge follow in their original order. Relabelling
-moves no bar, because the barcode does not depend on the labelling.
+H0 bar. Vertices are therefore relabeled: isolated vertices take the low
+indices, vertices with an edge follow in their original order. Relabeling
+moves no bar.
 
 Stdlib only. The same (GENERATOR, N, SEED, TAU, PARAM) yields byte-identical
 output on one machine: every generator draws from random() and randrange()

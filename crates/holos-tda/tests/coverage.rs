@@ -1,4 +1,6 @@
-//! Differential and adversarial gates for certified relative coverage.
+//! Certified relative coverage: the producer matches flat enumeration, a
+//! maximal-failure plan covers each smaller budget, and the checker rejects
+//! a mutated or truncated artifact without panicking.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 

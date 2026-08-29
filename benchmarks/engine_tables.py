@@ -55,7 +55,7 @@ def number(text):
 
 
 def median(values):
-    """The median, interpolated linearly between the two neighbouring order
+    """The median, interpolated linearly between the two neighboring order
     statistics, the rule benchmarks/_common.sh uses."""
     if not values:
         return None

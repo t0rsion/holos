@@ -789,7 +789,7 @@ fn diagrams_equal(a: &Diagram, b: &Diagram) -> bool {
         })
 }
 
-/// Quantiles interpolate linearly between the two neighbouring order
+/// Quantiles interpolate linearly between the two neighboring order
 /// statistics, the rule benchmarks/_common.sh uses.
 fn summarize(samples: &mut [f64]) -> Summary {
     if samples.is_empty() {

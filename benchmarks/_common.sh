@@ -39,7 +39,7 @@ measure_err() {
 
 # median_iqr : read one sample per line on stdin, print
 # "median=<x> iqr=<x> q1=<x> q3=<x> min=<x> max=<x>". Quantiles interpolate
-# linearly between the two neighbouring order statistics, the rule numpy uses
+# linearly between the two neighboring order statistics, the rule numpy uses
 # by default.
 median_iqr() {
     sort -g | awk '

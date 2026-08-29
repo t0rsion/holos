@@ -520,7 +520,7 @@ the regime that lost.
 | stratum | what it holds |
 |:--|:--|
 | `baseline` | uniform, spherical, toroidal, and clustered clouds at several thresholds |
-| `knn` | k nearest neighbour graphs, k = 8, 15, and 30, as native sparse input |
+| `knn` | k nearest neighbor graphs, k = 8, 15, and 30, as native sparse input |
 | `lowthresh` | large vertex counts far below the enclosing radius: isolates, trees, many components |
 | `quantized` | lattice, duplicated, and identical points; ties at the threshold boundary |
 | `skewed` | preferential attachment and planted blocks: heavy degree tails and communities |
@@ -578,7 +578,7 @@ runs every entry, and the tables carry one column per arm and configuration.
 `HIST_DIR` defaults to `benchmarks/data/hist`. One arm holds one full release
 build, so four arms need a few gigabytes; point `HIST_DIR` at a filesystem
 with room to spare, and set `CARGO_TARGET_DIR` to move the working tree's own
-build the same way. The runner honours cargo's variable and keeps the absolute
+build the same way. The runner honors cargo's variable and keeps the absolute
 path out of the record.
 
 An arm whose `holos` takes `--engine auto|dense|sparse` runs `auto`,

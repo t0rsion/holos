@@ -63,7 +63,7 @@ def number(text):
 
 def quantile(values, p):
     """The p quantile, 0 <= p <= 1, interpolated linearly between the two
-    neighbouring order statistics, the rule benchmarks/_common.sh uses."""
+    neighboring order statistics, the rule benchmarks/_common.sh uses."""
     if not values:
         return None
     ordered = sorted(values)

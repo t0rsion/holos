@@ -6,7 +6,7 @@
 //! count, at every worker count and every window size. Only the work
 //! counters may move.
 //!
-//! Three references appear here: the shipped serial version 1 collapser,
+//! The suite uses three references: the shipped serial version 1 collapser,
 //! an unpruned version 1 reference rebuilt from the specification, and the
 //! uncollapsed engine with its brute-force oracle.
 //!
@@ -135,7 +135,7 @@ fn step_for(
 }
 
 /// Full output equality: the matrix and every certificate field, floats by
-/// bits. This is the ordered path's whole contract.
+/// bits.
 fn assert_same_output(name: &str, got: &CollapsedRips, want: &CollapsedRips) {
     let a = &got.certificate;
     let b = &want.certificate;
@@ -218,8 +218,8 @@ fn assert_work_bound(name: &str, result: &CollapsedRips) {
 
 /// Every window member is retired exactly once, from its cached verdict
 /// or through a repair. A member is alive and due when the window forms,
-/// and only its own retirement can revoke either, so the identity gates
-/// the scheduler's state invariant rather than merely bounding it.
+/// and only its own retirement can revoke either, so the identity is the
+/// scheduler's state invariant, not an upper bound.
 fn assert_occupancy(name: &str, r: &CollapsedRips) {
     let s = &r.stats;
     assert!(
@@ -454,8 +454,6 @@ fn assert_trace_sparse(
         .unwrap_or_else(|e| panic!("{name}: verifier rejected the ordered certificate: {e}"));
 }
 
-// A. The trace gate.
-
 #[test]
 fn ordered_matches_serial_v1_and_reference() {
     // Small tie-heavy graphs with zeros and absent pairs, over the three
@@ -548,8 +546,6 @@ fn bipartite_k4_dense() -> DistanceMatrix {
     }
     DistanceMatrix::from_condensed(data).unwrap()
 }
-
-// B. The invariance gate.
 
 /// Inputs with different pass shapes, yields, and densities.
 fn invariance_inputs() -> Vec<(String, DistanceMatrix, Option<f64>)> {
@@ -650,8 +646,6 @@ fn ordered_is_invariant_across_workers_and_windows() {
         }
     }
 }
-
-// C. The equality battery.
 
 fn params(
     max_dim: usize,
@@ -826,8 +820,6 @@ fn ordered_preserves_the_diagram() {
     );
     assert_ordered_preserves_diagram("non_metric", &non_metric, 5.0);
 }
-
-// D. Named scheduler fixtures.
 
 /// Run one fixture through the ordered path and gate it against both
 /// references, then return the ordered result for the fixture's own
