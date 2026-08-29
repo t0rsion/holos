@@ -881,11 +881,10 @@ fn round_conflict(
     let mut conflict = None;
     for (position, &x) in closed.iter().enumerate() {
         for &y in &closed[position + 1..] {
-            if let Some(&other) = in_round.get(&(x, y))
-                && other != edge_index
-                && conflict.is_none_or(|current| other < current)
-            {
-                conflict = Some(other);
+            if let Some(&other) = in_round.get(&(x, y)) {
+                if other != edge_index && conflict.is_none_or(|current| other < current) {
+                    conflict = Some(other);
+                }
             }
         }
     }
@@ -987,16 +986,16 @@ fn check_adaptive_metadata(cert: &CollapseCertificate) -> Result<(), VerifyError
     ) {
         return Err(fail(None, "algorithm version 3 has no collapse objective"));
     }
-    if let Some(limit) = cert.work_limit()
-        && cert.work_used() > limit
-    {
-        return Err(fail(
-            None,
-            format!(
-                "adaptive work used {} exceeds its limit {limit}",
-                cert.work_used()
-            ),
-        ));
+    if let Some(limit) = cert.work_limit() {
+        if cert.work_used() > limit {
+            return Err(fail(
+                None,
+                format!(
+                    "adaptive work used {} exceeds its limit {limit}",
+                    cert.work_used()
+                ),
+            ));
+        }
     }
     if cert.completeness() == CollapseCompleteness::BudgetLimited {
         check_budget_limit(cert)?;

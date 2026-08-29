@@ -1275,12 +1275,12 @@ fn check_unique_pivot(
     column: &SparseColumn,
     pivots: &mut BTreeSet<usize>,
 ) -> Result<(), CertificateError> {
-    if let Some((pivot, _)) = column.pivot()
-        && !pivots.insert(pivot)
-    {
-        return Err(CertificateError::new(
-            "relative reduced matrix repeats a pivot",
-        ));
+    if let Some((pivot, _)) = column.pivot() {
+        if !pivots.insert(pivot) {
+            return Err(CertificateError::new(
+                "relative reduced matrix repeats a pivot",
+            ));
+        }
     }
     Ok(())
 }

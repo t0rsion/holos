@@ -3,6 +3,13 @@ use std::process::Command;
 
 fn main() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    println!("cargo:rustc-check-cfg=cfg(holos_repository_tests)");
+    if Path::new(&manifest)
+        .join("../holos-tda-check/Cargo.toml")
+        .is_file()
+    {
+        println!("cargo:rustc-cfg=holos_repository_tests");
+    }
     let hash = vcs_info_hash(&manifest)
         .or_else(|| git_hash(&manifest))
         .unwrap_or_else(|| "unknown".to_string());

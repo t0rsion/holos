@@ -1,3 +1,5 @@
+#![cfg(holos_repository_tests)]
+
 //! End-to-end CLI tests against the built binary.
 
 use std::path::{Path, PathBuf};

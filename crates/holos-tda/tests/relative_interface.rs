@@ -1,3 +1,5 @@
+#![cfg(holos_repository_tests)]
+
 use holos_tda::{
     CertificateLimits, RelativeInterfaceCertificate, RipsParams, SparseDistanceMatrix,
     rips_persistence_sparse,

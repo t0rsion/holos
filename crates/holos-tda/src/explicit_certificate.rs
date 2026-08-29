@@ -652,7 +652,7 @@ fn certificate_error(message: impl Into<String>) -> CertificateError {
     CertificateError::new(message)
 }
 
-#[cfg(test)]
+#[cfg(all(test, holos_repository_tests))]
 mod tests {
     use super::*;
     use crate::{FlagComplexParams, RipsParams, SparseDistanceMatrix, rips_persistence_sparse};

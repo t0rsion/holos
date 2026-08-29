@@ -1262,7 +1262,7 @@ impl<'a> Reader<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, holos_repository_tests))]
 mod tests {
     use super::*;
     use crate::{RipsParams, SparseDistanceMatrix, rips_persistence_sparse};

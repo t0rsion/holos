@@ -1,3 +1,5 @@
+#![cfg(holos_repository_tests)]
+
 use holos_tda::{
     KineticEdge, KineticFiltration, KineticLimits, KineticZigzagArtifact,
     KineticZigzagArtifactLimits,

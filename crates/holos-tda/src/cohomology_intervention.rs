@@ -1395,7 +1395,7 @@ impl fmt::Display for CohomologyInterventionStatus {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, holos_repository_tests))]
 mod tests {
     use super::*;
     use holos_tda_check::{ProofLimits, verify_cohomology_intervention};

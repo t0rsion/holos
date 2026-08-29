@@ -673,12 +673,12 @@ fn check_matrix(
         for term in &transform.terms {
             column.add_scaled(&boundaries[term.index], term.coefficient as u64, modulus64);
         }
-        if let Some((pivot, _)) = column.pivot()
-            && !pivots.insert(pivot)
-        {
-            return Err(CertificateError::new(format!(
-                "dimension {dimension} reduction repeats pivot {pivot}"
-            )));
+        if let Some((pivot, _)) = column.pivot() {
+            if !pivots.insert(pivot) {
+                return Err(CertificateError::new(format!(
+                    "dimension {dimension} reduction repeats pivot {pivot}"
+                )));
+            }
         }
         reduced.push(column);
     }
@@ -889,10 +889,10 @@ fn valid_prefix_len(
         for term in &transform.terms {
             column.add_scaled(&boundaries[term.index], term.coefficient as u64, modulus64);
         }
-        if let Some((pivot, _)) = column.pivot()
-            && !pivots.insert(pivot)
-        {
-            return Ok(target);
+        if let Some((pivot, _)) = column.pivot() {
+            if !pivots.insert(pivot) {
+                return Ok(target);
+            }
         }
     }
     Ok(candidates.len())

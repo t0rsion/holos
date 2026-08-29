@@ -1844,12 +1844,12 @@ impl ReductionState {
         max_terms: usize,
     ) -> CertificateResult<()> {
         let (column, basis_column) = retained_column(index, transform, boundaries, self.modulus)?;
-        if let Some((pivot, _)) = column.pivot()
-            && self.pivot_owner.insert(pivot, index).is_some()
-        {
-            return Err(CertificateError::new(
-                "retained reduction prefix has duplicate pivots",
-            ));
+        if let Some((pivot, _)) = column.pivot() {
+            if self.pivot_owner.insert(pivot, index).is_some() {
+                return Err(CertificateError::new(
+                    "retained reduction prefix has duplicate pivots",
+                ));
+            }
         }
         self.add_terms(basis_column.0.len(), max_terms)?;
         self.reduced.push(column);

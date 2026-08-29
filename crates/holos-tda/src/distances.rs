@@ -1577,6 +1577,11 @@ fn euclidean(a: &[f64], b: &[f64]) -> f64 {
 mod tests {
     use super::*;
 
+    fn positive_predecessor(value: f64) -> f64 {
+        assert!(value.is_finite() && value > 0.0);
+        f64::from_bits(value.to_bits() - 1)
+    }
+
     struct Rng(u64);
     impl Rng {
         fn new(seed: u64) -> Self {
@@ -1772,7 +1777,7 @@ mod tests {
             let d = f64::from_bits(diameter);
             if d.is_finite() && d > simplex.diameter {
                 out.push(d);
-                out.push(d.next_down());
+                out.push(positive_predecessor(d));
             }
         }
         out.sort_unstable_by(f64::total_cmp);
@@ -2400,7 +2405,7 @@ mod tests {
                 &verts,
                 1,
                 upper_only,
-                sparse.max_distance().next_down(),
+                positive_predecessor(sparse.max_distance()),
             );
             assert_eq!(
                 counters::read().vacuous,

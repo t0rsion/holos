@@ -1,3 +1,5 @@
+#![cfg(holos_repository_tests)]
+
 //! Certified relative coverage: the producer matches flat enumeration, a
 //! maximal-failure plan covers each smaller budget, and the checker rejects
 //! a mutated or truncated artifact without panicking.
