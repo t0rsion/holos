@@ -162,7 +162,7 @@ impl ReductionRepair {
         &self.certificate
     }
 
-    /// Whether the operation reused, repaired, or rebuilt reduction state.
+    /// How the reduction was adapted.
     pub fn mode(&self) -> ReductionRepairMode {
         self.mode
     }

@@ -1,9 +1,9 @@
-//! Portable, independently checked persistence trajectories.
+//! Persistence trajectories across atlas regions.
 //!
-//! A `HOLOSTRC` record contains the initial graph and proof-carrying atlas,
-//! every later graph, each validity-region event, and a new proof at every
-//! region boundary. The verifier checks proofs at boundaries and evaluates
-//! all other steps from the current atlas without calling the persistence
+//! A `HOLOSTRC` record contains the initial graph and atlas, every later
+//! graph, each validity-region event, and a new proof at every region
+//! boundary. The verifier checks proofs at boundaries and evaluates all
+//! other steps from the current atlas without calling the persistence
 //! solver.
 
 use std::fmt;
@@ -90,7 +90,7 @@ impl TrajectoryStep {
         &self.input
     }
 
-    /// Whether this step reuses the prior atlas or starts a new region.
+    /// Transition from the prior atlas region.
     pub fn mode(&self) -> UpdateMode {
         self.mode
     }
@@ -100,13 +100,13 @@ impl TrajectoryStep {
         &self.events
     }
 
-    /// Proof-carrying atlas at a region boundary.
+    /// Atlas checkpoint at a region boundary.
     pub fn checkpoint(&self) -> Option<&AtlasArtifact> {
         self.checkpoint.as_ref()
     }
 }
 
-/// Self-contained graphs, events, and proofs for a persistence trajectory.
+/// Graphs, events, and proofs for a persistence trajectory.
 #[derive(Debug, Clone)]
 pub struct TrajectoryArtifact {
     initial_input: SparseDistanceMatrix,
@@ -162,7 +162,7 @@ impl TrajectoryArtifact {
         &self.initial_input
     }
 
-    /// Initial proof-carrying atlas.
+    /// Initial atlas.
     pub fn initial_atlas(&self) -> &AtlasArtifact {
         &self.initial_atlas
     }
@@ -271,10 +271,10 @@ impl TrajectoryArtifact {
     }
 }
 
-/// Checked evaluation at one trajectory step.
+/// Evaluation at one trajectory step.
 #[derive(Debug, Clone)]
 pub struct VerifiedTrajectoryStep {
-    /// Checked transition mode.
+    /// Transition mode.
     pub mode: UpdateMode,
     /// Events derived from the preceding atlas.
     pub events: Vec<TopologyEvent>,
@@ -282,12 +282,12 @@ pub struct VerifiedTrajectoryStep {
     pub evaluation: AtlasEvaluation,
 }
 
-/// Results reconstructed from a checked trajectory artifact.
+/// Results reconstructed from a trajectory artifact.
 #[derive(Debug, Clone)]
 pub struct VerifiedTrajectory {
     /// Exact result for the initial graph.
     pub initial: AtlasEvaluation,
-    /// Checked update results.
+    /// Update results.
     pub steps: Vec<VerifiedTrajectoryStep>,
 }
 

@@ -1,9 +1,8 @@
-//! Portable proof-carrying compositional persistence programs.
+//! Wire format for persistence programs.
 //!
 //! A `HOLOSPRG` envelope binds the complete listed graph, its articulation
-//! decomposition, one independently checked atlas per cyclic atom, and the
-//! composed H0 and H1 diagram. Verification does not call the persistence
-//! solver.
+//! decomposition, one atlas per cyclic atom, and the composed H0 and H1
+//! diagram. Verification does not call the persistence solver.
 
 use std::fmt;
 
@@ -84,7 +83,7 @@ impl Default for ProgramDecodeLimits {
     }
 }
 
-/// One cyclic atom and its nested proof-carrying atlas.
+/// One cyclic atom and its nested atlas.
 #[derive(Debug, Clone)]
 pub struct ProgramAtomArtifact {
     id: usize,
@@ -109,13 +108,13 @@ impl ProgramAtomArtifact {
         &self.edges
     }
 
-    /// Nested independently checked atlas.
+    /// Nested atlas.
     pub fn atlas(&self) -> &AtlasArtifact {
         &self.atlas
     }
 }
 
-/// Input binding, articulation program, and independently checked atom proofs.
+/// Input binding, articulation program, and nested atom atlases.
 #[derive(Debug, Clone)]
 pub struct ProgramArtifact {
     vertex_count: usize,
@@ -127,7 +126,7 @@ pub struct ProgramArtifact {
 }
 
 impl ProgramArtifact {
-    /// Capture the current checked state of a compiled program.
+    /// Capture the current state of a compiled program.
     ///
     /// Persistence reduction does not run. The artifact binds the graph
     /// most recently supplied to the program.
@@ -137,7 +136,7 @@ impl ProgramArtifact {
         Self::capture(program.current_graph(), program)
     }
 
-    /// Produce a proof-carrying compositional program.
+    /// Produce a compositional program artifact.
     pub fn build(
         input: &SparseDistanceMatrix,
         params: &RipsParams,

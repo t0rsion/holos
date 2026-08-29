@@ -1,4 +1,4 @@
-//! Certified finite H1 lifetime interventions.
+//! Finite H1 lifetime interventions.
 //!
 //! The query lowers independent edge weights in the declared destroyer
 //! triangles of one finite class space. The complete space must die no later
@@ -72,7 +72,7 @@ pub struct H1Intervention {
     pub target_scale: f64,
     /// Strength of the returned claim.
     pub status: InterventionStatus,
-    /// Checked lower bound on the maximum absolute edge change.
+    /// Lower bound on the maximum absolute edge change.
     pub lower_bound: f64,
     /// Feasible maximum absolute edge change, when present.
     pub upper_bound: Option<f64>,
@@ -80,13 +80,13 @@ pub struct H1Intervention {
     pub edits: Vec<EdgeWeightEdit>,
     /// Exact result after the edit, when present.
     pub result: Option<ExplainedDiagram>,
-    /// Portable proof of the intervention, when present.
+    /// Intervention artifact, when present.
     pub artifact: Option<InterventionArtifact>,
 }
 
 impl PersistenceProgram {
-    /// Find a checked independent-weight edit that shortens one finite H1
-    /// class space.
+    /// Find an independent-weight edit that shortens one finite H1 class
+    /// space.
     ///
     /// The target must satisfy `birth < target_scale < death`. The candidate
     /// lowers every edge above `target_scale` in every declared destroyer
@@ -302,12 +302,12 @@ impl InterventionArtifact {
         self.target_scale
     }
 
-    /// Strength of the checked claim.
+    /// Strength of the claim.
     pub fn status(&self) -> InterventionStatus {
         self.status
     }
 
-    /// Checked lower bound on the maximum edge change.
+    /// Lower bound on the maximum edge change.
     pub fn lower_bound(&self) -> f64 {
         self.lower_bound
     }
@@ -322,7 +322,7 @@ impl InterventionArtifact {
         &self.edits
     }
 
-    /// Nested exact program trace.
+    /// Nested program trace.
     pub fn trace(&self) -> &ProgramTraceArtifact {
         &self.trace
     }
@@ -397,20 +397,20 @@ impl InterventionArtifact {
     }
 }
 
-/// Result of independently checking a feasible intervention.
+/// Result of verifying a feasible intervention.
 #[derive(Debug, Clone)]
 pub struct VerifiedIntervention {
-    /// Strength of the checked claim.
+    /// Strength of the claim.
     pub status: InterventionStatus,
     /// Initial target class space.
     pub target: IntervalGroupId,
     /// Requested latest death scale.
     pub target_scale: f64,
-    /// Checked lower bound.
+    /// Lower bound on the maximum edge change.
     pub lower_bound: f64,
     /// Feasible upper bound.
     pub upper_bound: f64,
-    /// Checked edge edits.
+    /// Edge edits.
     pub edits: Vec<EdgeWeightEdit>,
     /// Exact final diagram and class spaces.
     pub result: ExplainedDiagram,

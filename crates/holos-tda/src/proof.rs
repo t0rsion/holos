@@ -114,7 +114,7 @@ pub struct ProofArtifactSummary {
     pub reused_references: usize,
 }
 
-/// One self-contained proof DAG for a program and its update trajectory.
+/// Proof DAG for a program and its update trajectory.
 #[derive(Debug, Clone)]
 pub struct ProofArtifact {
     modulus: u32,

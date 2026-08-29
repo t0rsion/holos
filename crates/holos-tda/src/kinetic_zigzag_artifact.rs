@@ -1,4 +1,4 @@
-//! Self-contained certificates for exact kinetic cohomology zigzags.
+//! Certificates for exact kinetic cohomology zigzags.
 
 use sha2::{Digest, Sha256};
 
@@ -47,7 +47,7 @@ pub struct KineticZigzagIntervalClaim {
     pub multiplicity: usize,
 }
 
-/// Size summary of one checked kinetic zigzag artifact.
+/// Size summary of a kinetic zigzag artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KineticZigzagArtifactSummary {
     /// Affine edge trajectory count.
@@ -62,7 +62,7 @@ pub struct KineticZigzagArtifactSummary {
     pub interval_copies: usize,
 }
 
-/// Self-contained exact kinetic zigzag certificate.
+/// Exact kinetic zigzag certificate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KineticZigzagArtifact {
     vertex_count: usize,

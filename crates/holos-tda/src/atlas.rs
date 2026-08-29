@@ -89,7 +89,7 @@ pub struct EvaluatedClassSpace {
     pub space: PersistentClassSpace,
 }
 
-/// Result evaluated from an atlas without persistence reduction.
+/// Result evaluated from an atlas.
 #[derive(Debug, Clone)]
 pub struct AtlasEvaluation {
     /// Exact H0 and H1 diagram at the supplied weights.
@@ -119,7 +119,7 @@ pub struct TopologyEvent {
     pub new_second: Option<f64>,
 }
 
-/// Kind of change that ends a certified local region.
+/// Kind of change that ends a local atlas region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TopologyEventKind {
@@ -137,7 +137,7 @@ pub enum TopologyEventKind {
     OrderSwap,
 }
 
-/// Whether an update reused an atlas or performed exact recomputation.
+/// How an atlas update was produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateMode {
     /// The certified region held. No persistence reduction ran.
@@ -153,7 +153,7 @@ pub struct AtlasUpdate {
     pub atlas: PersistenceAtlas,
     /// Exact result at the new weights.
     pub evaluation: AtlasEvaluation,
-    /// Whether the atlas was reused or recomputed.
+    /// How the atlas was updated.
     pub mode: UpdateMode,
     /// Events that forced recomputation. Empty for a reused update.
     pub events: Vec<TopologyEvent>,
@@ -210,7 +210,7 @@ struct SpaceFormula {
     death: Option<EndpointFormula>,
 }
 
-/// A certified H1 persistence model for one weak edge order.
+/// An H1 persistence model for one weak edge order.
 #[derive(Debug, Clone)]
 pub struct PersistenceAtlas {
     vertex_count: usize,
@@ -445,8 +445,7 @@ impl PersistenceAtlas {
         (new_values, events)
     }
 
-    /// Evaluate H0, H1, class spaces, and edge-weight gradients without
-    /// persistence reduction.
+    /// Evaluate H0, H1, class spaces, and edge-weight gradients.
     pub fn evaluate(&self, updated: &SparseDistanceMatrix) -> Result<AtlasEvaluation> {
         let (values, events) = self.updated_values_and_events(updated);
         if let Some(event) = events.first() {
@@ -568,8 +567,7 @@ impl PersistenceAtlas {
         diagram
     }
 
-    /// Evaluate only the exact H0 and H1 diagram without persistence
-    /// reduction.
+    /// Evaluate only the H0 and H1 diagram.
     ///
     /// Use [`Self::evaluate`] when cocycles or sensitivities are required.
     pub fn evaluate_diagram(&self, updated: &SparseDistanceMatrix) -> Result<Diagram> {
@@ -737,8 +735,7 @@ impl PointPersistenceAtlas {
             .collect()
     }
 
-    /// Evaluate new coordinates without persistence reduction when the
-    /// checked displacement radius holds.
+    /// Evaluate new coordinates when the displacement radius holds.
     pub fn evaluate(&self, points: &[Vec<f64>]) -> Result<AtlasEvaluation> {
         let displacement = point_displacement(&self.points, points)?;
         let unchanged = self
@@ -805,7 +802,7 @@ pub struct PointAtlasUpdate {
     pub atlas: PointPersistenceAtlas,
     /// Exact result at the new coordinates.
     pub evaluation: AtlasEvaluation,
-    /// Whether the atlas was reused or recomputed.
+    /// How the atlas was updated.
     pub mode: UpdateMode,
 }
 

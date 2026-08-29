@@ -1,4 +1,4 @@
-//! Portable proof-carrying persistence atlases.
+//! Wire format for persistence atlases.
 //!
 //! A `HOLOSATL` envelope binds the complete listed graph, its canonical H1
 //! class spaces and critical simplices, and a nested algebraic reduction
@@ -121,7 +121,7 @@ struct SpaceHeader {
     critical_pairs: usize,
 }
 
-/// A proof-carrying atlas after reduction repair.
+/// An atlas after reduction repair.
 #[derive(Debug, Clone)]
 pub struct AtlasArtifactRepair {
     artifact: AtlasArtifact,
@@ -130,12 +130,12 @@ pub struct AtlasArtifactRepair {
 }
 
 impl AtlasArtifactRepair {
-    /// Updated proof-carrying atlas.
+    /// Updated atlas.
     pub fn artifact(&self) -> &AtlasArtifact {
         &self.artifact
     }
 
-    /// Whether the reduction was reused, repaired, or rebuilt.
+    /// How the reduction was adapted.
     pub fn mode(&self) -> ReductionRepairMode {
         self.mode
     }
@@ -151,7 +151,7 @@ impl AtlasArtifactRepair {
 }
 
 impl AtlasArtifact {
-    /// Produce a proof-carrying atlas for an exact H0 and H1 run.
+    /// Produce an atlas artifact for an exact H0 and H1 run.
     pub fn build(
         input: &SparseDistanceMatrix,
         params: &RipsParams,

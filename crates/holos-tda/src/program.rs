@@ -1,10 +1,10 @@
 //! Compositional, change-sensitive H0 and H1 persistence programs.
 //!
 //! A program splits positive-dimensional persistence at articulation
-//! separators. It compiles each cyclic block into an independently checked
-//! reduction region and computes H0 on the complete active graph. An update
-//! rebuilds only cyclic blocks touched by changed weights. A topology or
-//! threshold-membership change rebuilds the complete program.
+//! separators. It compiles each cyclic block into a reduction region and
+//! computes H0 on the complete active graph. An update rebuilds only cyclic
+//! blocks touched by changed weights. A topology or threshold-membership
+//! change rebuilds the complete program.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -168,7 +168,7 @@ pub struct BasisTransport {
     pub coefficient: u32,
 }
 
-/// One checked, path-relative class-space continuation record.
+/// One path-relative class-space continuation record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassContinuation {
     /// Algebraic shape of the relation.
@@ -195,7 +195,7 @@ pub struct ProgramEvaluation {
 pub struct ProgramUpdate {
     /// Exact diagram and canonical H1 class spaces at the new input.
     pub result: ExplainedDiagram,
-    /// Whether the update reused, repaired, or recompiled state.
+    /// How the program produced this result.
     pub mode: ProgramUpdateMode,
     /// Events encountered during the update.
     pub events: Vec<ProgramEvent>,
@@ -245,17 +245,17 @@ pub struct ProgramBranch {
 }
 
 impl ProgramBranch {
-    /// Checked program at the end of this branch.
+    /// Program at the end of this branch.
     pub fn program(&self) -> &PersistenceProgram {
         &self.program
     }
 
-    /// Consume this branch and return its checked program.
+    /// Consume this branch and return its program.
     pub fn into_program(self) -> PersistenceProgram {
         self.program
     }
 
-    /// Consume this branch and return its update and checked program.
+    /// Consume this branch and return its update and program.
     pub fn into_parts(self) -> (ProgramUpdate, PersistenceProgram) {
         (self.update, self.program)
     }
@@ -273,7 +273,7 @@ pub(crate) struct ProgramAtomState {
     pub(crate) explained: ExplainedDiagram,
 }
 
-/// Exact H0 and H1 program compiled over checked sparse graph atoms.
+/// Exact H0 and H1 program compiled over sparse graph atoms.
 #[derive(Debug, Clone)]
 pub struct PersistenceProgram {
     params: RipsParams,
@@ -291,7 +291,7 @@ pub struct PersistenceProgram {
 }
 
 impl PersistenceProgram {
-    /// Compile a checked compositional H0 and H1 program.
+    /// Compile a compositional H0 and H1 program.
     ///
     /// Each cyclic atom receives its own reduction certificate. Graphs
     /// without a useful split remain one exact atom.
@@ -355,14 +355,14 @@ impl PersistenceProgram {
         &self.atoms
     }
 
-    /// Capture the complete checked state for later restore or branching.
+    /// Capture the current state for later restore or branching.
     pub fn checkpoint(&self) -> ProgramCheckpoint {
         ProgramCheckpoint {
             program: self.clone(),
         }
     }
 
-    /// Replace this program with a captured checked state.
+    /// Replace this program with a captured state.
     pub fn restore(&mut self, checkpoint: &ProgramCheckpoint) {
         *self = checkpoint.program.clone();
     }

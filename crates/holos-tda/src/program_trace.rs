@@ -1,8 +1,8 @@
-//! Portable independently checked traces of persistence-program updates.
+//! Update traces for persistence programs.
 //!
-//! A `HOLOSDLT` envelope is self-contained. It stores the initial graph and
-//! program, every updated graph, exact work and continuation records, and a
-//! new program checkpoint only when certified reuse is not possible.
+//! A `HOLOSDLT` envelope stores the initial graph and program, every
+//! updated graph, work and continuation records, and a new program
+//! checkpoint only when certified reuse is not possible.
 
 use std::fmt;
 
@@ -99,7 +99,7 @@ impl Default for ProgramTraceDecodeLimits {
     }
 }
 
-/// One graph update and its declared checked result.
+/// One graph update and its declared result.
 #[derive(Debug, Clone)]
 pub struct ProgramTraceStep {
     graph: SparseDistanceMatrix,
@@ -154,7 +154,7 @@ impl ProgramTraceStep {
     }
 }
 
-/// Self-contained sequence of proof-carrying program updates.
+/// Sequence of program updates with nested proofs.
 #[derive(Debug, Clone)]
 pub struct ProgramTraceArtifact {
     initial_graph: SparseDistanceMatrix,
@@ -163,7 +163,7 @@ pub struct ProgramTraceArtifact {
 }
 
 impl ProgramTraceArtifact {
-    /// Produce a checked trace from an initial graph and updated graphs.
+    /// Produce a trace from an initial graph and updated graphs.
     pub fn build(
         initial: &SparseDistanceMatrix,
         updates: &[SparseDistanceMatrix],
@@ -205,7 +205,7 @@ impl ProgramTraceArtifact {
         &self.initial_graph
     }
 
-    /// Initial independently checked program.
+    /// Initial program artifact.
     pub fn initial_program(&self) -> &ProgramArtifact {
         &self.initial_program
     }
@@ -292,29 +292,29 @@ impl ProgramTraceArtifact {
     }
 }
 
-/// One independently replayed program step.
+/// One replayed program step.
 #[derive(Debug, Clone)]
 pub struct VerifiedProgramTraceStep {
-    /// Checked execution mode.
+    /// Execution mode.
     pub mode: ProgramUpdateMode,
-    /// Checked work counts.
+    /// Work counts.
     pub work: ProgramWork,
-    /// Checked events.
+    /// Topology and algebraic events.
     pub events: Vec<ProgramEvent>,
-    /// Checked class-space continuation.
+    /// Class-space continuation.
     pub continuation: Vec<ClassContinuation>,
-    /// Checked exact class-space correspondence.
+    /// Exact class-space correspondence.
     pub correspondence: Vec<ClassCorrespondence>,
-    /// Checked exact diagram.
+    /// Exact diagram.
     pub diagram: Diagram,
 }
 
-/// Result of independently checking a complete program trace.
+/// Result of verifying a program trace.
 #[derive(Debug, Clone)]
 pub struct VerifiedProgramTrace {
-    /// Checked initial diagram and H1 class spaces.
+    /// Initial diagram and H1 class spaces.
     pub initial_result: crate::ExplainedDiagram,
-    /// Checked update steps.
+    /// Update steps.
     pub steps: Vec<VerifiedProgramTraceStep>,
     /// Ready program at the final graph.
     pub final_program: PersistenceProgram,
