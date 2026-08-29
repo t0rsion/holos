@@ -117,15 +117,14 @@ package uses an ABI3 extension and also installs the `holos-tda` command.
 | Coverage | `CoverageSynthesisArtifact` | Relative fence filling under failures |
 | Planar binding | `GeometryBoundCoverageArtifact` | Polygon, containment, exact radius graphs, and coverage proof |
 
-These paths share stable vertex labels, canonical ordering, prime-field
-arithmetic, bounded decoders, and content digests. They do not all make the
-same assurance claim. The artifact section states each boundary.
+These paths do not all make the same assurance claim. The artifact section
+states each boundary.
 
 ## Exact collapse portfolios
 
-A collapse portfolio runs every listed schedule. It independently replays
-each removal through the collapse verifier, counts surviving flag simplices,
-and selects a lexicographic minimum. Ties keep the first candidate.
+A collapse portfolio runs every listed schedule. It replays each removal
+through the collapse verifier, counts surviving flag simplices, and selects
+a lexicographic minimum. Ties keep the first candidate.
 
 ```sh
 holos collapse-portfolio graph.spr portfolio.hpor \
@@ -293,9 +292,10 @@ Independent means that `holos-tda-check` does not depend on `holos-tda`.
 The two crates still share the mathematical specification and byte formats.
 The check is not a proof-assistant verification.
 
-All portable artifacts use canonical ordering, explicit version bytes,
-resource limits, and a SHA-256 content digest. The digest detects content
-changes. It does not authenticate a producer.
+All portable artifacts use stable vertex labels, canonical ordering,
+prime-field arithmetic, bounded decoders, explicit version bytes, resource
+limits, and a SHA-256 content digest. The digest detects content changes. It
+does not authenticate a producer.
 
 ## Correctness
 

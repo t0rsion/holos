@@ -11,15 +11,14 @@ published.
 
 ### Added
 
-- Exact finite collapse portfolios. A portfolio runs serial, rounds, or
+- Finite collapse portfolios. A portfolio runs serial, rounds, or
   adaptive schedules, verifies every removal, counts surviving flag simplices,
   and selects the exact minimum under an edge or reduction-column objective.
   The `HOLOSPOR` artifact binds every candidate, score, and tie break.
-- Proof-carrying persistence for explicit scalar filtered simplicial
-  complexes. `ExplicitReductionCertificate` records dimension-generic
+- Proof-carrying persistence for explicit scalar filtered complexes.
+  `ExplicitReductionCertificate` records dimension-generic
   `D V = R` factorizations and exact diagrams in `HOLOSEXP`. The separate
-  checker reconstructs faces, boundaries, basis changes, pivots, and bars
-  without linking `holos-tda`.
+  checker reconstructs faces, boundaries, basis changes, pivots, and bars.
 - Geometry-bound finite coverage. `CoverageGeometry` checks a simple
   nondegenerate fence polygon, sensor containment, and the complete Euclidean
   radius graph with exact rational predicates over binary64 input.
