@@ -2,8 +2,8 @@
 //!
 //! A space is the quotient of cocycles by coboundaries at one filtration
 //! scale. Sparse row reduction gives a deterministic basis on labeled flag
-//! simplices. Two spaces relate through their restriction to the common
-//! active flag subcomplex.
+//! simplices. Two spaces relate by restriction to the common active flag
+//! subcomplex.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -494,7 +494,7 @@ impl CohomologyRestriction {
 }
 
 impl CohomologyRelation {
-    /// True when restriction identifies both complete spaces.
+    /// True when the relation is an isomorphism of both spaces.
     pub fn is_isomorphism(&self) -> bool {
         self.relation_rank == self.old_rank
             && self.relation_rank == self.new_rank
@@ -562,7 +562,7 @@ pub fn cohomology_space(
     )
 }
 
-/// Relate two canonical spaces through their common active flag subcomplex.
+/// Relate two canonical spaces by restriction to their common active flag subcomplex.
 ///
 /// Restriction gives maps from both full cohomology spaces to the common
 /// space. The returned basis is their exact image intersection. An empty

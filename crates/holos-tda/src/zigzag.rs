@@ -23,7 +23,7 @@ pub struct ZigzagLimits {
     pub max_total_dimension: usize,
     /// Largest total nonzero map coefficient count.
     pub max_map_terms: usize,
-    /// Largest charged generalized-rank work count.
+    /// Largest generalized-rank work count.
     pub max_rank_work: usize,
 }
 
@@ -117,7 +117,7 @@ impl fmt::Display for ZigzagIntervalId {
 /// One interval-isotypic space in a zigzag decomposition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZigzagInterval {
-    /// Content identifier of this interval and its complete source module.
+    /// Content identifier of this interval and its source module.
     pub id: ZigzagIntervalId,
     /// First node covered by the interval.
     pub start: usize,
@@ -196,7 +196,7 @@ impl ZigzagModule {
         })
     }
 
-    /// Content identifier of this complete module.
+    /// Content identifier of this module.
     pub fn id(&self) -> ZigzagModuleId {
         self.id
     }

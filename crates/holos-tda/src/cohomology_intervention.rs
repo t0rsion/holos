@@ -80,7 +80,7 @@ impl CohomologyInterventionLimits {
     }
 }
 
-/// One active graph and target basis position in a shared intervention.
+/// One active graph and a target basis position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CohomologyInterventionScenario {
     active_edges: Vec<KineticEdgeKey>,
@@ -125,7 +125,7 @@ impl CohomologyInterventionScenario {
 pub struct CohomologyInterventionCandidate {
     /// Canonical edge key.
     pub edge: KineticEdgeKey,
-    /// Positive additive installation cost.
+    /// Positive additive cost.
     pub cost: u64,
 }
 
@@ -146,7 +146,7 @@ pub enum CohomologyInterventionStatus {
     Optimal,
     /// No selected edge set within the edit limit kills every target.
     Infeasible,
-    /// An oracle-call or search-node limit stopped the proof.
+    /// An oracle-call or search-node limit stopped the search.
     SearchIncomplete,
 }
 
@@ -493,7 +493,7 @@ impl CohomologyInterventionArtifact {
     pub fn search_nodes(&self) -> usize {
         self.search_nodes
     }
-    /// Topological oracle results served from the exact subset cache.
+    /// Topological oracle results taken from the exact subset cache.
     pub fn cache_hits(&self) -> usize {
         self.cache_hits
     }

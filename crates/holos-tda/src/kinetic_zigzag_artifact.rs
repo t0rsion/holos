@@ -100,7 +100,7 @@ struct KineticZigzagRanks {
 }
 
 impl KineticZigzagArtifact {
-    /// Build one artifact and return the complete checked zigzag.
+    /// Build one artifact and return the checked zigzag.
     pub fn build(
         trajectory: &KineticFiltration,
         dimension: usize,
@@ -152,7 +152,7 @@ impl KineticZigzagArtifact {
         }
     }
 
-    /// Recompute the exact event cells, maps, ranks, and interval decomposition.
+    /// Recompute the zigzag and compare every stored claim.
     pub fn verify(&self, limits: KineticZigzagArtifactLimits) -> Result<()> {
         let trajectory = KineticFiltration::new(
             self.vertex_count,

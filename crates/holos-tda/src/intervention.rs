@@ -1,9 +1,9 @@
 //! Certified finite H1 lifetime interventions.
 //!
-//! The supported query lowers independent edge weights in the declared
-//! destroyer triangles of one finite class space. It asks that the complete
-//! space die no later than a target scale. `Optimal` is relative to the
-//! current checked reduction and its fixed destroyer simplices.
+//! The query lowers independent edge weights in the declared destroyer
+//! triangles of one finite class space. The complete space must die no later
+//! than a target scale. `Optimal` is relative to the current checked
+//! reduction and its fixed destroyer simplices.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -74,13 +74,13 @@ pub struct H1Intervention {
     pub status: InterventionStatus,
     /// Checked lower bound on the maximum absolute edge change.
     pub lower_bound: f64,
-    /// Feasible maximum absolute edge change, when one was found.
+    /// Feasible maximum absolute edge change, when present.
     pub upper_bound: Option<f64>,
     /// Feasible edge edits, empty when no candidate was certified.
     pub edits: Vec<EdgeWeightEdit>,
-    /// Exact result after the edit, when one was found.
+    /// Exact result after the edit, when present.
     pub result: Option<ExplainedDiagram>,
-    /// Portable proof of the intervention, when one was found.
+    /// Portable proof of the intervention, when present.
     pub artifact: Option<InterventionArtifact>,
 }
 
@@ -88,11 +88,11 @@ impl PersistenceProgram {
     /// Find a checked independent-weight edit that shortens one finite H1
     /// class space.
     ///
-    /// The target must satisfy `birth < target_scale < death`. The one
-    /// current candidate lowers every edge above `target_scale` in every
-    /// declared destroyer triangle. `Optimal` means optimal under the same
-    /// reduction and critical-pair certificate. It is not a global inverse
-    /// persistence claim across unrelated pairings.
+    /// The target must satisfy `birth < target_scale < death`. The candidate
+    /// lowers every edge above `target_scale` in every declared destroyer
+    /// triangle. `Optimal` is relative to the same reduction and critical-pair
+    /// certificate. It is not a global inverse persistence claim across
+    /// unrelated pairings.
     pub fn kill_h1_before(
         &self,
         target: IntervalGroupId,
@@ -279,7 +279,7 @@ impl Default for InterventionDecodeLimits {
     }
 }
 
-/// Feasible H1 edit, bounds, and a nested independently checked trace.
+/// Feasible H1 intervention with a nested program trace.
 #[derive(Debug, Clone)]
 pub struct InterventionArtifact {
     target: IntervalGroupId,

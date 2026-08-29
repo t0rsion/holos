@@ -2,8 +2,8 @@
 //!
 //! Input `f64` values are interpreted as exact dyadic rationals. Threshold
 //! crossings and pairwise order swaps are solved over those rationals. Each
-//! public event carries the smallest adjacent-`f64` interval found around its
-//! exact time.
+//! public event carries the smallest adjacent-`f64` interval around its exact
+//! time.
 
 use std::collections::BTreeMap;
 
@@ -117,7 +117,7 @@ pub struct KineticSchedule {
     pub end: f64,
     /// Isolated events in exact time order.
     pub events: Vec<KineticEvent>,
-    /// Edge pairs equal throughout the complete interval.
+    /// Edge pairs equal throughout the time interval.
     pub persistent_ties: usize,
 }
 
@@ -134,7 +134,7 @@ pub struct KineticCohomologyEvent {
     pub before_rank: usize,
     /// Rank after the event.
     pub after_rank: usize,
-    /// Exact restriction relation across the event.
+    /// Exact cohomology relation across the event.
     pub relation: CohomologyRelation,
 }
 
@@ -143,7 +143,7 @@ pub struct KineticCohomologyEvent {
 pub enum KineticZigzagNodeKind {
     /// One open time cell between exact events.
     OpenCell {
-        /// A descriptive sample inside the open cell.
+        /// Sample time inside the open cell.
         sample: f64,
     },
     /// The active complex at one exact event time.
@@ -157,7 +157,7 @@ pub struct KineticZigzagNode {
     pub kind: KineticZigzagNodeKind,
     /// Content identifier of the canonical cohomology space.
     pub space: CohomologySpaceId,
-    /// Cohomology dimension at this node.
+    /// Rank of the cohomology space at this node.
     pub rank: usize,
     /// Active edge count in the flag complex.
     pub active_edges: usize,
@@ -181,13 +181,13 @@ pub struct KineticZigzag {
     pub scale: f64,
     /// Prime coefficient modulus.
     pub modulus: u32,
-    /// Edge pairs tied throughout the complete time interval.
+    /// Edge pairs equal throughout the time interval.
     pub persistent_ties: usize,
     /// Alternating open-cell and exact-event spaces.
     pub nodes: Vec<KineticZigzagNode>,
     /// Exact maps between adjacent nodes.
     pub arrows: Vec<KineticZigzagArrow>,
-    /// Interval decomposition of the complete finite zigzag module.
+    /// Interval decomposition of the zigzag module.
     pub barcode: ZigzagBarcode,
 }
 
@@ -198,7 +198,7 @@ pub enum KineticGraphStateKind {
     Start,
     /// One open time cell between exact events.
     OpenCell {
-        /// A descriptive sample inside the open cell.
+        /// Sample time inside the open cell.
         sample: f64,
     },
     /// Active graph at one exact event time.
@@ -298,10 +298,10 @@ impl KineticFiltration {
         SparseDistanceMatrix::from_triplets(self.vertex_count, &triplets)
     }
 
-    /// Materialize every graph needed to decide a fixed-scale all-time claim.
+    /// Materialize every graph needed to decide a fixed-scale claim on `[start, end]`.
     ///
     /// The output includes both closed endpoints, every exact threshold
-    /// event, and one sample in each open threshold cell. Its graph is
+    /// event, and one sample in each open threshold cell. The graph is
     /// constant on each open cell.
     pub fn critical_graphs(&self, scale: f64) -> Result<Vec<KineticGraphState>> {
         if !scale.is_finite() || scale < 0.0 {
@@ -393,8 +393,9 @@ impl KineticFiltration {
 
     /// Compute every isolated order event and optional threshold crossing.
     ///
-    /// Pass `None` to report only changes in the weak edge order. Endpoint
-    /// equalities are interval boundaries and are not repeated as events.
+    /// With `None`, the schedule reports only changes in the weak edge order.
+    /// Endpoint equalities are interval boundaries and are not repeated as
+    /// events.
     pub fn events(&self, threshold: Option<f64>) -> Result<KineticSchedule> {
         let threshold = threshold
             .map(|value| {
@@ -494,8 +495,7 @@ impl KineticFiltration {
     /// Open time cells alternate with exact event complexes. An event complex
     /// contains each edge whose exact weight is at most `scale`. Inclusion of
     /// an adjacent open-cell complex induces the recorded cohomology
-    /// restriction. Repeated interval copies remain one class space with a
-    /// multiplicity.
+    /// restriction.
     pub fn cohomology_zigzag(
         &self,
         dimension: usize,
