@@ -276,9 +276,8 @@ pub struct RipsParams {
     /// Worker threads for the run. 0 and 1 (the default) both run the
     /// serial engine. Higher values reduce each dimension concurrently.
     /// With [`RipsParams::collapse_edges`] set and the ordered or rounds
-    /// [`RipsParams::collapse_schedule`], the same budget also drives the
-    /// collapse: one pool serves the whole pipeline. The diagram is
-    /// identical at any thread count.
+    /// [`RipsParams::collapse_schedule`], `threads` is the budget for the
+    /// whole pipeline. The diagram is identical at any thread count.
     pub threads: usize,
     /// Optimization toggle. The diagram is identical with any combination
     /// disabled. For differential testing only.
@@ -328,10 +327,9 @@ pub struct RipsParams {
 /// The diagram is identical under all three, bit for bit. Every simplex of
 /// the complex has diameter at most the threshold, and a diameter is the
 /// largest of the edge lengths, so every edge of every simplex survives
-/// the conversion; conversely the conversion keeps only edges at or below
-/// the threshold. The two complexes are therefore equal simplex for
-/// simplex with equal diameters, and the vertex set carries over because
-/// the conversion passes the point count explicitly.
+/// the conversion. The conversion keeps only edges at or below the
+/// threshold. The vertex set carries over because the conversion passes
+/// the point count explicitly.
 ///
 /// An infinite threshold reads as `f64::MAX` in both engines. An absent
 /// pair has distance `+inf`, so it enters neither complex, and the
@@ -341,27 +339,24 @@ pub struct RipsParams {
 /// engineering data. Performance assessment is WIP.
 ///
 /// A sparse input is never routed, so this setting does not reach
-/// [`rips_persistence_sparse`]. It also does not reach the collapse
-/// pipeline: with [`RipsParams::collapse_edges`] set, the collapse already
-/// produces a graph and the sparse engine already reduces it.
+/// [`rips_persistence_sparse`]. With [`RipsParams::collapse_edges`] set,
+/// the collapse already produces a graph and the sparse engine reduces it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Engine {
     /// Reduce a low-density dense input with the sparse engine, and every
-    /// other dense input with the dense engine. The rule is frozen and
-    /// takes no argument. It also holds the conversion to a memory budget:
-    /// 32 MiB, or the bytes of the compact matrix, whichever is larger. A
-    /// matrix of
-    /// mostly absent pairs is low-density at any threshold, including an
-    /// infinite one, so it routes too.
+    /// other dense input with the dense engine. The rule takes no argument.
+    /// The conversion has a memory budget: 32 MiB, or the bytes of the
+    /// compact matrix, whichever is larger. A matrix of mostly absent
+    /// pairs is low-density at any threshold, including an infinite one,
+    /// so it routes too.
     #[default]
     Auto,
     /// Always reduce the distance matrix as it stands.
     Dense,
     /// Always convert to the thresholded graph and reduce that. The
-    /// conversion costs one pass over the matrix and one triplet buffer.
-    /// This is an explicit request, so the `Auto` memory budget does not
-    /// apply.
+    /// conversion costs one pass over the matrix. This is an explicit
+    /// request, so the `Auto` memory budget does not apply.
     Sparse,
 }
 
@@ -386,14 +381,10 @@ pub enum Engine {
 /// holds `n * n + n(n-1)/2` entries: one and a half times the full form,
 /// three times the compact one.
 ///
-/// The diagram is identical under all three, bit for bit: the two forms
-/// hold the same distances and answer every query with the same bits.
-/// Performance and peak-memory assessment are WIP.
+/// The diagram is identical under all three, bit for bit.
 ///
 /// A sparse input holds no distance matrix, so this setting does not reach
-/// [`rips_persistence_sparse`]. It also does not reach the collapse
-/// pipeline: with [`RipsParams::collapse_edges`] set, the collapse
-/// produces a graph and the sparse engine reduces it.
+/// [`rips_persistence_sparse`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum DenseStorage {
@@ -489,7 +480,7 @@ impl Default for RipsParams {
 impl RipsParams {
     /// Defaults with the given `max_dim`.
     ///
-    /// The threshold is the enclosing radius. Reduction shortcuts are on.
+    /// The threshold is the input's default. Reduction shortcuts are on.
     /// Edge collapse and structural factorization are off.
     pub fn new(max_dim: usize) -> Self {
         Self {
@@ -565,7 +556,7 @@ impl RipsParams {
     }
 }
 
-/// Errors surfaced by construction, validation, and IO.
+/// Errors from construction, validation, and IO.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(missing_docs)]
 pub enum Error {
@@ -595,11 +586,7 @@ impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Smallest point count [`Engine::Auto`] routes. The conversion costs one
-/// pass over the matrix and one triplet buffer, and a short reduction
-/// cannot earn that back.
-///
-/// Frozen on 2026-08-18 from disclosed engineering data. Performance
-/// assessment is WIP.
+/// pass over the matrix, and a short reduction cannot earn that back.
 const N_MIN: usize = 32;
 
 /// Numerator of the highest edge density [`Engine::Auto`] routes:
@@ -608,16 +595,15 @@ const N_MIN: usize = 32;
 /// as `5 * m <= 4 * C(n, 2)` so that no rounding of `0.8` and no rounding
 /// of a large count enters the decision.
 ///
-/// Frozen with [`N_MIN`] on 2026-08-18 from the same disclosed engineering
-/// data. Above the cutoff the graph would only spend memory on edges the
-/// matrix already holds. Performance assessment is WIP.
+/// Above the cutoff the graph would only spend memory on edges the matrix
+/// already holds.
 const RHO_MAX_NUM: u128 = 4;
 
 /// Denominator of [`RHO_MAX_NUM`].
 const RHO_MAX_DEN: u128 = 5;
 
 /// The threshold a dense run applies: the caller's, or the enclosing
-/// radius, which is what the engine resolves for itself.
+/// radius.
 fn resolved_threshold(dist: &DistanceMatrix, params: &RipsParams) -> f64 {
     params.threshold.unwrap_or_else(|| dist.enclosing_radius())
 }
@@ -696,19 +682,15 @@ fn graph_routes(n: usize, edges: usize) -> bool {
 /// the reduction are small in absolute terms, so `Auto` keeps the compact
 /// form and leaves the second triangle to a caller who asks for it.
 ///
-/// Frozen on 2026-08-18 from disclosed engineering data. Performance
-/// assessment is WIP.
+/// Frozen on 2026-08-18 from disclosed engineering data.
 const SQUARE_MIN_BYTES: u128 = 4 << 20;
 
 /// Most bytes [`DenseStorage::Auto`] adds for the full form. The full form
 /// adds `n(n+1)/2` entries, the compact matrix again plus its diagonal, so
 /// this bounds the point count as well: 8191 points.
 ///
-/// A policy bound, not a crossover. It caps what a run spends on a storage
-/// form nobody asked for. [`DenseStorage::Square`] is an explicit request
-/// and ignores it.
-///
-/// Frozen on 2026-08-18. Performance assessment is WIP.
+/// The bound caps what a run spends on a storage form nobody asked for.
+/// [`DenseStorage::Square`] is an explicit request and ignores it.
 const SQUARE_EXTRA_MAX_BYTES: u128 = 256 << 20;
 
 /// Distance reads per matrix cell the fold must make before
@@ -717,9 +699,6 @@ const SQUARE_EXTRA_MAX_BYTES: u128 = 256 << 20;
 /// is what the conversion has to earn back. The dim-0 columns supply one
 /// read per cell on their own, so the test asks the columns above them for
 /// three more.
-///
-/// Frozen on 2026-08-18 from disclosed engineering data. Performance
-/// assessment is WIP.
 const SQUARE_READS_PER_CELL: u128 = 4;
 
 /// Bytes the full form adds over the compact one: the entries above the
@@ -778,8 +757,7 @@ fn square_selected(
 }
 
 /// Reduce a dense input with the dense engine, from the storage form the
-/// rule selects. The conversion runs once, and the full form lives no
-/// longer than the run.
+/// rule selects.
 fn solve_dense(
     dist: &DistanceMatrix,
     params: &RipsParams,
@@ -809,16 +787,9 @@ fn solve_thresholded(
 
 /// Compute the Rips persistence diagram of a distance matrix.
 ///
-/// [`RipsParams::engine`] selects the engine. Under [`Engine::Auto`] an
-/// input above a frozen point count, whose edge density at the resolved
-/// threshold is at or below a frozen cutoff, and whose graph fits the
-/// conversion memory budget, is converted to its thresholded graph and
-/// reduced by the sparse engine. The diagram is the same either way, bit
-/// for bit: see [`Engine`].
-///
-/// A run that stays dense then selects its storage form, which
-/// [`RipsParams::dense_storage`] governs. A routed run never converts the
-/// matrix, so the two decisions come in that order: see [`DenseStorage`].
+/// [`RipsParams::engine`] selects the engine. A run that stays dense then
+/// selects its storage form under [`RipsParams::dense_storage`]. A routed
+/// run never converts the matrix. See [`Engine`] and [`DenseStorage`].
 pub fn rips_persistence(dist: &DistanceMatrix, params: &RipsParams) -> Result<Diagram> {
     if params.collapse_edges {
         return collapse_and_solve(dist, params, |_| Ok(()));
@@ -902,7 +873,7 @@ pub fn rips_persistence_sparse(
 }
 
 /// The collapse pipeline behind [`rips_persistence`]. One run-wide pool
-/// serves the selected collapse and then the reduction. The serial
+/// covers the selected collapse and then the reduction. The serial
 /// schedule collapses before the pool exists, so the pool goes to the
 /// reduction alone. Every surviving edge lies at or below the terminal
 /// level, so the terminal level is the exact threshold for the reduced
