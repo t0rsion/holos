@@ -1,4 +1,4 @@
-//! Independent verification of coverage proofs bound to planar geometry.
+//! Coverage proofs bound to planar geometry.
 
 use num_rational::BigRational;
 use num_traits::{Signed, Zero};
@@ -11,10 +11,10 @@ const MAGIC: &[u8; 8] = b"HOLOSGEO";
 const VERSION: u16 = 1;
 const F64_BITS_CODEC: u8 = 1;
 
-/// Summary of an independently checked geometry-bound coverage proof.
+/// Summary of a checked geometry-bound coverage proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedGeometryBoundCoverage {
-    /// Summary of the nested coverage and optimality proof.
+    /// Summary of the nested coverage proof.
     pub coverage: VerifiedCoverage,
     /// Number of sensors in every checked state.
     pub vertices: usize,
@@ -33,7 +33,11 @@ pub fn is_geometry_bound_coverage(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
 }
 
-/// Verify geometry, coverage, and optimality without invoking `holos-tda`.
+/// Verify planar geometry and the nested `HOLOSCOV` coverage proof.
+///
+/// Coordinates are exact dyadic rationals from finite binary64 values.
+/// The fence must be a simple nondegenerate polygon that contains every sensor.
+/// Each state must be the complete Euclidean broadcast-radius graph.
 pub fn verify_geometry_bound_coverage(
     bytes: &[u8],
     limits: ProofLimits,

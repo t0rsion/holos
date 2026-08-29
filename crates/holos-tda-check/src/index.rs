@@ -14,12 +14,12 @@ const DELTA_MAGIC: &[u8; 8] = b"HOLOSDP\0";
 const VERSION: u16 = 4;
 const F64_BITS_CODEC: u8 = 1;
 
-/// Whether bytes start with the versioned-index snapshot magic.
+/// Return true when bytes start with the versioned-index snapshot magic.
 pub fn is_index_snapshot(bytes: &[u8]) -> bool {
     bytes.starts_with(SNAPSHOT_MAGIC)
 }
 
-/// Counts derived while checking a complete index snapshot.
+/// Counts from a checked complete index snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifiedIndexSnapshot {
     /// Checked root content identifier.
@@ -38,7 +38,7 @@ pub struct VerifiedIndexSnapshot {
     pub higher_columns_checked: usize,
 }
 
-/// Counts derived while checking one warm index delta.
+/// Counts from one checked warm index delta.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifiedIndexDelta {
     /// Root required before the delta was applied.
@@ -266,10 +266,10 @@ fn validate_empty_delta(
     Ok(())
 }
 
-/// Stateful verifier for one versioned persistence-index envelope.
+/// Stateful checker for one versioned persistence-index envelope.
 ///
 /// Construct it from a complete snapshot. Each accepted delta advances the
-/// trusted root atomically and retains old interface nodes for later reuse.
+/// verified root and retains old interface nodes.
 #[derive(Debug, Clone)]
 pub struct IndexProofState {
     max_dim: usize,

@@ -9,7 +9,7 @@ const VERSION: u16 = 1;
 const F64_BITS_CODEC: u8 = 1;
 const MODULUS_LIMIT: u32 = 32_768;
 
-/// Summary of an independently checked explicit filtration.
+/// Summary of a checked explicit filtration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifiedExplicitPersistence {
     /// Highest checked homology dimension.
@@ -33,7 +33,7 @@ pub fn is_explicit_persistence(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
 }
 
-/// Verify one bounded `HOLOSEXP` certificate without invoking `holos-tda`.
+/// Verify one bounded `HOLOSEXP` certificate.
 pub fn verify_explicit_persistence(
     bytes: &[u8],
     limits: ProofLimits,

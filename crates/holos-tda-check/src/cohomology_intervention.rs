@@ -14,12 +14,12 @@ const FORMAT_MAX_PROOF_TERMS: usize = 1_000_000;
 const FORMAT_MAX_ORACLE_CALLS: usize = 10_000_000;
 const FORMAT_MAX_SEARCH_NODES: usize = 10_000_000;
 
-/// Whether bytes start with the cohomology-intervention magic.
+/// Return true when bytes start with the cohomology-intervention magic.
 pub fn is_cohomology_intervention(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
 }
 
-/// Completeness status derived by independent weighted search.
+/// Completeness status from the checker's weighted search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifiedCohomologyInterventionStatus {
     /// The selected edges have minimum total cost under the edit limit.
@@ -41,7 +41,7 @@ impl VerifiedCohomologyInterventionStatus {
     }
 }
 
-/// Counts and bounds from one independently checked intervention.
+/// Counts and bounds from one checked intervention.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCohomologyIntervention {
     /// Target cohomology dimension.
@@ -50,15 +50,15 @@ pub struct VerifiedCohomologyIntervention {
     pub modulus: u32,
     /// Number of graph scenarios checked together.
     pub scenarios: usize,
-    /// Verified search status.
+    /// Completeness status.
     pub status: VerifiedCohomologyInterventionStatus,
     /// Number of selected edge additions.
     pub edits: usize,
     /// Total selected cost, when a feasible edit exists.
     pub total_cost: Option<u64>,
-    /// Proved finite lower bound, when one exists.
+    /// Checked lower cost bound, when finite.
     pub lower_bound_cost: Option<u64>,
-    /// Feasible upper bound, when one exists.
+    /// Checked incumbent cost, when present.
     pub upper_bound_cost: Option<u64>,
     /// Distinct topological oracle calls.
     pub oracle_calls: usize,
@@ -110,10 +110,11 @@ struct Claim {
     after_ranks: Vec<usize>,
 }
 
-/// Verify a `HOLOSCI` artifact without linking to the producer crate.
+/// Verify a `HOLOSCI` artifact.
 ///
-/// The checker rebuilds every scenario cohomology space and restriction map.
-/// It then repeats the weighted antitone search and its lower-bound packing.
+/// The checker reconstructs every scenario cohomology space and
+/// restriction map. It repeats the weighted antitone search and its
+/// lower-bound packing.
 pub fn verify_cohomology_intervention(
     bytes: &[u8],
     limits: ProofLimits,

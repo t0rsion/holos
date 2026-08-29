@@ -11,12 +11,12 @@ const MAGIC: &[u8; 8] = b"HOLOSRI\0";
 const VERSION: u16 = 1;
 const F64_BITS_CODEC: u8 = 1;
 
-/// Whether bytes start with the relative-interface certificate magic.
+/// Return true when bytes start with the relative-interface certificate magic.
 pub fn is_relative_interface(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
 }
 
-/// Counts derived from one independently checked relative interface.
+/// Counts from one checked relative interface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifiedRelativeInterface {
     /// Content identifier of the retained core and reduction.
@@ -80,7 +80,7 @@ impl VerifiedCertificate {
 
 type DimensionMap = BTreeMap<Vec<usize>, Cell>;
 
-/// Decode and verify one bounded `HOLOSRI` certificate.
+/// Verify one bounded `HOLOSRI` certificate.
 pub fn verify_relative_interface(
     bytes: &[u8],
     limits: ProofLimits,
@@ -91,8 +91,8 @@ pub fn verify_relative_interface(
 
 /// Verify that a parent input is the keyed union of checked child cores.
 ///
-/// This checks one proof-exchange fold. The parent certificate separately
-/// proves every cancellation and its final reduction.
+/// The parent certificate separately proves every cancellation and its
+/// final reduction.
 pub fn verify_relative_composition(
     parent: &[u8],
     children: &[&[u8]],

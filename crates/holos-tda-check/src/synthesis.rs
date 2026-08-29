@@ -50,7 +50,7 @@ impl VerifiedSynthesisStatus {
     }
 }
 
-/// Summary of an independently checked synthesis result.
+/// Summary of a checked synthesis result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedSynthesis {
     /// Cohomology dimension.
@@ -79,7 +79,7 @@ pub struct VerifiedSynthesis {
     pub producer_search_nodes: usize,
     /// Proof-tree node count.
     pub proof_nodes: usize,
-    /// Topology checks made while validating the proof tree.
+    /// Topology checks in the recorded proof tree.
     pub proof_topology_checks: usize,
     /// Target subspace ranks before editing.
     pub before_ranks: Vec<usize>,
@@ -92,7 +92,7 @@ pub fn is_synthesis(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
 }
 
-/// Verify one bounded synthesis proof without invoking `holos-tda`.
+/// Verify one bounded `HOLOSSYN` synthesis proof.
 pub fn verify_synthesis(
     bytes: &[u8],
     limits: ProofLimits,

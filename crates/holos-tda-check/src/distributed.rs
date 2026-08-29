@@ -8,12 +8,12 @@ use super::{ProofError, ProofLimits, Reader};
 const MAGIC: &[u8; 8] = b"HOLOSDM\0";
 const VERSION: u16 = 1;
 
-/// Whether bytes start with the distributed-interface manifest magic.
+/// Return true when bytes start with the distributed-interface manifest magic.
 pub fn is_distributed_interface(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
 }
 
-/// Counts from one independently replayed distributed interface manifest.
+/// Counts from one checked distributed interface manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifiedDistributedInterface {
     /// Content-bound job identifier.
@@ -43,9 +43,9 @@ struct Manifest {
 
 /// Verify a `HOLOSDM` manifest and every referenced proof-exchange object.
 ///
-/// `objects` can arrive in any order. Every object is bound by SHA-256. The
-/// checker replays each keyed child-core union and the final protection
-/// change without linking to the producer crate.
+/// `objects` can arrive in any order. Each object is identified by SHA-256.
+/// The checker replays each keyed child-core union and the final protection
+/// change.
 pub fn verify_distributed_interface(
     manifest: &[u8],
     objects: &[Vec<u8>],
@@ -82,8 +82,8 @@ pub fn verify_distributed_interface(
 ///
 /// The checker retains at most three artifacts while it replays one fold.
 /// It reads every distinct object once for its identifier and size, then reads
-/// the objects needed by each composition step. The callback can use a local
-/// content-addressed store or another untrusted byte source.
+/// the objects needed by each composition step. The loader is an untrusted
+/// byte source keyed by content identifier.
 pub fn verify_distributed_interface_with<F>(
     manifest: &[u8],
     mut load: F,

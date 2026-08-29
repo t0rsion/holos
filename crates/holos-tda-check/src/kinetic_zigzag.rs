@@ -12,7 +12,7 @@ const F64_BITS_CODEC: u8 = 1;
 const FORMAT_MAX_NODES: usize = 2_049;
 const FORMAT_MAX_RANK_WORK: usize = 100_000_000;
 
-/// Result of independently replaying one kinetic zigzag artifact.
+/// Result of replaying one kinetic zigzag artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifiedKineticZigzag {
     /// Target cohomology dimension.
@@ -31,12 +31,12 @@ pub struct VerifiedKineticZigzag {
     pub interval_copies: usize,
 }
 
-/// Whether bytes start with the kinetic zigzag magic.
+/// Return true when bytes start with the kinetic zigzag magic.
 pub fn is_kinetic_zigzag(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
 }
 
-/// Verify a `HOLOSZZ` artifact without linking to the producer crate.
+/// Verify a `HOLOSZZ` artifact.
 ///
 /// The checker reconstructs every exact event complex, canonical cohomology
 /// basis, restriction map, generalized rank, and interval multiplicity.

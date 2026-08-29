@@ -1,12 +1,15 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-//! Solver-independent verification of proof-carrying sparse persistence.
+//! Independent replay of holos proof artifacts.
 //!
-//! The crate has no dependency on `holos-tda`. It checks bounded `HOLOSPF`
-//! envelopes by reconstructing filtered edge and triangle boundaries,
-//! checking every declared `D V = R` factorization, checking the structural
-//! decomposition, and composing exact H0 and H1 diagrams.
+//! The crate does not depend on `holos-tda`. It shares the mathematical
+//! specification and byte formats with the producer. Public functions
+//! reconstruct each declared claim from a bounded envelope.
+//!
+//! The checker does not certify a producer algorithm in a proof assistant.
+//! SHA-256 digests detect content changes. They do not authenticate a producer.
+//! Collapse and portfolio artifacts use the linked producer verifier.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -59,7 +62,7 @@ const MODULUS_LIMIT: u64 = 32_768;
 const SEPARATOR_WIDTH: usize = 3;
 const SEPARATOR_SEARCH_LIMIT: usize = 100_000;
 
-/// Failure while decoding or checking a proof bundle.
+/// Failure while decoding or checking a proof artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProofError {
     message: String,
@@ -151,7 +154,7 @@ pub struct ProofBar {
     pub dimension: usize,
     /// Birth value.
     pub birth: f64,
-    /// Death value, or positive infinity for an essential interval.
+    /// Death value. An essential class has death = f64::INFINITY.
     pub death: f64,
 }
 
@@ -322,7 +325,7 @@ impl SnapshotProof {
     }
 }
 
-/// A bounded content-addressed persistence proof and delta trajectory.
+/// Bounded content-addressed `HOLOSPF` persistence proof.
 #[derive(Debug, Clone)]
 pub struct ProofBundle {
     modulus: u32,
@@ -492,7 +495,7 @@ fn check_bundle_snapshots(
     Ok(())
 }
 
-/// Counts derived after complete solver-independent verification.
+/// Counts from a checked `HOLOSPF` proof.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifiedProof {
     /// Checked snapshot count.
@@ -510,7 +513,11 @@ pub struct VerifiedProof {
 }
 
 impl ProofBundle {
-    /// Verify every snapshot without calling a persistence solver.
+    /// Check every snapshot against reconstructed H0 and H1 diagrams.
+    ///
+    /// The checker reconstructs filtered edge and triangle boundaries.
+    /// It checks every declared `D V = R` factorization and the cyclic-atom
+    /// decomposition.
     pub fn verify(&self) -> Result<VerifiedProof, ProofError> {
         self.check_shape()?;
         let mut verifier = BundleVerifier::new(self);

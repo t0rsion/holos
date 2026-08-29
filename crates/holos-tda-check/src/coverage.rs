@@ -48,7 +48,7 @@ pub enum VerifiedCoverageSource {
     Affine,
 }
 
-/// Summary of an independently checked coverage result.
+/// Summary of a checked coverage result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCoverage {
     /// Prime coefficient modulus.
@@ -77,7 +77,7 @@ pub struct VerifiedCoverage {
     pub producer_search_nodes: usize,
     /// Proof-tree node count.
     pub proof_nodes: usize,
-    /// Topology checks made while validating the proof tree.
+    /// Topology checks in the recorded proof tree.
     pub proof_topology_checks: usize,
     /// State-failure pairs checked for the selected plan.
     pub selected_failure_checks: usize,
@@ -90,7 +90,7 @@ pub fn is_coverage(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
 }
 
-/// Verify one bounded coverage proof without invoking `holos-tda`.
+/// Verify one bounded `HOLOSCOV` coverage proof.
 pub fn verify_coverage(bytes: &[u8], limits: ProofLimits) -> Result<VerifiedCoverage, ProofError> {
     let decoded = decode_coverage(bytes, limits)?;
     let checked = verify_claim(&decoded, limits)?;
