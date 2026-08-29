@@ -2,9 +2,9 @@
 //!
 //! An index decomposes the fixed listed-edge envelope of a sparse graph.
 //! Relative filtered cores compose through arbitrary protected separators.
-//! Materialized reductions and contractible diagram composition remain useful
-//! controls. A transition path-copies the affected route and shares every
-//! untouched subtree.
+//! `InterfacePolicy::Compose` and `InterfacePolicy::Materialize` are
+//! alternative parent policies. A transition path-copies the affected route
+//! and shares every untouched subtree.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -28,7 +28,7 @@ pub struct IndexParams {
     pub separator_search_limit: usize,
     /// A scope at or below this vertex count remains a leaf.
     pub leaf_vertices: usize,
-    /// Whether certified separators compose or retain parent reductions.
+    /// How parent interfaces compose or retain reductions.
     pub interface_policy: InterfacePolicy,
 }
 
@@ -87,7 +87,7 @@ pub struct IndexSummary {
     pub largest_relative_core_cells: usize,
     /// Equal-filtration pairs removed across all relative interfaces.
     pub relative_cancellations: usize,
-    /// Whether the root omits a reduction over the complete graph.
+    /// Whether the root omits a reduction over its full scope.
     pub root_composed: bool,
     /// Candidate vertex sets checked during decomposition.
     pub separator_candidates_checked: usize,
@@ -98,7 +98,7 @@ pub struct IndexSummary {
 /// Exact work charged to one index transition.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IndexWork {
-    /// Envelope edges compared when a complete graph state was supplied.
+    /// Envelope edges compared when a full graph was supplied.
     pub edges_checked: usize,
     /// Tree nodes whose scopes contained at least one changed edge.
     pub nodes_touched: usize,
@@ -168,7 +168,7 @@ pub enum IndexEventKind {
 /// One event reported by an index transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexEvent {
-    /// Kind of change.
+    /// Event kind.
     pub kind: IndexEventKind,
     /// Content identifier of the affected old node, when one exists.
     pub node: Option<[u8; 32]>,
@@ -266,7 +266,7 @@ impl TopologyPatch {
     }
 }
 
-/// Difference between two immutable index versions.
+/// Difference between two index versions.
 #[derive(Debug, Clone)]
 pub struct IndexDiff {
     /// Whether both versions use the same listed-edge envelope.
@@ -286,7 +286,7 @@ pub struct IndexBranch {
     pub transition: IndexTransition,
 }
 
-/// Public shape of one materialized filtered interface.
+/// Summary of one filtered interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceSummary {
     /// Content identifier of this node.
@@ -322,7 +322,7 @@ pub struct InterfaceSummary {
 pub enum InterfaceMode {
     /// The interface stores a filtered core relative to its parent boundary.
     Relative,
-    /// The interface stores a reduction over its complete vertex scope.
+    /// The interface stores a reduction over its full vertex scope.
     Materialized,
     /// The scope is a disjoint union of its child scopes.
     Disjoint,
@@ -332,7 +332,7 @@ pub enum InterfaceMode {
     ZeroCone,
 }
 
-/// Result of constructing a new immutable index version.
+/// Result of constructing a new index version.
 #[derive(Debug, Clone)]
 pub struct IndexTransition {
     /// New exact index version.
@@ -341,7 +341,7 @@ pub struct IndexTransition {
     pub mode: IndexUpdateMode,
     /// Exact diagram difference.
     pub delta: DiagramDelta,
-    /// Structural and algebraic events.
+    /// Transition events.
     pub events: Vec<IndexEvent>,
     /// Optional exact class relations on the common filtered subcomplex.
     pub correspondence: Vec<ClassCorrespondence>,
@@ -477,7 +477,7 @@ impl PersistenceIndex {
         self.summary
     }
 
-    /// Content identifier of this complete index version.
+    /// Content identifier of this index version.
     pub fn version(&self) -> [u8; 32] {
         self.root.digest
     }
@@ -504,7 +504,7 @@ impl PersistenceIndex {
         self.index_params
     }
 
-    /// Return every interface in deterministic preorder.
+    /// Every interface in deterministic preorder.
     pub fn interfaces(&self) -> Vec<InterfaceSummary> {
         let mut output = Vec::with_capacity(self.summary.nodes);
         collect_interfaces(&self.root, 0, &mut output);
@@ -536,16 +536,15 @@ impl PersistenceIndex {
         }
     }
 
-    /// Create another handle to the same immutable version.
+    /// Create another handle to the same version.
     pub fn fork(&self) -> Self {
         self.clone()
     }
 
-    /// Apply local edits inside the fixed listed-edge envelope.
+    /// Apply local edits inside the listed-edge envelope.
     ///
-    /// Deactivation requires a finite threshold. It stores `f64::MAX`, so
-    /// the edge remains available for a later activation without changing
-    /// the separator tree.
+    /// Deactivation requires a finite threshold. It stores `f64::MAX`.
+    /// The edge stays listed and can be activated later.
     pub fn transition_edits(&self, edits: &[IndexEdit]) -> Result<IndexTransition> {
         self.transition_edits_with(edits, CorrespondenceMode::Omit)
     }
@@ -629,7 +628,7 @@ impl PersistenceIndex {
 
     /// Advance an ordered batch atomically.
     ///
-    /// If one update fails, this method leaves the receiver unchanged.
+    /// If one update fails, the receiver stays unchanged.
     pub fn advance_batch(
         &mut self,
         updates: &[SparseDistanceMatrix],
@@ -645,7 +644,7 @@ impl PersistenceIndex {
         Ok(transitions)
     }
 
-    /// Advance independent alternatives from this immutable version.
+    /// Advance independent alternatives from this version.
     ///
     /// Output order matches input order. The receiver does not change. The
     /// configured persistence thread count bounds concurrent alternatives.

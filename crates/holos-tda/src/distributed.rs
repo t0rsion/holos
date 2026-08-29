@@ -3,7 +3,9 @@
 //! A store writes verified shard artifacts under their SHA-256 identifiers.
 //! The coordinator folds one shard at a time while protecting the common
 //! separator. Each fold is durable before the next one starts. An atomic
-//! manifest publishes the final result.
+//! manifest publishes the final result. [`DurableInterfaceStore`] is local
+//! and does not provide networking, authentication, or multi-writer
+//! coordination.
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -97,11 +99,11 @@ pub struct DistributedInterfaceWork {
     pub bytes_read: usize,
     /// New artifact bytes written to the store.
     pub bytes_written: usize,
-    /// Largest accumulator-plus-shard byte count during one fold.
+    /// Peak byte count of one accumulator and one shard.
     pub peak_artifact_bytes: usize,
 }
 
-/// Immutable commit record for one distributed interface result.
+/// Commit record for one distributed interface result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DistributedInterfaceManifest {
     job: ArtifactId,
@@ -356,7 +358,7 @@ impl DurableInterfaceStore {
         self.object_path(id).is_file()
     }
 
-    /// Compose shard artifacts and publish one atomic durable manifest.
+    /// Compose shard artifacts and publish one atomic manifest.
     ///
     /// Shards are ordered. Every intermediate fold protects the union of
     /// `separator_vertices` and `output_protected_vertices`. A retry resumes
@@ -392,7 +394,7 @@ impl DurableInterfaceStore {
     /// Compose shards already present in this store.
     ///
     /// The coordinator loads at most one shard and one accumulator artifact
-    /// for each fold. The identifiers remain ordered and bind the job.
+    /// for each fold. The identifiers are ordered and bind the job.
     pub fn commit_stored(
         &self,
         shard_ids: &[ArtifactId],
@@ -630,8 +632,8 @@ impl DurableInterfaceStore {
 
     /// Recompute every fold and verify a committed manifest from stored shards.
     ///
-    /// This path ignores durable progress. It checks that every recorded fold
-    /// and the final result follow from the ordered shard artifacts.
+    /// Ignores durable progress. Checks that every recorded fold and the
+    /// final result follow from the ordered shard artifacts.
     pub fn verify_manifest(
         &self,
         manifest: &DistributedInterfaceManifest,

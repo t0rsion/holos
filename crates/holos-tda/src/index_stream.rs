@@ -15,7 +15,7 @@ pub enum IndexStreamProof {
 }
 
 impl IndexStreamProof {
-    /// Encode this record in its canonical portable format.
+    /// Encode this record in its canonical format.
     pub fn encode(&self) -> std::result::Result<Vec<u8>, IndexProofError> {
         match self {
             Self::Delta(proof) => proof.encode(),
@@ -34,13 +34,13 @@ impl IndexStreamProof {
 pub struct IndexStreamStep {
     /// One-based sequence number in this stream.
     pub sequence: u64,
-    /// Exact immutable index transition.
+    /// Exact index transition.
     pub transition: IndexTransition,
     /// Independently checkable proof for the new root.
     pub proof: IndexStreamProof,
 }
 
-/// Stateful transaction stream over immutable persistence-index versions.
+/// Stateful transaction stream over persistence-index versions.
 #[derive(Debug, Clone)]
 pub struct IndexStream {
     index: PersistenceIndex,
@@ -53,7 +53,7 @@ impl IndexStream {
         Self { index, sequence: 0 }
     }
 
-    /// Current immutable index version.
+    /// Current index version.
     pub fn current(&self) -> &PersistenceIndex {
         &self.index
     }
@@ -79,7 +79,7 @@ impl IndexStream {
         self.commit(old, transition)
     }
 
-    /// Apply one complete graph state atomically.
+    /// Apply one graph state atomically.
     ///
     /// An envelope change emits a cold checkpoint. A fixed-envelope change
     /// emits a warm delta against the preceding root.

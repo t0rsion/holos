@@ -107,8 +107,8 @@ impl RelativeInterfaceCertificate {
     /// Build a relative core with explicit global vertex labels.
     ///
     /// `labels[local]` names each input vertex. Labels must be strictly
-    /// increasing. This form lets independently built child cores identify a
-    /// shared separator during [`Self::compose`].
+    /// increasing. Independent child cores identify a shared separator during
+    /// [`Self::compose`].
     pub fn build_labeled(
         input: &SparseDistanceMatrix,
         labels: &[usize],
@@ -154,8 +154,7 @@ impl RelativeInterfaceCertificate {
     /// Build a relative core from an explicit scalar filtered complex.
     ///
     /// The complex must contain cells through dimension `max_dim + 1`.
-    /// This entry point accepts filtrations built by methods other than the
-    /// Vietoris-Rips flag construction.
+    /// The filtration need not come from a Vietoris-Rips flag construction.
     pub fn build_complex(
         complex: &FilteredSimplicialComplex<ScalarGrade>,
         max_dim: usize,
@@ -210,7 +209,7 @@ impl RelativeInterfaceCertificate {
     /// Compose child cores by identifying cells with equal labeled vertices.
     ///
     /// Equal cells must have bit-identical filtration values and boundaries.
-    /// The protected vertices describe the separator retained for the next
+    /// The protected vertices are the separator retained for the next
     /// composition level.
     pub fn compose(
         children: &[&Self],
@@ -371,8 +370,8 @@ impl RelativeInterfaceCertificate {
 
     /// Content identifier of the pre-cancellation filtered chain complex.
     ///
-    /// This binding distinguishes equal cores produced from different source
-    /// complexes. Dynamic proof nodes use both identifiers.
+    /// Equal cores from different source complexes have different source
+    /// identifiers. Dynamic proof nodes use both this digest and [`Self::digest`].
     pub fn source_digest(&self) -> [u8; 32] {
         source_digest(
             self.max_dim,

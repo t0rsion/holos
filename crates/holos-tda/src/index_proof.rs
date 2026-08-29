@@ -173,7 +173,7 @@ pub struct IndexSnapshotProof {
 }
 
 impl IndexSnapshotProof {
-    /// Capture a complete immutable index version.
+    /// Capture a complete index version.
     pub fn from_index(index: &PersistenceIndex) -> Result<Self, IndexProofError> {
         let mut nodes = Vec::new();
         let mut seen = BTreeSet::new();
