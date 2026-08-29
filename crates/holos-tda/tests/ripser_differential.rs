@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use holos_tda::{rips_persistence, Bar, DistanceMatrix, RipsParams};
+use holos_tda::{Bar, DistanceMatrix, RipsParams, rips_persistence};
 
 struct Rng(u64);
 
@@ -217,11 +217,13 @@ fn sphere_fixture_matches_ripser() {
         (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
     };
     let points: Vec<Vec<f64>> = (0..30)
-        .map(|_| loop {
-            let g = [gaussian(&mut rng), gaussian(&mut rng), gaussian(&mut rng)];
-            let norm = g.iter().map(|x| x * x).sum::<f64>().sqrt();
-            if norm > 1e-3 {
-                break g.iter().map(|x| x / norm).collect();
+        .map(|_| {
+            loop {
+                let g = [gaussian(&mut rng), gaussian(&mut rng), gaussian(&mut rng)];
+                let norm = g.iter().map(|x| x * x).sum::<f64>().sqrt();
+                if norm > 1e-3 {
+                    break g.iter().map(|x| x / norm).collect();
+                }
             }
         })
         .collect();

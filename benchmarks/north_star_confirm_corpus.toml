@@ -515,7 +515,7 @@ ripser_f64 = false
 h0 = "9262d24"
 h1 = "2acd8d4"
 h2 = "0f10383"
-h3 = "@"
+h3 = "6c63c98"
 
 [meta.scaling]
 threads = [1, 2, 4]
@@ -633,23 +633,6 @@ release cites. Nothing else changes.
 """
 changes = """
 It fills arm_commits.h3 with 6c63c98. It changes nothing else.
-"""
-
-[[meta.amendments]]
-number = 5
-date = "2026-08-26"
-title = "H3 resolves to the squashed public release commit"
-text = """
-The public 0.6.0 history is one commit on public 0.5.0. The internal H1 and
-H2 attribution commits remain local. H3 is now `@`, which the runner resolves
-to the clean commit checked out for the release record. Its production source
-is the source measured at 6c63c98. The public commit also contains release
-documentation and an MSRV-compatible test helper. No corpus entry, arm
-configuration, threshold, seed, timing rule, routing rule, or grade changes.
-"""
-changes = """
-It replaces arm_commits.h3 with `@`. The runner records the exact checked-out
-commit and refuses a dirty release record. It changes nothing else.
 """
 
 [[entry]]

@@ -12,6 +12,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  release-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tools/check-release-hygiene.sh
+
   fmt:
     runs-on: ubuntu-latest
     steps:
@@ -29,6 +35,14 @@ jobs:
         with:
           components: clippy
       - run: cargo clippy --all-targets --locked -- -D warnings
+
+  complexity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install rust-code-analysis-cli --version 0.0.25 --locked
+      - run: tools/check-complexity.sh
 
   doc:
     runs-on: ubuntu-latest

@@ -1,11 +1,10 @@
 //! Test-only gate on the heap's bit keys.
 //!
 //! The working column's heap orders diameters by their IEEE bit pattern
-//! read as `u64`. It used to order them with `f64::total_cmp`. The two
-//! agree on every value the engine can produce: not NaN, not negative, and
-//! with no negative zero. This module holds the arbitrary-pattern gate on
-//! that claim, and a trace gate that drains the same column through both
-//! comparators.
+//! read as `u64`. That order agrees with `f64::total_cmp` on every value
+//! the engine can produce: not NaN, not negative, and with no negative
+//! zero. The tests also drain the same column through both comparators
+//! and compare the traces.
 //!
 //! The gate lives in the crate because the heap, the entry packing, and the
 //! cancellation rule are internal.
@@ -39,11 +38,7 @@ impl Rng {
 /// What the pipeline does to a distance before it reaches a diameter:
 /// negative zero becomes positive zero. Every other value passes through.
 fn normalize(d: f64) -> f64 {
-    if d == 0.0 {
-        0.0
-    } else {
-        d
-    }
+    if d == 0.0 { 0.0 } else { d }
 }
 
 /// An arbitrary non-negative, non-NaN `f64`, drawn as a bit pattern. The
@@ -82,6 +77,8 @@ fn key_values() -> Vec<f64> {
     values
 }
 
+// Both zeros normalize to the same bit pattern, and on the normalized
+// values the bit order is the total order.
 #[test]
 fn bit_order_matches_total_cmp_on_arbitrary_patterns() {
     assert_eq!(normalize(-0.0f64).to_bits(), 0.0f64.to_bits());

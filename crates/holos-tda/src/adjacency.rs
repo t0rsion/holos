@@ -3,11 +3,11 @@
 //!
 //! The dim-0 apparent test asks, for an edge `(u, v)` of diameter `d`, for the
 //! largest vertex `w` with `d(u, w) <= d` and `d(v, w) <= d`. With bitsets that
-//! is a word-wise AND of two rows scanned from the top. Each candidate costs
+//! is a word-wise AND of two rows scanned from the top, and each candidate costs
 //! two constant-time distance reads. The neighbor-list merge visits every entry
 //! of both lists instead. The rows cost `n * n / 8` bytes plus half that for
-//! the rank index. The engine builds them only when that is at most the size
-//! of the graph itself.
+//! the rank index. The engine builds them only when they fit the per-edge
+//! budget.
 
 use crate::distances::Distances;
 
@@ -22,6 +22,7 @@ pub(crate) const MIN_CYCLE_EDGES: usize = 1024;
 
 /// One bit per ordered pair, plus a rank index and the distances in bit order.
 pub(crate) struct Adjacency {
+    /// Words per row.
     words: usize,
     /// Row `u` is `bits[u * words..(u + 1) * words]`; bit `w` is set when
     /// `(u, w)` is an edge at or below the threshold.
@@ -124,8 +125,7 @@ impl Adjacency {
 }
 
 /// Activation rows: one bit per ordered pair, set as the dim-0 walk passes
-/// each edge. At a test, every edge at or below the diameter is set, and
-/// possibly some above it.
+/// each edge.
 pub(crate) struct Rows {
     words: usize,
     bits: Vec<u64>,
@@ -148,10 +148,11 @@ impl Rows {
     }
 
     /// True when the youngest cofacet of `(u, v)` with the edge's diameter
-    /// pairs with the edge. The scan takes the largest common bit whose two
-    /// edges, read from `adjacency`, are at or below the diameter. That bit
-    /// is the cofacet's added vertex `w`. The facet check reuses the two
-    /// distances. `u < v`.
+    /// pairs with the edge. Every edge at or below the diameter is set, and
+    /// possibly some above it. The scan takes the largest common bit whose
+    /// two edges are at or below the diameter, reading them from `adjacency`.
+    /// That bit is the cofacet's added vertex `w`. The facet check reuses the
+    /// two distances. `u < v`.
     pub(crate) fn pairs_edge(&self, adjacency: &Adjacency, u: usize, v: usize, d: f64) -> bool {
         debug_assert!(u < v);
         let ru = &self.bits[u * self.words..(u + 1) * self.words];

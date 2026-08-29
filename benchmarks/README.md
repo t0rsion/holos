@@ -10,6 +10,19 @@ this script must reproduce every number quoted anywhere.
 If the diagrams of any run disagree, the script exits nonzero. A timing whose
 diagrams do not match is void.
 
+## Study scope
+
+The tracked harness covers the public engine and collapse studies. The v0.7
+research harness covers the integrated proof, synthesis, and coverage paths.
+Historical one-release drivers and records remain in the local archive. They
+do not define a public v0.7 claim.
+
+`research_bench.sh` is the v0.7 certified-workflow study. It measures exact
+portfolio production and linked checking, explicit-complex production and
+independent checking, and geometry-bound coverage production and independent
+checking. Set `REPS` and `OUTPUT` to control repetitions and the generated
+record. The three constructed cases are fixed in the `research-bench` crate.
+
 ## Usage
 
 ```sh
@@ -26,8 +39,8 @@ RIPSER_BIN=/path/to/ripser ./run.sh
   distances from coordinates.
 - Fair threshold pairing. The "default" run passes no threshold to either
   tool. holos and ripser then both fall back to the enclosing radius, so the
-  run compares full persistence. The "fixed" runs pass the same explicit
-  `--threshold` to both tools. One maxdim-2 case (N=500, threshold
+  run compares full persistence on equal terms. The "fixed" runs pass the same
+  explicit `--threshold` to both tools. One maxdim-2 case (N=500, threshold
   0.4) exercises the dimension-generic path.
 - Single-threaded. Both binaries are serial. The results record the thread
   count (1).
@@ -156,9 +169,9 @@ Every entry is reduced three ways from one distance computation:
    through `--format sparse` without collapse;
 3. the same triplets with `--collapse-edges`.
 
-Mode 2 sits between the other two. Mode 3 against mode 1 mixes two effects,
-the sparse enumerator and the collapse; mode 3 against mode 2 isolates the
-collapse alone. A claim about collapse rests on both numbers.
+Mode 2 sits between the other two on purpose. Mode 3 against mode 1 mixes two
+effects, the sparse enumerator and the collapse; mode 3 against mode 2
+isolates the collapse alone. A claim about collapse rests on both numbers.
 
 `densify_to_sparse.py` does the conversion. It writes the dense and the sparse
 input from one set of `math.dist` results, so the two carry bit-identical
@@ -253,7 +266,7 @@ thresholded graph built from the same cloud:
 - arm b, both reducers on one externally collapsed graph, collapse off on both
   sides. GUDHI collapses the graph once, so the arm times the two reducers and
   nothing else. This is the equal-core comparison. Neither product can emit a
-  collapsed graph, so an external collapser is the only way to feed both
+  collapsed graph, so an external collapser is the only honest way to feed both
   the same reduced input;
 - arm c, end to end, each product running its own collapse.
 
@@ -321,8 +334,8 @@ field the runners parse.
 
 `north_star.sh` measures the shipped engine against ripser and giotto-ph on a
 held-out corpus. It is the study behind the public performance statements of
-this release. Nothing else may be cited for them. The engineering benchmark
-below tunes the engine; its numbers decide landing.
+this release. Nothing else may be cited for them: the engineering benchmark
+below tunes the engine, and its numbers decide landing and nothing more.
 
 | study | corpus | runner | records |
 |---|---|---|---|
@@ -336,9 +349,10 @@ rules; run 1's records are archived beside the release as the revealed run.
 
 The corpus carries the decision rule, the noise rule, the pinning rule, the
 validity rule, the arms, the competitors, the timing protocol, and the sampling
-rule, so a result cannot pick its criterion afterwards. It is frozen: the
-entries, sizes, seeds, thresholds, thread counts, and rules do not change in
-response to a result, and every later change adds a numbered amendment.
+rule, quoted from PLAN.md, so a result cannot pick its criterion afterwards. It
+is frozen: the entries, sizes, seeds, thresholds, thread counts, and rules do
+not change in response to a result, and every later change adds a numbered
+amendment.
 
 Amendment 1, dated 2026-08-18, came before any registered timing. It puts a
 floor under every graded ratio, moves the measurement controller off the timed
@@ -485,9 +499,9 @@ overall median is never read alone.
 
 `engine_bench.sh` measures holos against ripser on identical inputs. It is an
 engineering instrument, not a study: it has no decision rule, no manifest, and
-no protocol gate, and no public claim may cite its numbers. A change is tuned
-on disclosed data and landed on a disjoint set that was never looked at
-during tuning.
+no protocol gate, and no public claim may cite its numbers. It exists because
+PLAN.md requires a change to be tuned on disclosed data and then landed on a
+disjoint set that was never looked at.
 
 The corpus is `engineering_corpus.toml`. It holds two sets. The tuning set is
 disclosed: rerun it after every change and pick constants from it. The landing
@@ -506,7 +520,7 @@ the regime that lost.
 | stratum | what it holds |
 |:--|:--|
 | `baseline` | uniform, spherical, toroidal, and clustered clouds at several thresholds |
-| `knn` | k nearest neighbour graphs, k = 8, 15, and 30, as native sparse input |
+| `knn` | k nearest neighbor graphs, k = 8, 15, and 30, as native sparse input |
 | `lowthresh` | large vertex counts far below the enclosing radius: isolates, trees, many components |
 | `quantized` | lattice, duplicated, and identical points; ties at the threshold boundary |
 | `skewed` | preferential attachment and planted blocks: heavy degree tails and communities |
@@ -564,7 +578,7 @@ runs every entry, and the tables carry one column per arm and configuration.
 `HIST_DIR` defaults to `benchmarks/data/hist`. One arm holds one full release
 build, so four arms need a few gigabytes; point `HIST_DIR` at a filesystem
 with room to spare, and set `CARGO_TARGET_DIR` to move the working tree's own
-build the same way. The runner honours cargo's variable and keeps the absolute
+build the same way. The runner honors cargo's variable and keeps the absolute
 path out of the record.
 
 An arm whose `holos` takes `--engine auto|dense|sparse` runs `auto`,

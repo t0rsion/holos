@@ -3,6 +3,13 @@ use std::process::Command;
 
 fn main() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    println!("cargo:rustc-check-cfg=cfg(holos_repository_tests)");
+    if Path::new(&manifest)
+        .join("../holos-tda-check/Cargo.toml")
+        .is_file()
+    {
+        println!("cargo:rustc-cfg=holos_repository_tests");
+    }
     let hash = vcs_info_hash(&manifest)
         .or_else(|| git_hash(&manifest))
         .unwrap_or_else(|| "unknown".to_string());
@@ -33,9 +40,9 @@ fn git_hash(manifest: &str) -> Option<String> {
     (!hash.is_empty()).then_some(hash)
 }
 
-/// Rerun the script when the checked-out commit changes. Watch the
-/// resolved ref. Commits and amends on the same branch update that file
-/// and leave HEAD unchanged.
+/// Rerun the script when the checked-out commit changes. Watch the resolved
+/// ref, not just HEAD. Commits and amends on the same branch update the ref
+/// file, but leave HEAD unchanged.
 fn watch_head(manifest: &str) {
     let Some(head) = git_file(manifest, "HEAD") else {
         return;

@@ -7,7 +7,7 @@ build-backend = "maturin"
 
 [project]
 name = "holos-tda"
-version = "0.6.0"
+version = "0.7.0"
 description = "Vietoris-Rips persistent homology with a ripser-class engine"
 readme = "README.md"
 license = "MIT OR Apache-2.0"

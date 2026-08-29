@@ -1,27 +1,45 @@
 //! Filtered edge collapse for flag filtrations.
 //!
 //! The collapse removes edges that are dominated at every scale from their
-//! birth to the terminal level. The flag filtration of the reduced graph
-//! has the same persistence diagram as the input, in every dimension.
-//! Each removal is recorded in a [`CollapseCertificate`] that [`verify`]
-//! can replay.
+//! birth to the terminal level. That is the filtration-wide multi-witness
+//! criterion of Boissonnat and Pritam. The flag filtration of the reduced
+//! graph has the same persistence diagram as the input, in every dimension. Each
+//! removal is recorded in a replayable [`CollapseCertificate`] that the
+//! independent checker in [`verify`] can validate.
 //!
-//! [`collapse_dense`] and [`collapse_sparse`] run the serial schedule.
+//! Four schedules exist. [`collapse_dense`] and [`collapse_sparse`] run
+//! the serial schedule: passes over the edges with immediate deletion.
+//! [`crate::rips_persistence`] and the CLI use this schedule by default.
+//! In the registered studies it is the fastest on most inputs.
+//! [`crate::CollapseSchedule`] selects the others.
 //! [`collapse_dense_ordered_parallel`] and
-//! [`collapse_sparse_ordered_parallel`] run the ordered schedule: the same
-//! removals, tested speculatively in parallel, so the output is the serial
-//! one at every worker count. Both write an algorithm version 1
-//! certificate. [`collapse_dense_rounds_parallel`] and
-//! [`collapse_sparse_rounds_parallel`] run the rounds schedule and write
-//! an algorithm version 2 certificate. The rounds graph is not the serial
-//! graph. A relabeling or a schedule change can move the surviving set,
-//! never the barcode. All three are deterministic given the vertex
-//! labeling.
+//! [`collapse_sparse_ordered_parallel`] run the ordered schedule. They
+//! perform the same removals, tested speculatively in parallel. Their
+//! output is the serial one, field for field, at every worker count.
+//! Serial and ordered both write an algorithm version 1 certificate.
+//! [`collapse_dense_rounds_parallel`] and
+//! [`collapse_sparse_rounds_parallel`] run the rounds schedule. It writes
+//! a version 2 certificate. Each round tests live edges against a frozen
+//! graph and deletes a batch of provably independent removals. The output is
+//! byte-identical at every worker count. All four schedules are
+//! deterministic given the vertex labeling.
+//! [`collapse_dense_adaptive`] and [`collapse_sparse_adaptive`] run the
+//! version 3 schedule. It ranks live removals by the triangles or
+//! tetrahedra they remove. With a declared work limit it can return a
+//! certified partial collapse. No reduced graph is canonical. A
+//! relabeling or schedule change can move the surviving set. The barcode
+//! does not change.
 
+mod adaptive;
 mod ordered;
 mod parallel;
+mod portfolio;
 pub mod verify;
+/// Collapse certificates and their reduced graphs.
+pub mod wire;
 
+pub(crate) use adaptive::collapse_adaptive_in;
+pub use adaptive::{collapse_dense_adaptive, collapse_sparse_adaptive};
 pub(crate) use ordered::collapse_ordered_in;
 pub use ordered::{
     collapse_dense_ordered_parallel, collapse_dense_ordered_with_window,
@@ -29,18 +47,110 @@ pub use ordered::{
 };
 pub(crate) use parallel::collapse_rounds_in;
 pub use parallel::{collapse_dense_rounds_parallel, collapse_sparse_rounds_parallel};
+pub use portfolio::{
+    CollapsePortfolio, CollapsePortfolioArtifact, CollapsePortfolioArtifactEntry,
+    CollapsePortfolioCandidate, CollapsePortfolioDecodeLimits, CollapsePortfolioEntry,
+    CollapsePortfolioLimits, CollapsePortfolioObjective, CollapsePortfolioScore,
+    collapse_sparse_portfolio,
+};
 
 use crate::distances::Distances;
 use crate::{DistanceMatrix, Error, Result, SparseDistanceMatrix};
 
-/// One removed edge: endpoints, original value, schedule epoch, and the
-/// piecewise witness function that certifies the removal.
+/// The downstream work an adaptive collapse schedule targets.
+///
+/// In each pass, `H1` favors removals that destroy more triangles. `H2`
+/// first favors removals that destroy more tetrahedra, then uses the
+/// triangle count as a tie breaker. Each planned removal is tested again
+/// against the current graph. The score guides the order only. Every
+/// removal passes the same filtration-wide predicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CollapseObjective {
+    /// Target the cofacets used most directly by an H1 computation.
+    H1,
+    /// Target H2 cofacets, then H1 cofacets.
+    H2,
+}
+
+/// Why a collapse run stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CollapseCompleteness {
+    /// The output has no edge that passes the collapse predicate.
+    CompleteFixedPoint,
+    /// The declared work limit stopped the run before a fixed-point check.
+    BudgetLimited,
+}
+
+/// Parameters for the adaptive version 3 collapse schedule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AdaptiveCollapseParams {
+    /// Downstream work used to rank removable edges.
+    pub objective: CollapseObjective,
+    /// Maximum removability tests. `None` runs to a fixed point.
+    ///
+    /// One work unit is one complete evaluation of the filtration-wide
+    /// edge predicate, including score construction when the edge is
+    /// removable. A run never starts a test after it consumes this limit.
+    pub work_limit: Option<u64>,
+}
+
+impl Default for AdaptiveCollapseParams {
+    fn default() -> Self {
+        Self {
+            objective: CollapseObjective::H2,
+            work_limit: None,
+        }
+    }
+}
+
+impl AdaptiveCollapseParams {
+    /// Run the adaptive schedule to a fixed point with `objective`.
+    pub fn new(objective: CollapseObjective) -> Self {
+        Self {
+            objective,
+            work_limit: None,
+        }
+    }
+
+    /// Stop before starting a predicate evaluation beyond `work_limit`.
+    pub fn with_work_limit(mut self, work_limit: u64) -> Self {
+        self.work_limit = Some(work_limit);
+        self
+    }
+}
+
+/// Where one removal sits in its schedule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SchedulePosition {
+    /// A serial or ordered version 1 pass.
+    Pass(usize),
+    /// A rounds-schedule version 2 round.
+    Round(usize),
+    /// An unstructured version 3 removal sequence.
+    Sequence(usize),
+}
+
+impl SchedulePosition {
+    /// The 1-based pass, round, or sequence number.
+    pub fn number(self) -> usize {
+        match self {
+            Self::Pass(number) | Self::Round(number) | Self::Sequence(number) => number,
+        }
+    }
+}
+
+/// One removed edge: endpoints, original value, schedule position, and the
+/// piecewise witness function.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemovalStep {
     u: usize,
     v: usize,
     value: f64,
-    epoch: usize,
+    position: SchedulePosition,
     witnesses: Vec<(f64, usize)>,
 }
 
@@ -55,17 +165,15 @@ impl RemovalStep {
         self.value
     }
 
-    /// The 1-based schedule epoch of the removal: the pass number for
-    /// algorithm version 1 certificates, the round number for version 2.
-    /// A step does not carry the version; read it from the certificate.
-    pub fn epoch(&self) -> usize {
-        self.epoch
+    /// The 1-based schedule position of the removal.
+    pub fn position(&self) -> SchedulePosition {
+        self.position
     }
 
-    /// Witness segments as `(start value, apex vertex)` pairs. Segment `i`
-    /// covers scales from its start value up to the next segment's start;
-    /// the last segment covers through the terminal level. The first start
-    /// value is the edge value.
+    /// Witness segments as `(start value, apex vertex)`. Segment `i` covers
+    /// scales from its start value up to the next segment's start; the last
+    /// segment covers through the terminal level. The first start value is
+    /// the edge value.
     pub fn witnesses(&self) -> &[(f64, usize)] {
         &self.witnesses
     }
@@ -74,11 +182,15 @@ impl RemovalStep {
 /// Replayable record of one collapse run.
 ///
 /// The certificate plus the collapsed matrix reconstruct the thresholded
-/// input, and [`verify`] can replay and check every removal. The
-/// certificate is not a chain map and does not transport representatives.
+/// input. The certificate is not a chain map and does not transport
+/// representatives.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollapseCertificate {
     algorithm_version: u32,
+    objective: Option<CollapseObjective>,
+    completeness: CollapseCompleteness,
+    work_limit: Option<u64>,
+    work_used: u64,
     vertex_count: usize,
     requested_threshold: Option<f64>,
     terminal_level: f64,
@@ -88,10 +200,34 @@ pub struct CollapseCertificate {
 }
 
 impl CollapseCertificate {
-    /// Algorithm version of this certificate: 1 for serial and ordered, 2
-    /// for rounds.
+    /// Version of the collapse scheme that produced this certificate.
     pub fn algorithm_version(&self) -> u32 {
         self.algorithm_version
+    }
+
+    /// Downstream objective for an adaptive version 3 run.
+    ///
+    /// Versions 1 and 2 return `None`. Those schedules do not rank
+    /// removals by a downstream-work estimate.
+    pub fn objective(&self) -> Option<CollapseObjective> {
+        self.objective
+    }
+
+    /// Whether the output is a fixed point or a safe partial collapse.
+    pub fn completeness(&self) -> CollapseCompleteness {
+        self.completeness
+    }
+
+    /// Declared adaptive work limit, when the caller set one.
+    pub fn work_limit(&self) -> Option<u64> {
+        self.work_limit
+    }
+
+    /// Adaptive work units consumed by the schedule.
+    ///
+    /// Versions 1 and 2 report zero.
+    pub fn work_used(&self) -> u64 {
+        self.work_used
     }
 
     /// Number of vertices in the input.
@@ -104,8 +240,8 @@ impl CollapseCertificate {
         self.requested_threshold
     }
 
-    /// The level through which every removal is certified: the resolved
-    /// threshold if finite, otherwise the largest finite edge value.
+    /// Terminal filtration level: the resolved threshold if finite,
+    /// otherwise the largest finite edge value.
     pub fn terminal_level(&self) -> f64 {
         self.terminal_level
     }
@@ -144,7 +280,8 @@ pub struct CollapseStats {
     /// Edges removed.
     pub removed_edges: usize,
     /// Schedule epochs, including the final epoch that removes nothing:
-    /// passes for algorithm version 1, rounds for version 2.
+    /// passes for versions 1 and 3, rounds for version 2. A budget-limited
+    /// version 3 run can stop during its last pass.
     pub epochs: usize,
     /// Predicate evaluations, physical calls. On the ordered schedule
     /// this depends on the worker count and window and can exceed
@@ -164,8 +301,8 @@ pub struct CollapseStats {
     pub logical_tests: usize,
     /// Cached speculative results dropped before use, whether a
     /// conflicting removal or a large-neighborhood bail invalidated them.
-    /// Every dropped result runs again serially at its turn, so this is
-    /// also the repair count. Ordered schedule only.
+    /// Each dropped result is re-evaluated serially at its turn. Ordered
+    /// schedule only.
     pub invalidated_results: usize,
     /// Large-neighborhood marking bails during retirement that dropped at
     /// least one cached result ahead of them. Ordered schedule only.
@@ -182,11 +319,24 @@ pub struct CollapseStats {
     /// Cached member verdicts consumed at retirement without a repair.
     /// Ordered schedule only.
     pub window_members_reused: usize,
+    /// Score evaluations by the adaptive schedule. This includes pass
+    /// planning and successful retirement tests.
+    pub adaptive_score_evaluations: usize,
+    /// Planned removals considered in score order by the adaptive schedule.
+    pub adaptive_queue_pops: usize,
+    /// Planned removals that failed their retirement test after an earlier
+    /// removal changed the graph.
+    pub adaptive_stale_pops: usize,
+    /// Triangles destroyed by the removals selected by the adaptive
+    /// schedule, counted immediately before each removal.
+    pub adaptive_triangles_removed: u64,
+    /// Tetrahedra destroyed by the removals selected by the adaptive
+    /// schedule, counted immediately before each removal.
+    pub adaptive_tetrahedra_removed: u64,
 }
 
 impl CollapseStats {
-    /// Counters before the first epoch: nothing tested, nothing removed,
-    /// and every input edge still an output edge.
+    /// Counters with `input_edges` set and every input edge still an output edge.
     fn new(input_edges: usize) -> Self {
         CollapseStats {
             input_edges,
@@ -215,20 +365,19 @@ pub struct CollapseTimings {
     pub repair_ns: u64,
 }
 
-/// A collapsed filtration: the reduced graph, the certificate that the
-/// reduction preserves the diagram, run counters, and wall-clock timings.
+/// Reduced graph, collapse certificate, run counters, and wall-clock timings.
 ///
-/// The matrix is a valid input to [`crate::rips_persistence_sparse`]. The
-/// reduced graph does not depend on modulus, homology dimension,
-/// optimization toggles, or thread count. The schedule can change which
-/// edges survive.
+/// The matrix is the input to [`crate::rips_persistence_sparse`]. The
+/// reduction does not depend on modulus, homology dimension, optimization
+/// toggles, or solver thread count. The schedule does change which edges
+/// survive.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CollapsedRips {
     /// The reduced graph. Surviving edge values are the input values, bit
     /// for bit.
     pub matrix: SparseDistanceMatrix,
-    /// Replayable record of every removal.
+    /// Replayable proof of every removal.
     pub certificate: CollapseCertificate,
     /// Run counters.
     pub stats: CollapseStats,
@@ -240,9 +389,8 @@ pub struct CollapsedRips {
 ///
 /// `threshold` follows the engine's rule: `None` means the enclosing
 /// radius. Edges above the resolved threshold are dropped before the
-/// collapse and are not part of the certified input. See
-/// [`collapse_dense_ordered_parallel`] and
-/// [`collapse_dense_rounds_parallel`].
+/// collapse. The parallel forms are [`collapse_dense_ordered_parallel`]
+/// and [`collapse_dense_rounds_parallel`].
 pub fn collapse_dense(dist: &DistanceMatrix, threshold: Option<f64>) -> Result<CollapsedRips> {
     collapse_impl(dist, threshold)
 }
@@ -250,7 +398,7 @@ pub fn collapse_dense(dist: &DistanceMatrix, threshold: Option<f64>) -> Result<C
 /// Collapse a sparse distance matrix with the serial schedule.
 ///
 /// `threshold` follows the engine's rule: `None` keeps every listed edge.
-/// See [`collapse_sparse_ordered_parallel`] and
+/// The parallel forms are [`collapse_sparse_ordered_parallel`] and
 /// [`collapse_sparse_rounds_parallel`].
 pub fn collapse_sparse(
     dist: &SparseDistanceMatrix,
@@ -272,8 +420,8 @@ struct EdgeRec {
 /// the position of the edge in the schedule array.
 type AdjEntry = (usize, f64, usize);
 
-/// The certificate header of a run: the vertex count, the level through
-/// which removals are certified, and the threshold the caller passed.
+/// The certificate header of a run: vertex count, terminal level, and
+/// the threshold the caller passed.
 struct Run {
     n: usize,
     terminal: f64,
@@ -290,22 +438,31 @@ struct Prepared {
     run: Run,
 }
 
-/// Which execution produced a run. It fixes the two output fields the
-/// three executions do not share.
+/// Which execution produced a run.
+///
+/// It sets the certificate version and the adaptive stopping fields.
+#[derive(Clone, Copy)]
 enum Execution {
-    /// The serial schedule. Writes an algorithm version 1 certificate,
-    /// and the physical test sequence is the logical one.
+    /// The serial version 1 run: certificate version 1, and the physical
+    /// test sequence is the logical one.
     Serial,
-    /// The ordered schedule. Writes an algorithm version 1 certificate,
-    /// and the execution counts its own logical trace, which the physical
+    /// The ordered speculative version 1 run: certificate version 1, and
+    /// the execution counts its own logical trace, which the physical
     /// count can exceed.
     Ordered,
-    /// The rounds schedule. Writes an algorithm version 2 certificate,
-    /// and the physical test sequence is the logical one.
+    /// The version 2 rounds schedule: certificate version 2, and the
+    /// physical test sequence is the logical one.
     Snapshot,
+    /// The adaptive version 3 schedule and its declared stopping state.
+    Adaptive {
+        objective: CollapseObjective,
+        completeness: CollapseCompleteness,
+        work_limit: Option<u64>,
+        work_used: u64,
+    },
 }
 
-/// Collect the thresholded input and index it. The three executions start
+/// Collect the thresholded input and index it. Every execution starts
 /// here, so they see the same edge order and the same terminal level.
 fn prepare<D: Distances>(dist: &D, threshold: Option<f64>) -> Result<Prepared> {
     validate_threshold(threshold)?;
@@ -372,9 +529,9 @@ fn finish(
     stats.removed_edges = steps.len();
     stats.output_edges = input_edges - steps.len();
     if !matches!(execution, Execution::Ordered) {
-        // Serial and rounds test exactly the logical sequence, so the
-        // physical count is the logical count. The ordered schedule
-        // counts its logical trace as it retires.
+        // The serial and rounds executions test exactly the logical
+        // sequence, so the physical count is the logical count. The
+        // ordered execution counts its logical trace as it retires.
         stats.logical_tests = stats.edge_tests;
     }
 
@@ -384,11 +541,24 @@ fn finish(
         .map(|e| (e.u, e.v, e.value))
         .collect();
     let matrix = SparseDistanceMatrix::from_triplets(run.n, &survivors)?;
+    let (algorithm_version, objective, completeness, work_limit, work_used) = match execution {
+        Execution::Serial | Execution::Ordered => {
+            (1, None, CollapseCompleteness::CompleteFixedPoint, None, 0)
+        }
+        Execution::Snapshot => (2, None, CollapseCompleteness::CompleteFixedPoint, None, 0),
+        Execution::Adaptive {
+            objective,
+            completeness,
+            work_limit,
+            work_used,
+        } => (3, Some(objective), completeness, work_limit, work_used),
+    };
     let certificate = CollapseCertificate {
-        algorithm_version: match execution {
-            Execution::Serial | Execution::Ordered => 1,
-            Execution::Snapshot => 2,
-        },
+        algorithm_version,
+        objective,
+        completeness,
+        work_limit,
+        work_used,
         vertex_count: run.n,
         requested_threshold: run.threshold,
         terminal_level: run.terminal,
@@ -528,9 +698,26 @@ fn test_edge(
     terminal: f64,
     s: &mut Scratch,
 ) -> Option<Vec<(f64, usize)>> {
-    // Tombstones read as +inf and drop out through the finiteness checks.
-    // Neither list holds its own vertex, so u and v never enter C.
-    s.cands.clear();
+    collect_candidates(adj, u, v, a, terminal, &mut s.cands);
+    if s.cands.is_empty() {
+        return None;
+    }
+    order_candidates(&s.cands, &mut s.by_b);
+    if s.by_b[0].0 > a {
+        return None;
+    }
+    witness_segments(adj, &s.cands, &s.by_b, &mut s.apex_row)
+}
+
+fn collect_candidates(
+    adj: &[Vec<AdjEntry>],
+    u: usize,
+    v: usize,
+    edge_value: f64,
+    terminal: f64,
+    candidates: &mut Vec<(usize, f64)>,
+) {
+    candidates.clear();
     let (lu, lv) = (&adj[u], &adj[v]);
     let (mut i, mut j) = (0, 0);
     while i < lu.len() && j < lv.len() {
@@ -541,9 +728,9 @@ fn test_edge(
             std::cmp::Ordering::Greater => j += 1,
             std::cmp::Ordering::Equal => {
                 if du.is_finite() && dv.is_finite() {
-                    let b = a.max(du).max(dv);
+                    let b = edge_value.max(du).max(dv);
                     if b <= terminal {
-                        s.cands.push((x, b));
+                        candidates.push((x, b));
                     }
                 }
                 i += 1;
@@ -551,58 +738,58 @@ fn test_edge(
             }
         }
     }
-    let cands = &s.cands;
-    let k = cands.len();
-    if k == 0 {
-        return None;
-    }
+}
 
-    s.by_b.clear();
-    s.by_b
-        .extend(cands.iter().enumerate().map(|(p, &(_, b))| (b, p as u32)));
-    s.by_b
-        .sort_unstable_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
-    // The critical values are the distinct b values plus `a` itself. At
-    // t = a the candidate set is `{x : b(x) = a}`; when the smallest b
-    // exceeds `a` that set is empty and no witness exists at the birth.
-    if s.by_b[0].0 > a {
-        return None;
-    }
+fn order_candidates(candidates: &[(usize, f64)], by_birth: &mut Vec<(f64, u32)>) {
+    by_birth.clear();
+    by_birth.extend(
+        candidates
+            .iter()
+            .enumerate()
+            .map(|(position, &(_, birth))| (birth, position as u32)),
+    );
+    by_birth.sort_unstable_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
+}
 
+fn witness_segments(
+    adj: &[Vec<AdjEntry>],
+    candidates: &[(usize, f64)],
+    by_birth: &[(f64, u32)],
+    apex_row: &mut Vec<f64>,
+) -> Option<Vec<(f64, usize)>> {
     let mut segments: Vec<(f64, usize)> = Vec::new();
-    let mut apex: Option<usize> = None;
     let mut run = 0usize;
-    while run < k {
-        let t = s.by_b[run].0;
+    let mut have_apex = false;
+    while run < candidates.len() {
+        let t = by_birth[run].0;
         let mut run_end = run;
-        while run_end < k && s.by_b[run_end].0 == t {
+        while run_end < candidates.len() && by_birth[run_end].0 == t {
             run_end += 1;
         }
-        let kept = apex.is_some_and(|_| {
-            s.by_b[run..run_end]
+        let kept = have_apex
+            && by_birth[run..run_end]
                 .iter()
-                .all(|&(_, p)| s.apex_row[p as usize] <= t)
-        });
+                .all(|&(_, position)| apex_row[position as usize] <= t);
         if !kept {
-            let mut found = None;
-            for p in 0..k {
-                if cands[p].1 > t {
-                    continue;
-                }
-                if dominates(adj, cands, &s.by_b[..run_end], p, t) {
-                    found = Some(p);
-                    break;
-                }
-            }
-            // No candidate dominates at this level, so the edge stays.
-            let p = found?;
-            fill_row(adj, cands, p, &mut s.apex_row);
-            segments.push((t, cands[p].0));
-            apex = Some(p);
+            let position = first_dominating_candidate(adj, candidates, &by_birth[..run_end], t)?;
+            fill_row(adj, candidates, position, apex_row);
+            segments.push((t, candidates[position].0));
+            have_apex = true;
         }
         run = run_end;
     }
     Some(segments)
+}
+
+fn first_dominating_candidate(
+    adj: &[Vec<AdjEntry>],
+    candidates: &[(usize, f64)],
+    members: &[(f64, u32)],
+    level: f64,
+) -> Option<usize> {
+    (0..candidates.len()).find(|&position| {
+        candidates[position].1 <= level && dominates(adj, candidates, members, position, level)
+    })
 }
 
 /// Run `mark` on the schedule index of every live edge of the subgraph
@@ -620,67 +807,99 @@ fn for_each_induced_edge(
     mut mark: impl FnMut(usize),
 ) -> bool {
     let (lu, lv) = (&adj[u], &adj[v]);
-    if let Some(limit) = limit {
-        // Fine marking must stay cheaper than a retest. Long adjacency
-        // lists mean a dense neighborhood where a retest is cheap per
-        // edge: bail before walking anything.
-        if lu.len().min(lv.len()) > 2 * limit {
-            return false;
-        }
+    if limit.is_some_and(|limit| lu.len().min(lv.len()) > 2 * limit) {
+        return false;
     }
-    s.marks.clear();
+    collect_closed_common(lu, lv, u, v, &mut s.marks);
+    if limit.is_some_and(|limit| s.marks.len() > limit) {
+        return false;
+    }
+    for (position, &vertex) in s.marks.iter().enumerate() {
+        mark_induced_edges(adj, &s.marks, position, vertex, &mut mark);
+    }
+    true
+}
+
+fn collect_closed_common(
+    left: &[AdjEntry],
+    right: &[AdjEntry],
+    u: usize,
+    v: usize,
+    vertices: &mut Vec<usize>,
+) {
+    vertices.clear();
     let (mut i, mut j) = (0, 0);
-    while i < lu.len() && j < lv.len() {
-        let (x, du, _) = lu[i];
-        let (y, dv, _) = lv[j];
+    while i < left.len() && j < right.len() {
+        let (x, du, _) = left[i];
+        let (y, dv, _) = right[j];
         match x.cmp(&y) {
             std::cmp::Ordering::Less => i += 1,
             std::cmp::Ordering::Greater => j += 1,
             std::cmp::Ordering::Equal => {
                 if du.is_finite() && dv.is_finite() {
-                    s.marks.push(x);
+                    vertices.push(x);
                 }
                 i += 1;
                 j += 1;
             }
         }
     }
-    s.marks.push(u);
-    s.marks.push(v);
-    if limit.is_some_and(|limit| s.marks.len() > limit) {
-        return false;
+    vertices.push(u);
+    vertices.push(v);
+    vertices.sort_unstable();
+}
+
+fn mark_induced_edges(
+    adj: &[Vec<AdjEntry>],
+    vertices: &[usize],
+    position: usize,
+    vertex: usize,
+    mark: &mut impl FnMut(usize),
+) {
+    let list = &adj[vertex];
+    if vertices.len() * 16 < list.len() {
+        mark_induced_edges_by_probe(list, &vertices[position + 1..], mark);
+    } else {
+        mark_induced_edges_by_merge(list, vertices, vertex, mark);
     }
-    s.marks.sort_unstable();
-    for (a, &p) in s.marks.iter().enumerate() {
-        let list = &adj[p];
-        if s.marks.len() * 16 < list.len() {
-            for &q in &s.marks[a + 1..] {
-                if let Ok(pos) = list.binary_search_by(|probe| probe.0.cmp(&q)) {
-                    let (_, d, idx) = list[pos];
-                    if d.is_finite() {
-                        mark(idx);
-                    }
-                }
-            }
-        } else {
-            let (mut i, mut q) = (0, 0);
-            while i < list.len() && q < s.marks.len() {
-                let (x, d, idx) = list[i];
-                match x.cmp(&s.marks[q]) {
-                    std::cmp::Ordering::Less => i += 1,
-                    std::cmp::Ordering::Greater => q += 1,
-                    std::cmp::Ordering::Equal => {
-                        if x > p && d.is_finite() {
-                            mark(idx);
-                        }
-                        i += 1;
-                        q += 1;
-                    }
-                }
+}
+
+fn mark_induced_edges_by_probe(
+    list: &[AdjEntry],
+    vertices: &[usize],
+    mark: &mut impl FnMut(usize),
+) {
+    for &other in vertices {
+        if let Ok(position) = list.binary_search_by(|probe| probe.0.cmp(&other)) {
+            let (_, distance, index) = list[position];
+            if distance.is_finite() {
+                mark(index);
             }
         }
     }
-    true
+}
+
+fn mark_induced_edges_by_merge(
+    list: &[AdjEntry],
+    vertices: &[usize],
+    vertex: usize,
+    mark: &mut impl FnMut(usize),
+) {
+    let (mut i, mut q) = (0, 0);
+    while i < list.len() && q < vertices.len() {
+        let (neighbor, distance, index) = list[i];
+        match neighbor.cmp(&vertices[q]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => q += 1,
+            std::cmp::Ordering::Equal => {
+                if neighbor > vertex && distance.is_finite() {
+                    mark(index);
+                }
+                i += 1;
+                q += 1;
+            }
+        }
+    }
 }
 
 /// Mark every live edge whose test could change after `{u, v}` goes away.
@@ -701,7 +920,7 @@ fn mark_dirty(
     for_each_induced_edge(adj, u, v, s, Some(MARK_LIMIT), |idx| dirty[idx] = true)
 }
 
-/// The serial schedule for the pipeline.
+/// The serial version 1 collapse for the pipeline.
 pub(crate) fn collapse_serial_in<D: Distances>(
     dist: &D,
     threshold: Option<f64>,
@@ -719,12 +938,10 @@ fn collapse_impl<D: Distances>(dist: &D, threshold: Option<f64>) -> Result<Colla
     let mut stats = CollapseStats::new(edges.len());
     let mut steps: Vec<RemovalStep> = Vec::new();
     let mut scratch = Scratch::default();
-    // A failed verdict can change only when an edge inside the test's own
-    // neighborhood goes away, so later passes retest only edges marked by
-    // `mark_dirty`, or every live edge again after a removal whose
-    // neighborhood was too large to mark finely. Both are supersets of the
-    // edges whose verdicts could have changed, so the removal sequence, and
-    // with it the certificate, is identical to retesting everything.
+    // A failed verdict can change only after an edge in its neighborhood
+    // is removed. Later passes retest dirty edges, or every live edge
+    // after a MARK_LIMIT bail. Both sets cover every edge whose verdict
+    // could have changed, so the certificate matches a full retest.
     let mut dirty: Vec<bool> = vec![false; edges.len()];
     let mut test_all = true;
     loop {
@@ -751,7 +968,7 @@ fn collapse_impl<D: Distances>(dist: &D, threshold: Option<f64>) -> Result<Colla
                     u,
                     v,
                     value,
-                    epoch: stats.epochs,
+                    position: SchedulePosition::Pass(stats.epochs),
                     witnesses,
                 });
                 removed_any = true;
@@ -796,6 +1013,10 @@ mod tests {
     fn check_invariants(r: &CollapsedRips) {
         let c = &r.certificate;
         assert_eq!(c.algorithm_version(), 1);
+        assert_eq!(c.objective(), None);
+        assert_eq!(c.completeness(), CollapseCompleteness::CompleteFixedPoint);
+        assert_eq!(c.work_limit(), None);
+        assert_eq!(c.work_used(), 0);
         assert_eq!(
             c.input_edge_count(),
             c.output_edge_count() + c.steps().len()
@@ -811,8 +1032,11 @@ mod tests {
         assert!(r.stats.epochs >= 1);
         for s in c.steps() {
             assert!(s.edge().0 < s.edge().1);
-            assert!(s.epoch() >= 1);
-            assert!(s.epoch() < r.stats.epochs, "final pass removes nothing");
+            assert!(s.position().number() >= 1);
+            assert!(
+                s.position().number() < r.stats.epochs,
+                "final pass removes nothing"
+            );
             assert!(!s.witnesses().is_empty());
             assert_eq!(s.witnesses()[0].0, s.value());
             for w in s.witnesses().windows(2) {
@@ -843,7 +1067,7 @@ mod tests {
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].edge(), (0, 1));
         assert_eq!(steps[0].value(), 1.0);
-        assert_eq!(steps[0].epoch(), 1);
+        assert_eq!(steps[0].position().number(), 1);
         assert_eq!(steps[0].witnesses(), &[(1.0, 2)]);
         assert_eq!(edges_of(&r.matrix), vec![(0, 2, 1.0), (1, 2, 1.0)]);
         assert_eq!(r.certificate.terminal_level(), 1.0);
@@ -887,7 +1111,12 @@ mod tests {
             witnesses,
             vec![vec![(1.0, 2)], vec![(1.0, 3)], vec![(1.0, 3)]]
         );
-        assert!(r.certificate.steps().iter().all(|s| s.epoch() == 1));
+        assert!(
+            r.certificate
+                .steps()
+                .iter()
+                .all(|s| s.position().number() == 1)
+        );
         assert_eq!(
             edges_of(&r.matrix),
             vec![(0, 3, 1.0), (1, 3, 1.0), (2, 3, 1.0)]

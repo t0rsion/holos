@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["crates/collapse-bench", "crates/engine-bench", "crates/holos-tda", "crates/holos-tda-py"]
+members = [
+    "crates/collapse-bench",
+    "crates/engine-bench",
+    "crates/holos-tda",
+    "crates/holos-tda-check",
+    "crates/holos-tda-py",
+    "crates/research-bench",
+]
 
 # Profiles apply from the workspace root only; member profiles are ignored.
 [profile.release]

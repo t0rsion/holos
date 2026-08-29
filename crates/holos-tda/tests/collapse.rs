@@ -10,15 +10,17 @@
 //! index) and the frozen witness rule, so the expected certificates below are
 //! derived from the specification, not observed from a run.
 
+mod common;
+
 use holos_tda::collapse::verify::{verify_dense, verify_sparse};
 use holos_tda::collapse::{
-    collapse_dense, collapse_dense_rounds_parallel, collapse_sparse,
-    collapse_sparse_rounds_parallel, CollapsedRips, RemovalStep,
+    CollapsedRips, RemovalStep, collapse_dense, collapse_dense_rounds_parallel, collapse_sparse,
+    collapse_sparse_rounds_parallel,
 };
 use holos_tda::oracle::rips_persistence_oracle_mod;
 use holos_tda::{
-    rips_persistence, rips_persistence_sparse, Bar, CollapseSchedule, Diagram, DistanceMatrix,
-    RipsParams, SparseDistanceMatrix,
+    Bar, CollapseSchedule, Diagram, DistanceMatrix, RipsParams, SparseDistanceMatrix,
+    rips_persistence, rips_persistence_sparse,
 };
 
 const MODULI: [u32; 3] = [2, 3, 5];
@@ -284,12 +286,15 @@ fn check_certificate(
         let (u, v) = step.edge();
         assert!(u < v, "{name}: step {i} endpoints not ordered");
         assert!(v < n, "{name}: step {i} endpoint out of range");
-        assert!(step.epoch() >= 1, "{name}: step {i} pass is not 1-based");
         assert!(
-            step.epoch() >= last_pass,
+            step.position().number() >= 1,
+            "{name}: step {i} pass is not 1-based"
+        );
+        assert!(
+            step.position().number() >= last_pass,
             "{name}: step {i} pass number decreased"
         );
-        last_pass = step.epoch();
+        last_pass = step.position().number();
 
         let w = step.witnesses();
         assert!(!w.is_empty(), "{name}: step {i} has no witness segment");
@@ -343,7 +348,7 @@ fn check_certificate(
     );
     if let Some(last) = cert.steps().last() {
         assert!(
-            result.stats.epochs >= last.epoch(),
+            result.stats.epochs >= last.position().number(),
             "{name}: stats passes must cover the last removal"
         );
     }
@@ -474,6 +479,11 @@ fn assert_collapse_preserves_diagram(
     for &modulus in &MODULI {
         for threshold in thresholds {
             for &threads in &THREAD_COUNTS {
+                // Toggle coverage: the full eight-way cross at one and four
+                // threads, the two extremes at every thread count. The
+                // crossed pair is modulus x threshold x max_dim x toggles at
+                // threads {1, 4}, and modulus x threshold x max_dim x
+                // {all on, all off} at threads {1, 2, 4, 8}.
                 let toggle_set: &[(bool, bool, bool)] = match threads {
                     1 | 4 => &TOGGLE_CROSS,
                     _ => &[ALL_ON, ALL_OFF],
@@ -552,7 +562,7 @@ fn assert_fixture(
     result
 }
 
-// Each of these is small enough for the oracle at max_dim 2.
+// Battery inputs. Each one is small enough for the oracle at max_dim 2.
 
 // Generic point cloud: distinct values, no ties, no absent edges.
 fn battery_points() -> DistanceMatrix {
@@ -719,7 +729,11 @@ fn positive_scaling_preserves_removals_and_scales_witnesses() {
     );
     for (i, (a, b)) in base_steps.iter().zip(big_steps).enumerate() {
         assert_eq!(a.edge(), b.edge(), "step {i}: scaling changed the edge");
-        assert_eq!(a.epoch(), b.epoch(), "step {i}: scaling changed the pass");
+        assert_eq!(
+            a.position().number(),
+            b.position().number(),
+            "step {i}: scaling changed the pass"
+        );
         assert_eq!(
             b.value(),
             3.0 * a.value(),
@@ -871,12 +885,16 @@ fn later_pass_removability() {
     let result = assert_fixture("later_pass_removability", &dense, Some(1.0), 2, true);
     let step = step_for(&result, (0, 1)).expect("edge (0, 1) must be removable in a later pass");
     assert_eq!(
-        step.epoch(),
+        step.position().number(),
         2,
         "edge (0, 1) must survive pass 1 and leave in pass 2"
     );
     assert!(
-        result.certificate.steps().iter().any(|s| s.epoch() == 2),
+        result
+            .certificate
+            .steps()
+            .iter()
+            .any(|s| s.position().number() == 2),
         "no removal happened after the first pass"
     );
     assert!(
@@ -910,7 +928,11 @@ fn ties_le_vs_lt() {
         vec![(2.0, 2)],
         "the tie must be certified by the first candidate at the edge value"
     );
-    assert_eq!(step.epoch(), 1, "the tied edge must go in pass 1");
+    assert_eq!(
+        step.position().number(),
+        1,
+        "the tied edge must go in pass 1"
+    );
 
     // Same graph without the (2, 3) tie: the two candidates are not adjacent,
     // so (0, 1) is never removable. This isolates the tie as the deciding
@@ -1159,8 +1181,7 @@ fn non_metric_domination_flip() {
 #[test]
 fn projective_plane_torsion() {
     // The 13-vertex RP^2 triangulation: H1 and H2 are Z/2, visible only at
-    // p = 2. The collapse must preserve the torsion answer at every modulus,
-    // so it cannot be quietly field-dependent.
+    // p = 2. The collapse must preserve the torsion answer at every modulus.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data/projective_plane.lower_distance_matrix");
     let dense = holos_tda::io::read_lower_distance_matrix(&path, 1).unwrap();
@@ -1365,7 +1386,11 @@ fn with_edge_collapse_sets_the_flag() {
         CollapseSchedule::Serial,
         "the serial schedule must be the default"
     );
-    for schedule in [CollapseSchedule::Ordered, CollapseSchedule::Rounds] {
+    for schedule in [
+        CollapseSchedule::Ordered,
+        CollapseSchedule::Rounds,
+        CollapseSchedule::Adaptive,
+    ] {
         let p = RipsParams::new(2).with_collapse_schedule(schedule);
         assert!(p.collapse_edges, "with_collapse_schedule must set the flag");
         assert_eq!(p.collapse_schedule, schedule);
@@ -1385,6 +1410,7 @@ fn every_schedule_gives_the_same_diagram_at_every_thread_count() {
         CollapseSchedule::Serial,
         CollapseSchedule::Ordered,
         CollapseSchedule::Rounds,
+        CollapseSchedule::Adaptive,
     ];
     for (name, dense) in &fixtures {
         let sparse = sparse_from_dense(dense);
@@ -1527,8 +1553,8 @@ fn sparse_edges_are_sorted_deduplicated_and_exact() {
     }
 }
 
-// Random fuzz: production certificates on mixed dense/sparse graphs must
-// pass the independent verifier, with enough removals to mean something.
+// Mixed dense and sparse graphs must pass the independent verifier.
+// The sample must remove more than 100 edges, or the loop never fired.
 #[test]
 fn random_certificates_pass_the_independent_verifier() {
     let palette = [0.0, 0.5, 1.0, 1.0, 2.0, 2.5, f64::INFINITY];
@@ -1567,6 +1593,8 @@ fn random_certificates_pass_the_independent_verifier() {
     assert!(removed_total > 100, "collapse never fired: {removed_total}");
 }
 
+// The unpruned reference schedule.
+//
 // The production collapser skips edges whose verdict provably cannot have
 // changed, with a retest-everything fallback once the affected vertex set
 // grows past its marking limit. Only the test counter may move: the removal
@@ -1598,56 +1626,6 @@ struct RefRun {
 /// Section 2 predicate with the section 3 witness rule, evaluated against the
 /// value matrix `f`. Returns the witness segments, or `None` when some level
 /// has no dominating vertex.
-fn ref_test_edge(
-    f: &[Vec<f64>],
-    u: usize,
-    v: usize,
-    a: f64,
-    terminal: f64,
-) -> Option<Vec<(f64, usize)>> {
-    let mut cands: Vec<(usize, f64)> = Vec::new();
-    for (x, (&du, &dv)) in f[u].iter().zip(f[v].iter()).enumerate() {
-        if x == u || x == v || !du.is_finite() || !dv.is_finite() {
-            continue;
-        }
-        let b = a.max(du).max(dv);
-        if b <= terminal {
-            cands.push((x, b));
-        }
-    }
-
-    let mut critical: Vec<f64> = std::iter::once(a)
-        .chain(cands.iter().map(|&(_, b)| b))
-        .collect();
-    critical.sort_by(f64::total_cmp);
-    critical.dedup();
-
-    let mut segments: Vec<(f64, usize)> = Vec::new();
-    let mut apex: Option<usize> = None;
-    for t in critical {
-        // C_t in increasing vertex order, as the witness rule requires.
-        let level: Vec<usize> = cands
-            .iter()
-            .filter(|&&(_, b)| b <= t)
-            .map(|&(x, _)| x)
-            .collect();
-        if level.is_empty() {
-            return None;
-        }
-        let dominates = |w: usize| level.iter().all(|&x| x == w || f[w][x] <= t);
-        let birth = |w: usize| cands.iter().find(|&&(x, _)| x == w).map(|&(_, b)| b);
-        if let Some(w) = apex {
-            if birth(w).is_some_and(|b| b <= t) && dominates(w) {
-                continue;
-            }
-        }
-        let found = level.iter().copied().find(|&w| dominates(w))?;
-        segments.push((t, found));
-        apex = Some(found);
-    }
-    Some(segments)
-}
-
 /// Run the frozen schedule with no pruning: every pass tests every live edge.
 /// `all_edges` is the raw edge set, `resolved` the threshold after the input's
 /// own rule.
@@ -1686,7 +1664,7 @@ fn reference_collapse(n: usize, all_edges: &[(usize, usize, f64)], resolved: f64
                 continue;
             }
             let (u, v, value) = edges[i];
-            let Some(witnesses) = ref_test_edge(&f, u, v, value, terminal) else {
+            let Some(witnesses) = common::ref_test_edge(&f, u, v, value, terminal) else {
                 continue;
             };
             alive[i] = false;
@@ -1708,7 +1686,7 @@ fn reference_collapse(n: usize, all_edges: &[(usize, usize, f64)], resolved: f64
     let mut survivors: Vec<(usize, usize, f64)> = edges
         .iter()
         .zip(&alive)
-        .filter(|(_, &live)| live)
+        .filter(|&(_, &live)| live)
         .map(|(&e, _)| e)
         .collect();
     survivors.sort_by_key(|&(u, v, _)| (u, v));
@@ -1750,7 +1728,11 @@ fn assert_reference_match(name: &str, result: &CollapsedRips, reference: &RefRun
             want.value.to_bits(),
             "{name}: step {i} value"
         );
-        assert_eq!(got.epoch(), want.pass, "{name}: step {i} pass number");
+        assert_eq!(
+            got.position().number(),
+            want.pass,
+            "{name}: step {i} pass number"
+        );
         assert_eq!(
             got.witnesses().len(),
             want.witnesses.len(),

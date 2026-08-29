@@ -1,0 +1,21 @@
+[package]
+name = "holos-tda-check"
+version = "0.7.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Independent checker for proof-carrying holos persistence"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/t0rsion/holos"
+homepage = "https://github.com/t0rsion/holos"
+keywords = ["topology", "tda", "verification", "persistent-homology"]
+categories = ["science", "mathematics"]
+readme = "../../README.md"
+
+[dependencies]
+num-rational = "0.4"
+num-traits = "0.2"
+sha2 = "0.10"
+
+[[bin]]
+name = "holos-check"
+path = "src/main.rs"

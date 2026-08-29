@@ -55,7 +55,7 @@ def number(text):
 
 
 def median(values):
-    """The median, interpolated linearly between the two neighbouring order
+    """The median, interpolated linearly between the two neighboring order
     statistics, the rule benchmarks/_common.sh uses."""
     if not values:
         return None
@@ -90,249 +90,361 @@ def table(out, header, aligns, rows):
     out.append("")
 
 
-def main():
-    argv = sys.argv[1:]
-    as_text = False
-    if argv and argv[0] == "--text":
-        as_text = True
-        argv = argv[1:]
-    if len(argv) != 4:
+def parse_cli(argv):
+    as_text = bool(argv and argv[0] == "--text")
+    paths = argv[1:] if as_text else argv
+    if len(paths) != 4:
         sys.exit("usage: engine_tables.py [--text] ENTRY_META TOTALS PHASES ARMS")
-    meta_path, totals_path, phases_path, arms_text = argv
+    return as_text, paths
 
-    entries = read_rows(meta_path, 7)
-    totals = read_rows(totals_path, 6)
-    phases = read_rows(phases_path, 4)
+
+def parse_arms(text):
     arms = []
-    for item in arms_text.split():
+    for item in text.split():
         label, commit, sha, state = item.split(":")
         arms.append((label, commit, sha, state))
+    return arms
 
-    # value[(id, arm, config)] = (median_s, iqr_s, rss_kb)
-    value = {}
-    configs_of_arm = {}
-    for entry_id, arm, config, med, iqr, rss in totals:
-        value[(entry_id, arm, config)] = (number(med), number(iqr), number(rss))
-        configs_of_arm.setdefault(arm, set()).add(config)
 
-    columns = []
-    for label, _, _, _ in arms:
-        for config in sorted(configs_of_arm.get(label, ()), key=config_key):
-            columns.append((label, config))
-    ripser_configs = sorted(configs_of_arm.get("ripser", ()), key=config_key)
-    driver_modes = sorted(configs_of_arm.get("driver", ()), key=config_key)
+class Study:
+    """The parsed records and derived columns of one engineering study."""
 
-    out = []
-    if not as_text:
-        out.append("## Fresh-process totals")
-        out.append("")
-        out.append(
-            "Seconds, median over the timed repetitions of one fresh process per"
+    def __init__(self, entries, totals, phases, arms):
+        self.entries = entries
+        self.phases = phases
+        self.arms = arms
+        self.value = {}
+        self.configs_of_arm = {}
+        for entry_id, arm, config, med, iqr, rss in totals:
+            self.value[(entry_id, arm, config)] = (
+                number(med),
+                number(iqr),
+                number(rss),
+            )
+            self.configs_of_arm.setdefault(arm, set()).add(config)
+        self.columns = []
+        for label, _, _, _ in arms:
+            configs = sorted(self.configs_of_arm.get(label, ()), key=config_key)
+            self.columns.extend((label, config) for config in configs)
+        self.ripser_configs = sorted(
+            self.configs_of_arm.get("ripser", ()), key=config_key
         )
-        out.append(
-            "run. Edges are the pairs at or below the threshold, after the collapse"
+        self.driver_modes = sorted(
+            self.configs_of_arm.get("driver", ()), key=config_key
         )
-        out.append("where an entry collapses. A void entry lost a comparison and enters")
-        out.append("no median below.")
-        out.append("")
-        header = ["id", "stratum", "headline", "n", "edges"]
-        header += [f"{label} {config}" for label, config in columns]
-        header += [f"ripser {config}" for config in ripser_configs]
-        header.append("status")
-        aligns = [":--", ":--", ":--", "--:", "--:"]
-        aligns += ["--:"] * (len(columns) + len(ripser_configs))
-        aligns.append(":--")
-        rows = []
-        for entry_id, stratum, headline, competitor, n, edges, status in entries:
-            cells = [entry_id, stratum, headline, n, edges]
-            for label, config in columns:
-                cells.append(seconds(value.get((entry_id, label, config), (None,))[0]))
-            for config in ripser_configs:
-                cells.append(seconds(value.get((entry_id, "ripser", config), (None,))[0]))
-            cells.append(status if status != "ok" else f"ok, {competitor}")
-            rows.append("| " + " | ".join(cells) + " |")
-        table(out, header, aligns, rows)
 
-        out.append("## Ratios against ripser")
-        out.append("")
-        out.append("holos over ripser on the same file and the same configuration.")
-        out.append("Below 1.0 means holos is faster. An entry whose competitor is none")
-        out.append("has no external arm and no ratio. The routing configurations read")
-        out.append("the entry's primary file; sparse-file has both tools read the")
-        out.append("triplet file, so it is the like-for-like sparse-input ratio. On an")
-        out.append("entry whose primary file is already the triplet file, sparse-file")
-        out.append("repeats the auto measurement rather than time one command twice.")
-        out.append("")
-        header = ["id", "stratum"] + [f"{label} {config}" for label, config in columns]
-        aligns = [":--", ":--"] + ["--:"] * len(columns)
-        rows = []
-        for entry_id, stratum, headline, competitor, n, edges, status in entries:
-            cells = [entry_id, stratum]
-            for label, config in columns:
-                cells.append(as_ratio(ratio_of(value, entry_id, label, config, status)))
-            rows.append("| " + " | ".join(cells) + " |")
-        table(out, header, aligns, rows)
+    def timing(self, entry_id, arm, config):
+        return self.value.get((entry_id, arm, config), (None,))[0]
 
-        out.append("## Peak RSS")
-        out.append("")
-        out.append("Megabytes. The arm and ripser figures are the largest VmHWM of")
-        out.append("their timed runs. The driver columns come from one extra")
-        out.append("single-repetition driver process per engine entry point, which is")
-        out.append("the only way to give one entry point a peak of its own. The memory")
-        out.append("stratum reads that pair.")
-        out.append("")
-        header = ["id", "stratum"]
-        header += [f"{label} {config}" for label, config in columns]
-        header += [f"ripser {config}" for config in ripser_configs]
-        header += [f"driver {mode}" for mode in driver_modes]
-        aligns = [":--", ":--"] + ["--:"] * (
-            len(columns) + len(ripser_configs) + len(driver_modes)
-        )
-        rows = []
-        for entry_id, stratum, headline, competitor, n, edges, status in entries:
-            cells = [entry_id, stratum]
-            for label, config in columns:
-                cells.append(megabytes(value.get((entry_id, label, config), (None, None, None))[2]))
-            for config in ripser_configs:
-                cells.append(
-                    megabytes(value.get((entry_id, "ripser", config), (None, None, None))[2])
-                )
-            for mode in driver_modes:
-                cells.append(
-                    megabytes(value.get((entry_id, "driver", mode), (None, None, None))[2])
-                )
-            rows.append("| " + " | ".join(cells) + " |")
-        table(out, header, aligns, rows)
+    def rss(self, entry_id, arm, config):
+        return self.value.get((entry_id, arm, config), (None, None, None))[2]
 
-        out.append("## Driver phase medians")
-        out.append("")
-        out.append("Seconds, from the working tree's in-process driver, which no")
-        out.append("historical arm has. Parse reads the input file. Distance builds")
-        out.append("the full matrix (on a sparse input, the widening to +inf). Graph")
-        out.append("builds the sparse graph. Reduce is the engine alone. The")
-        out.append("reduction is one clock: the solver exposes no per-dimension")
-        out.append("boundary outside the crate.")
-        out.append("")
-        by_entry = {}
-        for entry_id, mode, phase, med in phases:
-            by_entry.setdefault((entry_id, mode), {})[phase] = number(med)
-        header = ["id", "engine entry point"] + PHASE_ORDER
-        aligns = [":--", ":--"] + ["--:"] * len(PHASE_ORDER)
-        rows = []
-        for entry_id, mode in sorted(by_entry, key=lambda k: (order_of(entries, k[0]), k[1])):
-            cells = [entry_id, mode]
-            cells += [seconds(by_entry[(entry_id, mode)].get(p)) for p in PHASE_ORDER]
-            rows.append("| " + " | ".join(cells) + " |")
-        table(out, header, aligns, rows)
+    def ratio(self, entry_id, label, config, status):
+        return ratio_of(self.value, entry_id, label, config, status)
 
-    strata = []
-    for entry_id, stratum, headline, competitor, n, edges, status in entries:
-        if stratum not in strata:
-            strata.append(stratum)
+    def strata(self):
+        names = []
+        for row in self.entries:
+            if row[1] not in names:
+                names.append(row[1])
+        return names
 
-    def stratum_median(name, label, config, headline_only=False):
+    def stratum_median(self, name, label, config, headline_only=False):
         values = []
-        for entry_id, stratum, headline, competitor, n, edges, status in entries:
-            if status != "ok":
-                continue
-            if name is not None and stratum != name:
+        for entry_id, stratum, headline, _, _, _, status in self.entries:
+            if status != "ok" or (name is not None and stratum != name):
                 continue
             if headline_only and headline != "yes":
                 continue
-            got = ratio_of(value, entry_id, label, config, status)
+            got = self.ratio(entry_id, label, config, status)
             if got is not None:
                 values.append(got)
         return median(values), len(values)
 
-    if as_text:
-        for name in strata:
-            for label, config in columns:
-                med, count = stratum_median(name, label, config)
-                print(
-                    f"STRATUM stratum={name} arm={label} config={config} "
-                    f"median_over_ripser={as_ratio(med)} entries={count}"
-                )
-        for label, config in columns:
-            med, count = stratum_median(None, label, config)
-            print(
-                f"OVERALL arm={label} config={config} "
-                f"median_over_ripser={as_ratio(med)} entries={count}"
-            )
-            med, count = stratum_median(None, label, config, headline_only=True)
-            print(
-                f"OVERALL headline_only arm={label} config={config} "
-                f"median_over_ripser={as_ratio(med)} entries={count}"
-            )
-        return
 
-    out.append("## Medians by stratum")
+def load_study(paths):
+    meta_path, totals_path, phases_path, arms_text = paths
+    return Study(
+        read_rows(meta_path, 7),
+        read_rows(totals_path, 6),
+        read_rows(phases_path, 4),
+        parse_arms(arms_text),
+    )
+
+
+def section(out, title, paragraphs):
+    out.append(f"## {title}")
     out.append("")
-    out.append("Median ratio against ripser inside each stratum, one column per arm")
-    out.append("and configuration, with the number of entries that carried a ratio.")
-    out.append("An overall median over unlike regimes hides the regime that lost.")
+    out.extend(paragraphs)
     out.append("")
-    header = ["stratum", "entries"] + [f"{label} {config}" for label, config in columns]
-    aligns = [":--", "--:"] + ["--:"] * len(columns)
+
+
+def fresh_process_rows(study):
     rows = []
-    for name in strata:
+    for entry_id, stratum, headline, competitor, n, edges, status in study.entries:
+        cells = [entry_id, stratum, headline, n, edges]
+        for label, config in study.columns:
+            cells.append(seconds(study.timing(entry_id, label, config)))
+        for config in study.ripser_configs:
+            cells.append(seconds(study.timing(entry_id, "ripser", config)))
+        cells.append(status if status != "ok" else f"ok, {competitor}")
+        rows.append("| " + " | ".join(cells) + " |")
+    return rows
+
+
+def append_fresh_process(out, study):
+    section(
+        out,
+        "Fresh-process totals",
+        [
+            "Seconds, median over the timed repetitions of one fresh process per",
+            "run. Edges are the pairs at or below the threshold, after the collapse",
+            "where an entry collapses. A void entry lost a comparison and enters",
+            "no median below.",
+        ],
+    )
+    header = ["id", "stratum", "headline", "n", "edges"]
+    header += [f"{label} {config}" for label, config in study.columns]
+    header += [f"ripser {config}" for config in study.ripser_configs]
+    header.append("status")
+    numeric = len(study.columns) + len(study.ripser_configs)
+    aligns = [":--", ":--", ":--", "--:", "--:"] + ["--:"] * numeric
+    aligns.append(":--")
+    table(out, header, aligns, fresh_process_rows(study))
+
+
+def ratio_rows(study):
+    rows = []
+    for entry_id, stratum, _, _, _, _, status in study.entries:
+        cells = [entry_id, stratum]
+        for label, config in study.columns:
+            cells.append(as_ratio(study.ratio(entry_id, label, config, status)))
+        rows.append("| " + " | ".join(cells) + " |")
+    return rows
+
+
+def append_ratios(out, study):
+    section(
+        out,
+        "Ratios against ripser",
+        [
+            "holos over ripser on the same file and the same configuration.",
+            "Below 1.0 means holos is faster. An entry whose competitor is none",
+            "has no external arm and no ratio. The routing configurations read",
+            "the entry's primary file; sparse-file has both tools read the",
+            "triplet file, so it is the like-for-like sparse-input ratio. On an",
+            "entry whose primary file is already the triplet file, sparse-file",
+            "repeats the auto measurement rather than time one command twice.",
+        ],
+    )
+    header = ["id", "stratum"] + [
+        f"{label} {config}" for label, config in study.columns
+    ]
+    aligns = [":--", ":--"] + ["--:"] * len(study.columns)
+    table(out, header, aligns, ratio_rows(study))
+
+
+def rss_rows(study):
+    rows = []
+    for entry_id, stratum, _, _, _, _, _ in study.entries:
+        cells = [entry_id, stratum]
+        for label, config in study.columns:
+            cells.append(megabytes(study.rss(entry_id, label, config)))
+        for config in study.ripser_configs:
+            cells.append(megabytes(study.rss(entry_id, "ripser", config)))
+        for mode in study.driver_modes:
+            cells.append(megabytes(study.rss(entry_id, "driver", mode)))
+        rows.append("| " + " | ".join(cells) + " |")
+    return rows
+
+
+def append_rss(out, study):
+    section(
+        out,
+        "Peak RSS",
+        [
+            "Megabytes. The arm and ripser figures are the largest VmHWM of",
+            "their timed runs. The driver columns come from one extra",
+            "single-repetition driver process per engine entry point, which is",
+            "the only way to give one entry point a peak of its own. The memory",
+            "stratum reads that pair.",
+        ],
+    )
+    header = ["id", "stratum"]
+    header += [f"{label} {config}" for label, config in study.columns]
+    header += [f"ripser {config}" for config in study.ripser_configs]
+    header += [f"driver {mode}" for mode in study.driver_modes]
+    numeric = len(study.columns) + len(study.ripser_configs) + len(study.driver_modes)
+    aligns = [":--", ":--"] + ["--:"] * numeric
+    table(out, header, aligns, rss_rows(study))
+
+
+def phase_rows(study):
+    by_entry = {}
+    for entry_id, mode, phase, med in study.phases:
+        by_entry.setdefault((entry_id, mode), {})[phase] = number(med)
+    keys = sorted(
+        by_entry,
+        key=lambda key: (order_of(study.entries, key[0]), key[1]),
+    )
+    rows = []
+    for entry_id, mode in keys:
+        cells = [entry_id, mode]
+        cells += [seconds(by_entry[(entry_id, mode)].get(phase)) for phase in PHASE_ORDER]
+        rows.append("| " + " | ".join(cells) + " |")
+    return rows
+
+
+def append_phases(out, study):
+    section(
+        out,
+        "Driver phase medians",
+        [
+            "Seconds, from the working tree's in-process driver, which no",
+            "historical arm has. Parse reads the input file. Distance builds",
+            "the full matrix (on a sparse input, the widening to +inf). Graph",
+            "builds the sparse graph. Reduce is the engine alone. The",
+            "reduction is one clock: the solver exposes no per-dimension",
+            "boundary outside the crate.",
+        ],
+    )
+    header = ["id", "engine entry point"] + PHASE_ORDER
+    aligns = [":--", ":--"] + ["--:"] * len(PHASE_ORDER)
+    table(out, header, aligns, phase_rows(study))
+
+
+def print_text(study):
+    for name in study.strata():
+        for label, config in study.columns:
+            med, count = study.stratum_median(name, label, config)
+            print(
+                f"STRATUM stratum={name} arm={label} config={config} "
+                f"median_over_ripser={as_ratio(med)} entries={count}"
+            )
+    for label, config in study.columns:
+        med, count = study.stratum_median(None, label, config)
+        print(
+            f"OVERALL arm={label} config={config} "
+            f"median_over_ripser={as_ratio(med)} entries={count}"
+        )
+        med, count = study.stratum_median(None, label, config, headline_only=True)
+        print(
+            f"OVERALL headline_only arm={label} config={config} "
+            f"median_over_ripser={as_ratio(med)} entries={count}"
+        )
+
+
+def stratum_rows(study):
+    rows = []
+    for name in study.strata():
         counted = 0
         cells = [name, ""]
-        for label, config in columns:
-            med, count = stratum_median(name, label, config)
+        for label, config in study.columns:
+            med, count = study.stratum_median(name, label, config)
             counted = max(counted, count)
             cells.append(as_ratio(med))
         cells[1] = str(counted)
         rows.append("| " + " | ".join(cells) + " |")
-    table(out, header, aligns, rows)
+    return rows
 
-    out.append("## Overall medians")
-    out.append("")
-    out.append("Read these only beside the table above.")
-    out.append("")
-    header = ["scope", "entries"] + [f"{label} {config}" for label, config in columns]
-    aligns = [":--", "--:"] + ["--:"] * len(columns)
+
+def append_stratum_medians(out, study):
+    section(
+        out,
+        "Medians by stratum",
+        [
+            "Median ratio against ripser inside each stratum, one column per arm",
+            "and configuration, with the number of entries that carried a ratio.",
+            "An overall median over unlike regimes hides the regime that lost.",
+        ],
+    )
+    header = ["stratum", "entries"] + [
+        f"{label} {config}" for label, config in study.columns
+    ]
+    aligns = [":--", "--:"] + ["--:"] * len(study.columns)
+    table(out, header, aligns, stratum_rows(study))
+
+
+def overall_rows(study):
     rows = []
     for scope, headline_only in (("all entries", False), ("headline entries", True)):
         counted = 0
         cells = [scope, ""]
-        for label, config in columns:
-            med, count = stratum_median(None, label, config, headline_only)
+        for label, config in study.columns:
+            med, count = study.stratum_median(None, label, config, headline_only)
             counted = max(counted, count)
             cells.append(as_ratio(med))
         cells[1] = str(counted)
         rows.append("| " + " | ".join(cells) + " |")
-    table(out, header, aligns, rows)
+    return rows
 
-    # The two tables above carry one entry count for a whole row, which is
-    # the largest count over their columns. The sparse-file ratio is the
-    # like-for-like comparison, so it gets its own count here.
-    sparse_arms = [
-        label for label, _, _, _ in arms if "sparse-file" in configs_of_arm.get(label, ())
+
+def append_overall_medians(out, study):
+    section(out, "Overall medians", ["Read these only beside the table above."])
+    header = ["scope", "entries"] + [
+        f"{label} {config}" for label, config in study.columns
     ]
-    if sparse_arms:
-        out.append("## Sparse-file comparison")
-        out.append("")
-        out.append("The sparse-file configuration alone, by stratum. holos and ripser")
-        out.append("both read the triplet file, at the same threshold and the same")
-        out.append("dimension, so this ratio compares like with like. The entries")
-        out.append("column counts the entries of the stratum that carried the ratio.")
-        out.append("The overall sparse-file median is the sparse-file column of the")
-        out.append("table above.")
-        out.append("")
-        header = ["stratum"]
-        for label in sparse_arms:
-            header += [f"{label} sparse-file", f"{label} entries"]
-        aligns = [":--"] + ["--:"] * (2 * len(sparse_arms))
-        rows = []
-        for name in strata:
-            cells = [name]
-            for label in sparse_arms:
-                med, count = stratum_median(name, label, "sparse-file")
-                cells += [as_ratio(med), str(count)]
-            rows.append("| " + " | ".join(cells) + " |")
-        table(out, header, aligns, rows)
+    aligns = [":--", "--:"] + ["--:"] * len(study.columns)
+    table(out, header, aligns, overall_rows(study))
 
-    print("\n".join(out).rstrip() + "\n")
+
+def sparse_file_rows(study, sparse_arms):
+    rows = []
+    for name in study.strata():
+        cells = [name]
+        for label in sparse_arms:
+            med, count = study.stratum_median(name, label, "sparse-file")
+            cells += [as_ratio(med), str(count)]
+        rows.append("| " + " | ".join(cells) + " |")
+    return rows
+
+
+def append_sparse_file(out, study):
+    sparse_arms = [
+        label
+        for label, _, _, _ in study.arms
+        if "sparse-file" in study.configs_of_arm.get(label, ())
+    ]
+    if not sparse_arms:
+        return
+    section(
+        out,
+        "Sparse-file comparison",
+        [
+            "The sparse-file configuration alone, by stratum. holos and ripser",
+            "both read the triplet file, at the same threshold and the same",
+            "dimension, so this ratio compares like with like. The entries",
+            "column counts the entries of the stratum that carried the ratio.",
+            "The overall sparse-file median is the sparse-file column of the",
+            "table above.",
+        ],
+    )
+    header = ["stratum"]
+    for label in sparse_arms:
+        header += [f"{label} sparse-file", f"{label} entries"]
+    aligns = [":--"] + ["--:"] * (2 * len(sparse_arms))
+    table(out, header, aligns, sparse_file_rows(study, sparse_arms))
+
+
+def markdown(study):
+    out = []
+    append_fresh_process(out, study)
+    append_ratios(out, study)
+    append_rss(out, study)
+    append_phases(out, study)
+    append_stratum_medians(out, study)
+    append_overall_medians(out, study)
+    append_sparse_file(out, study)
+    return "\n".join(out).rstrip() + "\n"
+
+
+def main():
+    as_text, paths = parse_cli(sys.argv[1:])
+    study = load_study(paths)
+    if as_text:
+        print_text(study)
+    else:
+        print(markdown(study))
 
 
 def order_of(entries, entry_id):

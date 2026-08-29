@@ -11,10 +11,9 @@ pub struct BinomialTable {
 }
 
 impl BinomialTable {
-    /// Build the table of C(i, j) for i <= n, j <= k_max.
-    ///
-    /// Returns an error if any entry overflows u64. That bound limits the
-    /// representable simplex indices.
+    /// Build the table of C(i, j) for i <= n, j <= k_max. Returns an error
+    /// if any entry overflows u64. That bound limits the representable
+    /// simplex indices.
     pub fn new(n: usize, k_max: usize) -> Result<Self> {
         // The table is k-major: C(i, j) sits at j * (n + 1) + i. The
         // enumerators sweep i downward with j fixed, so that layout reads
@@ -72,14 +71,14 @@ impl BinomialTable {
     /// Return the two vertices of the edge with the given index, the lower
     /// one first. `n` is the point count.
     ///
-    /// This is [`BinomialTable::unrank`] at dimension 1. The upper vertex is
-    /// the largest v with C(v, 2) at or below the index. C(v, 2) <= index is
-    /// v * v - v - 2 * index <= 0, so that vertex is the floor of
-    /// (1 + sqrt(1 + 8 * index)) / 2 and a square root replaces the search
-    /// over the table. The integer square root gives that floor exactly: no
-    /// odd integer lies between a root and its own floor, so halving the
-    /// floor and halving the root agree. Halving (1 + root) is
-    /// `root.div_ceil(2)`.
+    /// This is [`BinomialTable::unrank`] at dimension 1, and it gives the
+    /// same pair. The upper vertex is the largest v with C(v, 2) at or below
+    /// the index. C(v, 2) <= index is v * v - v - 2 * index <= 0. That
+    /// vertex is the floor of (1 + sqrt(1 + 8 * index)) / 2. A square root
+    /// replaces the search over the table. The integer square root gives
+    /// that floor exactly: no odd integer lies between a root and its own
+    /// floor, so halving the floor and halving the root agree. Halving
+    /// (1 + root) is `root.div_ceil(2)`.
     #[inline]
     pub fn unrank_edge(&self, index: u64, n: usize) -> (usize, usize) {
         debug_assert!(self.k_max >= 2 && n >= 2 && n <= self.n);
@@ -190,11 +189,9 @@ impl<'a> CofacetIter<'a> {
 }
 
 /// Enumerates facets of a simplex, removing vertices from the highest
-/// position downward.
-///
-/// It searches for each removed vertex, so the shipped facet walk in
-/// `reduce.rs` takes the same indices from the vertices instead. This is
-/// the reference that walk is tested against.
+/// position downward. Each step searches for the removed vertex. The shipped
+/// walk in `reduce.rs` takes the same indices from the vertices; this
+/// iterator is the reference that walk is tested against.
 #[cfg(test)]
 pub struct FacetIter<'a> {
     bt: &'a BinomialTable,
@@ -404,8 +401,9 @@ mod tests {
         }
     }
 
-    // The general unrank body. `unrank` takes a closed-form shortcut at
-    // dimension 1, so a test of that shortcut needs the search it replaced.
+    // The general unrank body for every dimension above 1. `unrank` takes a
+    // shortcut at dimension 1, so a test of that shortcut needs the search
+    // it replaced.
     fn unrank_by_search(bt: &BinomialTable, mut idx: u64, dim: usize, n: usize) -> Vec<usize> {
         let mut out = Vec::new();
         let mut upper = n - 1;
@@ -419,6 +417,8 @@ mod tests {
         out
     }
 
+    // Every edge index of every point count up to 128, against the search
+    // and against the naive rank.
     #[test]
     fn unrank_edge_matches_the_search() {
         for n in 2..=128usize {
@@ -435,7 +435,8 @@ mod tests {
         }
     }
 
-    // Same sweep at the engineering corpus size. Release sweep only.
+    // The same sweep at the size the engineering corpus reaches, which is
+    // four and a half million edges. It runs in the release sweep alone.
     #[test]
     #[ignore = "exhaustive: 4.5 million edge indices"]
     fn unrank_edge_matches_the_search_at_three_thousand_points() {

@@ -7,29 +7,206 @@
 //! Tie-breaking and output conventions match ripser exactly. See README.md.
 
 pub(crate) mod adjacency;
+/// Certified local models of H1 persistence under changing inputs.
+pub mod atlas;
+/// Wire format for persistence atlases.
+pub mod atlas_wire;
 #[cfg(test)]
 mod bit_keys;
 pub(crate) mod budget;
+/// Algebraic reduction certificates.
+pub mod certificate;
+/// Stable H1 classes and cocycle validation.
+pub mod classes;
 /// The `holos` CLI as a library function (shared with the Python bindings).
 pub mod cli;
+/// Canonical cohomology and exact relations in any bounded dimension.
+pub mod cohomology;
+/// Weighted fixed-scale interventions across declared graph scenarios.
+pub mod cohomology_intervention;
 pub mod collapse;
 pub(crate) mod combinadic;
+/// Exact class-space correspondences across persistence updates.
+pub mod correspondence;
+/// Relative topological coverage criteria for fenced planar sensor networks.
+pub mod coverage;
+/// Exact component frontiers for failure-tolerant coverage synthesis.
+pub mod coverage_frontier;
+/// Exact planar geometry bindings for finite coverage specifications.
+pub mod coverage_geometry;
+/// Failure-tolerant finite and kinetic relative coverage specifications.
+pub mod coverage_synthesis;
 /// Distance-matrix construction and storage.
 pub mod distances;
+/// Durable content-addressed execution for relative interfaces.
+pub mod distributed;
+/// Proof-carrying persistence for explicit scalar filtered complexes.
+pub mod explicit_certificate;
+/// Vertex-biconnected factorization of sparse flag filtrations.
+pub mod factorization;
 pub(crate) mod field;
+/// Explicit filtered simplicial complexes and filtration grades.
+pub mod filtration;
+/// Dimension-generic algebraic certificates for separator indexes.
+pub mod graded_certificate;
+/// Versioned exact persistence over checked separator interfaces.
+pub mod index;
+/// Cold snapshots and warm deltas for persistence indexes.
+pub mod index_proof;
+/// Stateful exact index streams with proof output.
+pub mod index_stream;
+/// Certified finite H1 lifetime interventions.
+pub mod intervention;
 /// File formats and diagram output.
 pub mod io;
-/// Independent brute-force reference implementation used by the test gates.
+/// Exact events for affine edge-weight trajectories.
+pub mod kinetic;
+/// Certificates for kinetic cohomology zigzags.
+pub mod kinetic_zigzag_artifact;
+mod monotone_proof;
+mod monotone_search;
+/// Brute-force reference implementation used by the test gates.
 pub mod oracle;
 pub(crate) mod parallel;
+/// Compositional H0 and H1 persistence programs.
+pub mod program;
+/// Update traces for persistence programs.
+pub mod program_trace;
+/// Wire format for persistence programs.
+pub mod program_wire;
+/// Unified proof DAGs for checked persistence trajectories.
+pub mod proof;
 pub(crate) mod reduce;
+/// Exact filtered chain cores relative to separator subcomplexes.
+pub mod relative_interface;
 pub(crate) mod simplex;
 pub(crate) mod solver;
+/// Proof-carrying synthesis for finite temporal topology specifications.
+pub mod synthesis;
+/// Trajectories across atlas regions.
+pub mod trajectory;
 mod union_find;
+/// Exact interval decomposition of finite zigzag modules.
+pub mod zigzag;
 
 use std::fmt;
 
-pub use distances::{DistanceMatrix, SparseDistanceMatrix};
+pub use atlas::{
+    AtlasEvaluation, AtlasUpdate, ClassSensitivity, CoordinateDerivative, EdgeKey,
+    EndpointGradient, EvaluatedClassSpace, LineageId, PersistenceAtlas, PointAtlasUpdate,
+    PointClassSensitivity, PointEndpointGradient, PointPersistenceAtlas, TopologyEvent,
+    TopologyEventKind, UpdateMode,
+};
+pub use atlas_wire::{AtlasArtifact, AtlasArtifactError, AtlasArtifactRepair, AtlasDecodeLimits};
+pub use certificate::{
+    CertificateError, CertificateLimits, CertificateTerm, CertifiedReductionRegion,
+    CertifiedRegionEvaluation, ChangeColumn, FiltrationSimplex, ReductionCertificate,
+    ReductionGuard, ReductionGuardKind, ReductionRepair, ReductionRepairMode, ReductionRepairWork,
+    RegionViolation, RegionViolationKind,
+};
+pub use classes::{
+    BasisClassId, Cocycle, CocycleTerm, CriticalPair, CriticalSimplex, ExplainedDiagram,
+    IntervalGroupId, PersistentClass, PersistentClassSpace, lift_h1_classes,
+    rips_persistence_with_classes_sparse,
+};
+pub use cohomology::{
+    CochainTerm, CohomologyClass, CohomologyClassId, CohomologyLimits, CohomologyMapColumn,
+    CohomologyMapTerm, CohomologyRelation, CohomologyRelationTerm, CohomologyRelationVector,
+    CohomologyRestriction, CohomologySpace, CohomologySpaceId, CohomologySubspace,
+    CohomologySubspaceGenerator, CohomologySubspaceTerm, cohomology_relation,
+    cohomology_restriction, cohomology_space,
+};
+pub use cohomology_intervention::{
+    CohomologyInterventionArtifact, CohomologyInterventionCandidate, CohomologyInterventionLimits,
+    CohomologyInterventionScenario, CohomologyInterventionStatus,
+};
+pub use correspondence::{
+    ClassCorrespondence, CorrespondenceTerm, CorrespondenceVector, class_correspondences,
+};
+pub use coverage::{
+    CoverageEvaluation, CoverageFence, CoverageLimits, CoverageTriangleTerm, PlanarCoverageModel,
+    evaluate_planar_coverage,
+};
+pub use coverage_frontier::{
+    CoverageComponentFrontier, CoverageComposition, CoverageCompositionStatus,
+    CoverageFrontierEntry, compose_coverage_frontiers,
+};
+pub use coverage_geometry::{
+    CoverageGeometry, CoverageGeometryLimits, GeometryBoundCoverageArtifact,
+    GeometryBoundCoverageDecodeLimits, PlanarPoint,
+};
+pub use coverage_synthesis::{
+    CoverageAction, CoverageComponent, CoverageCounterexample, CoveragePlanEvaluation,
+    CoverageSource, CoverageSpecification, CoverageState, CoverageSynthesisArtifact,
+    CoverageSynthesisLimits, CoverageSynthesisStatus, evaluate_coverage_plan,
+};
+pub use distances::{
+    DistanceMatrix, PointCloudGraph, PointCloudParams, PointCloudStats, PointCloudStrategy,
+    SparseDistanceMatrix,
+};
+pub use distributed::{
+    ArtifactId, DistributedInterfaceCommit, DistributedInterfaceError,
+    DistributedInterfaceManifest, DistributedInterfaceWork, DurableInterfaceStore,
+};
+pub use explicit_certificate::ExplicitReductionCertificate;
+pub use filtration::{
+    ComplexLimits, CoordinateProjection, FilteredSimplex, FilteredSimplicialComplex,
+    FiltrationError, FiltrationGrade, FlagComplexParams, LinearFiltrationGrade, ProductGrade,
+    ScalarGrade, ScalarProjection,
+};
+pub use graded_certificate::{
+    GradedDimensionWork, GradedReductionCertificate, GradedReductionRepair,
+    GradedReductionRepairWork,
+};
+pub use index::{
+    DiagramDelta, IndexBranch, IndexDiff, IndexEdit, IndexEvent, IndexEventKind, IndexParams,
+    IndexSummary, IndexTransition, IndexUpdateMode, IndexWork, InterfaceMode, InterfacePolicy,
+    InterfaceSummary, PersistenceIndex, TopologyPatch,
+};
+pub use index_proof::{IndexDeltaProof, IndexProofError, IndexProofSummary, IndexSnapshotProof};
+pub use index_stream::{IndexStream, IndexStreamProof, IndexStreamStep};
+pub use intervention::{
+    EdgeWeightEdit, H1Intervention, InterventionArtifact, InterventionBudget,
+    InterventionDecodeLimits, InterventionError, InterventionStatus, VerifiedIntervention,
+};
+pub use kinetic::{
+    KineticCohomologyEvent, KineticEdge, KineticEdgeKey, KineticEvent, KineticEventKind,
+    KineticFiltration, KineticGraphState, KineticGraphStateKind, KineticLimits, KineticSchedule,
+    KineticZigzag, KineticZigzagArrow, KineticZigzagNode, KineticZigzagNodeKind,
+};
+pub use kinetic_zigzag_artifact::{
+    KineticZigzagArtifact, KineticZigzagArtifactLimits, KineticZigzagArtifactSummary,
+    KineticZigzagIntervalClaim,
+};
+pub use program::{
+    BasisTransport, ClassContinuation, ContinuationKind, CorrespondenceMode, PersistenceProgram,
+    ProgramAtomInfo, ProgramBranch, ProgramCheckpoint, ProgramEvaluation, ProgramEvent,
+    ProgramEventKind, ProgramSummary, ProgramUpdate, ProgramUpdateMode, ProgramWork,
+};
+pub use program_trace::{
+    ProgramTraceArtifact, ProgramTraceDecodeLimits, ProgramTraceError, ProgramTraceStep,
+    VerifiedProgramTrace, VerifiedProgramTraceStep,
+};
+pub use program_wire::{
+    ProgramArtifact, ProgramArtifactError, ProgramAtomArtifact, ProgramDecodeLimits,
+};
+pub use proof::{ProofArtifact, ProofArtifactError, ProofArtifactSummary};
+pub use relative_interface::{
+    InterfaceCancellation, InterfaceCell, InterfaceChainTerm, RelativeInterfaceCertificate,
+    RelativeInterfaceWork,
+};
+pub use synthesis::{
+    SynthesisAction, SynthesisArtifact, SynthesisComponent, SynthesisCoordinate, SynthesisLimits,
+    SynthesisSource, SynthesisState, SynthesisStatus, TopologicalSpecification,
+};
+pub use trajectory::{
+    TrajectoryArtifact, TrajectoryDecodeLimits, TrajectoryError, TrajectoryStep,
+    VerifiedTrajectory, VerifiedTrajectoryStep,
+};
+pub use zigzag::{
+    ZigzagBarcode, ZigzagDirection, ZigzagInterval, ZigzagIntervalId, ZigzagLimits, ZigzagMap,
+    ZigzagModule, ZigzagModuleId, ZigzagTerm,
+};
 
 /// Short git commit hash recorded at build time ("unknown" outside a repo).
 pub const GIT_HASH: &str = env!("HOLOS_GIT_HASH");
@@ -96,12 +273,11 @@ pub struct RipsParams {
     pub threshold: Option<f64>,
     /// Coefficient field Z/p; must be a prime below 32768. Default 2.
     pub modulus: u32,
-    /// Worker budget for the run. 0 and 1 (the default) both run the
-    /// serial engine. Higher values cap the workers each reduction region
-    /// may use. With [`RipsParams::collapse_edges`] set and the ordered or
-    /// rounds [`RipsParams::collapse_schedule`], the same budget also
-    /// drives the collapse. One pool serves the whole pipeline. The
-    /// diagram is identical at any thread count.
+    /// Worker threads for the run. 0 and 1 (the default) both run the
+    /// serial engine. Higher values reduce each dimension concurrently.
+    /// With [`RipsParams::collapse_edges`] set and the ordered or rounds
+    /// [`RipsParams::collapse_schedule`], `threads` is the budget for the
+    /// whole pipeline. The diagram is identical at any thread count.
     pub threads: usize,
     /// Optimization toggle. The diagram is identical with any combination
     /// disabled. For differential testing only.
@@ -119,23 +295,29 @@ pub struct RipsParams {
     /// The diagram is identical either way. See [`collapse`].
     pub collapse_edges: bool,
     /// The schedule the collapse uses with `collapse_edges` set. Default
-    /// [`CollapseSchedule::Serial`]. The diagram is identical under every
-    /// schedule.
+    /// [`CollapseSchedule::Serial`]. See [`CollapseSchedule`].
     pub collapse_schedule: CollapseSchedule,
-    /// Which engine reduces a dense input. Default [`Engine::Auto`]. The
-    /// diagram is identical under every setting. See [`Engine`].
+    /// Objective and deterministic work limit for
+    /// [`CollapseSchedule::Adaptive`]. Other schedules ignore this field.
+    pub adaptive_collapse: collapse::AdaptiveCollapseParams,
+    /// Which engine reduces a dense input. Default [`Engine::Auto`]. See
+    /// [`Engine`].
     pub engine: Engine,
     /// Which storage form the dense engine reduces from. Default
-    /// [`DenseStorage::Auto`]. The diagram is identical under every
-    /// setting. See [`DenseStorage`].
+    /// [`DenseStorage::Auto`]. See [`DenseStorage`].
     pub dense_storage: DenseStorage,
+    /// Structural decomposition of a sparse terminal graph. Default
+    /// [`GraphFactorization::Off`]. Dense runs use it only after routing to
+    /// the sparse engine. See [`GraphFactorization`].
+    pub factorization: GraphFactorization,
 }
 
 /// Which engine reduces a dense input.
 ///
 /// A dense matrix can be reduced as it stands, or converted to the graph
 /// of its edges at the threshold and reduced by the sparse engine. The
-/// sparse enumerator walks a neighbor list; the dense one scans every
+/// second is faster when few pairs are edges, because the sparse
+/// enumerator walks a neighbor list where the dense one scans every
 /// vertex. `Auto` picks between them from the edge density at the resolved
 /// threshold and from the memory the conversion would take; `Dense` and
 /// `Sparse` force one.
@@ -143,10 +325,9 @@ pub struct RipsParams {
 /// The diagram is identical under all three, bit for bit. Every simplex of
 /// the complex has diameter at most the threshold, and a diameter is the
 /// largest of the edge lengths, so every edge of every simplex survives
-/// the conversion; conversely the conversion keeps only edges at or below
-/// the threshold. The two complexes are therefore equal simplex for
-/// simplex with equal diameters, and the vertex set carries over because
-/// the conversion passes the point count explicitly.
+/// the conversion. The conversion keeps only edges at or below the
+/// threshold. The vertex set carries over because the conversion passes
+/// the point count explicitly.
 ///
 /// An infinite threshold reads as `f64::MAX` in both engines. An absent
 /// pair has distance `+inf`, so it enters neither complex, and the
@@ -156,24 +337,24 @@ pub struct RipsParams {
 /// engineering data. Performance assessment is WIP.
 ///
 /// A sparse input is never routed, so this setting does not reach
-/// [`rips_persistence_sparse`]. It also does not reach the collapse
-/// pipeline: with [`RipsParams::collapse_edges`] set, the collapse
-/// produces a graph and the sparse engine reduces it.
+/// [`rips_persistence_sparse`]. With [`RipsParams::collapse_edges`] set,
+/// the collapse already produces a graph and the sparse engine reduces it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Engine {
     /// Reduce a low-density dense input with the sparse engine, and every
-    /// other dense input with the dense engine. The rule is frozen and
-    /// takes no argument. It also applies a memory budget to the
-    /// conversion: 32 MiB, or the bytes of the compact matrix, whichever
-    /// is larger. A matrix of mostly absent pairs is low-density at any
-    /// threshold, including an infinite one, so it routes too.
+    /// other dense input with the dense engine. The rule takes no argument.
+    /// The conversion has a memory budget: 32 MiB, or the bytes of the
+    /// compact matrix, whichever is larger. A matrix of mostly absent
+    /// pairs is low-density at any threshold, including an infinite one,
+    /// so it routes too.
     #[default]
     Auto,
     /// Always reduce the distance matrix as it stands.
     Dense,
-    /// Always convert to the thresholded graph and reduce that. This is an
-    /// explicit request, so the `Auto` memory budget does not apply.
+    /// Always convert to the thresholded graph and reduce that. The
+    /// conversion costs one pass over the matrix. This is an explicit
+    /// request, so the `Auto` memory budget does not apply.
     Sparse,
 }
 
@@ -198,14 +379,10 @@ pub enum Engine {
 /// holds `n * n + n(n-1)/2` entries: one and a half times the full form,
 /// three times the compact one.
 ///
-/// The diagram is identical under all three, bit for bit. The two forms
-/// hold the same distances. Performance and peak-memory assessment are
-/// WIP.
+/// The diagram is identical under all three, bit for bit.
 ///
 /// A sparse input holds no distance matrix, so this setting does not reach
-/// [`rips_persistence_sparse`]. It also does not reach the collapse
-/// pipeline: with [`RipsParams::collapse_edges`] set, the collapse
-/// produces a graph and the sparse engine reduces it.
+/// [`rips_persistence_sparse`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum DenseStorage {
@@ -221,6 +398,30 @@ pub enum DenseStorage {
     Square,
 }
 
+/// Structural routing for positive-dimensional sparse persistence.
+///
+/// Every terminal edge belongs to one vertex-biconnected block. Every
+/// terminal clique with at least two vertices lies in one such block, and
+/// every positive-dimensional cycle splits over the blocks. The engine can
+/// therefore compute H0 once on the whole graph and compute H1 and above on
+/// the cyclic blocks independently.
+///
+/// The diagram is identical under every setting. The automatic rule uses
+/// factorization only when there are at least two cyclic blocks and the
+/// largest holds at most nine tenths of their edges. A graph with one
+/// dominant block stays on the existing reducer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum GraphFactorization {
+    /// Use the frozen structural rule.
+    Auto,
+    /// Reduce the whole terminal graph.
+    #[default]
+    Off,
+    /// Split every terminal graph.
+    Force,
+}
+
 /// The collapse the pipeline runs with [`RipsParams::collapse_edges`] set.
 ///
 /// Every schedule gives the same diagram. `Serial` is the default and, in
@@ -234,7 +435,7 @@ pub enum DenseStorage {
 #[non_exhaustive]
 pub enum CollapseSchedule {
     /// The serial schedule on one worker. It writes an algorithm
-    /// version 1 certificate. The reduction still uses the whole worker
+    /// version 1 certificate. The reduction still uses the whole thread
     /// budget.
     #[default]
     Serial,
@@ -245,6 +446,11 @@ pub enum CollapseSchedule {
     /// algorithm version 2 certificate and gives the same result at every
     /// worker count, but not the serial result.
     Rounds,
+    /// The adaptive version 3 schedule. It ranks currently valid removals
+    /// by estimated downstream H1 or H2 work and can stop at a declared
+    /// work limit. It runs serially; the reduction still uses the whole
+    /// thread budget.
+    Adaptive,
 }
 
 impl Default for RipsParams {
@@ -260,15 +466,19 @@ impl Default for RipsParams {
             use_adjacency_rows: true,
             collapse_edges: false,
             collapse_schedule: CollapseSchedule::Serial,
+            adaptive_collapse: collapse::AdaptiveCollapseParams::default(),
             engine: Engine::Auto,
             dense_storage: DenseStorage::Auto,
+            factorization: GraphFactorization::Off,
         }
     }
 }
 
 impl RipsParams {
-    /// Defaults with the given `max_dim`: `threshold` is `None`, all
-    /// optimizations on.
+    /// Defaults with the given `max_dim`.
+    ///
+    /// The threshold is the input's default. Reduction shortcuts are on.
+    /// Edge collapse and structural factorization are off.
     pub fn new(max_dim: usize) -> Self {
         Self {
             max_dim,
@@ -289,8 +499,8 @@ impl RipsParams {
         self
     }
 
-    /// Set the worker budget. 1 keeps the serial engine. The diagram is
-    /// identical at any thread count.
+    /// Reduce with `threads` workers. 1 keeps the serial engine. The diagram
+    /// is identical at any thread count.
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads.max(1);
         self
@@ -304,25 +514,40 @@ impl RipsParams {
     }
 
     /// Collapse dominated edges with the given schedule before the engine
-    /// runs. Also sets [`RipsParams::collapse_edges`]. The diagram is
-    /// identical under every schedule.
+    /// runs. Also sets [`RipsParams::collapse_edges`]. See
+    /// [`CollapseSchedule`].
     pub fn with_collapse_schedule(mut self, schedule: CollapseSchedule) -> Self {
         self.collapse_edges = true;
         self.collapse_schedule = schedule;
         self
     }
 
-    /// Choose the engine for a dense input. The diagram is identical under
-    /// every setting. See [`Engine`].
+    /// Collapse with the adaptive version 3 schedule and the given
+    /// objective and work limit.
+    pub fn with_adaptive_collapse(mut self, params: collapse::AdaptiveCollapseParams) -> Self {
+        self.collapse_edges = true;
+        self.collapse_schedule = CollapseSchedule::Adaptive;
+        self.adaptive_collapse = params;
+        self
+    }
+
+    /// Choose the engine for a dense input. See [`Engine`].
     pub fn with_engine(mut self, engine: Engine) -> Self {
         self.engine = engine;
         self
     }
 
-    /// Choose the storage form the dense engine reduces from. The diagram
-    /// is identical under every setting. See [`DenseStorage`].
+    /// Choose the storage form the dense engine reduces from. See
+    /// [`DenseStorage`].
     pub fn with_dense_storage(mut self, storage: DenseStorage) -> Self {
         self.dense_storage = storage;
+        self
+    }
+
+    /// Choose structural factorization for sparse reduction. See
+    /// [`GraphFactorization`].
+    pub fn with_factorization(mut self, factorization: GraphFactorization) -> Self {
+        self.factorization = factorization;
         self
     }
 }
@@ -356,12 +581,8 @@ impl std::error::Error for Error {}
 /// Crate-wide result alias.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Smallest point count [`Engine::Auto`] routes. The conversion writes the
-/// compressed neighbor block directly, and a short reduction cannot earn
-/// that back.
-///
-/// Frozen on 2026-08-18 from disclosed engineering data. Performance
-/// assessment is WIP.
+/// Smallest point count [`Engine::Auto`] routes. The conversion costs one
+/// pass over the matrix, and a short reduction cannot earn that back.
 const N_MIN: usize = 32;
 
 /// Numerator of the highest edge density [`Engine::Auto`] routes:
@@ -370,16 +591,15 @@ const N_MIN: usize = 32;
 /// as `5 * m <= 4 * C(n, 2)` so that no rounding of `0.8` and no rounding
 /// of a large count enters the decision.
 ///
-/// Frozen with [`N_MIN`] on 2026-08-18 from the same disclosed engineering
-/// data. Above the cutoff the graph would only spend memory on edges the
-/// matrix already holds. Performance assessment is WIP.
+/// Above the cutoff the graph would only spend memory on edges the matrix
+/// already holds.
 const RHO_MAX_NUM: u128 = 4;
 
 /// Denominator of [`RHO_MAX_NUM`].
 const RHO_MAX_DEN: u128 = 5;
 
 /// The threshold a dense run applies: the caller's, or the enclosing
-/// radius, which is what the engine resolves for itself.
+/// radius.
 fn resolved_threshold(dist: &DistanceMatrix, params: &RipsParams) -> f64 {
     params.threshold.unwrap_or_else(|| dist.enclosing_radius())
 }
@@ -445,8 +665,7 @@ fn memory_routes(n: usize, edges: usize) -> bool {
 }
 
 /// True when the counted graph is worth building: its density is at or
-/// below the cutoff and its conversion fits the budget. This is the whole
-/// decision [`Engine::Auto`] makes after the counting pass.
+/// below the cutoff and its conversion fits the budget.
 fn graph_routes(n: usize, edges: usize) -> bool {
     density_routes(n, edges) && memory_routes(n, edges)
 }
@@ -458,19 +677,15 @@ fn graph_routes(n: usize, edges: usize) -> bool {
 /// the reduction are small in absolute terms, so `Auto` keeps the compact
 /// form and leaves the second triangle to a caller who asks for it.
 ///
-/// Frozen on 2026-08-18 from disclosed engineering data. Performance
-/// assessment is WIP.
+/// Frozen on 2026-08-18 from disclosed engineering data.
 const SQUARE_MIN_BYTES: u128 = 4 << 20;
 
 /// Most bytes [`DenseStorage::Auto`] adds for the full form. The full form
 /// adds `n(n+1)/2` entries, the compact matrix again plus its diagonal, so
 /// this bounds the point count as well: 8191 points.
 ///
-/// A policy bound, not a crossover. It caps what a run spends on a storage
-/// form nobody asked for. [`DenseStorage::Square`] is an explicit request
-/// and ignores it.
-///
-/// Frozen on 2026-08-18. Performance assessment is WIP.
+/// The bound caps what a run spends on a storage form nobody asked for.
+/// [`DenseStorage::Square`] is an explicit request and ignores it.
 const SQUARE_EXTRA_MAX_BYTES: u128 = 256 << 20;
 
 /// Distance reads per matrix cell the fold must make before
@@ -479,9 +694,6 @@ const SQUARE_EXTRA_MAX_BYTES: u128 = 256 << 20;
 /// is what the conversion has to earn back. The dim-0 columns supply one
 /// read per cell on their own, so the test asks the columns above them for
 /// three more.
-///
-/// Frozen on 2026-08-18 from disclosed engineering data. Performance
-/// assessment is WIP.
 const SQUARE_READS_PER_CELL: u128 = 4;
 
 /// Bytes the full form adds over the compact one: the entries above the
@@ -565,18 +777,17 @@ fn solve_thresholded(
     let sparse = dist.to_sparse_at(threshold)?;
     let mut inner = params.clone();
     inner.threshold = Some(threshold);
-    solver::compute(&sparse, &inner)
+    factorization::compute_sparse(&sparse, &inner)
 }
 
 /// Compute the Rips persistence diagram of a distance matrix.
 ///
-/// [`RipsParams::engine`] selects the engine. See [`Engine`].
-/// [`RipsParams::dense_storage`] selects the storage form of a run that
-/// stays dense. A routed run never converts the matrix, so the two
-/// decisions come in that order. See [`DenseStorage`].
+/// [`RipsParams::engine`] selects the engine. A run that stays dense then
+/// selects its storage form under [`RipsParams::dense_storage`]. A routed
+/// run never converts the matrix. See [`Engine`] and [`DenseStorage`].
 pub fn rips_persistence(dist: &DistanceMatrix, params: &RipsParams) -> Result<Diagram> {
     if params.collapse_edges {
-        return collapse_and_solve(dist, params, |_| {});
+        return collapse_and_solve(dist, params, |_| Ok(()));
     }
     // The engine resolves the same threshold, so resolving it here and
     // handing it back adds no pass over the matrix.
@@ -602,6 +813,46 @@ pub fn rips_persistence(dist: &DistanceMatrix, params: &RipsParams) -> Result<Di
     }
 }
 
+/// Compute a diagram and stable H1 classes from a dense distance matrix.
+///
+/// The explain path constructs the exact terminal graph, then uses the fixed
+/// representative profile described by
+/// [`rips_persistence_with_classes_sparse`]. The ordinary compute path keeps
+/// its dense and sparse routing choices.
+pub fn rips_persistence_with_classes(
+    dist: &DistanceMatrix,
+    params: &RipsParams,
+) -> Result<ExplainedDiagram> {
+    let threshold = resolved_threshold(dist, params);
+    if params.collapse_edges {
+        return dense_collapsed_classes(dist, params);
+    }
+    let sparse = dist.to_sparse_at(threshold)?;
+    let mut fixed = params.clone();
+    fixed.threshold = Some(threshold);
+    classes::rips_persistence_with_classes_sparse(&sparse, &fixed)
+}
+
+fn dense_collapsed_classes(dist: &DistanceMatrix, params: &RipsParams) -> Result<ExplainedDiagram> {
+    let collapsed = match params.collapse_schedule {
+        CollapseSchedule::Serial => collapse::collapse_dense(dist, params.threshold)?,
+        CollapseSchedule::Ordered => {
+            collapse::collapse_dense_ordered_parallel(dist, params.threshold, params.threads)?
+        }
+        CollapseSchedule::Rounds => {
+            collapse::collapse_dense_rounds_parallel(dist, params.threshold, params.threads)?
+        }
+        CollapseSchedule::Adaptive => {
+            collapse::collapse_dense_adaptive(dist, params.threshold, params.adaptive_collapse)?
+        }
+    };
+    let mut inner = params.clone();
+    inner.collapse_edges = false;
+    inner.threshold = Some(collapsed.certificate.terminal_level());
+    let explained = classes::rips_persistence_with_classes_sparse(&collapsed.matrix, &inner)?;
+    classes::lift_h1_classes(&collapsed, explained)
+}
+
 /// Compute the Rips persistence diagram of a sparse distance matrix.
 ///
 /// Pairs not listed in the input are absent at every scale. With no
@@ -611,57 +862,103 @@ pub fn rips_persistence_sparse(
     params: &RipsParams,
 ) -> Result<Diagram> {
     if params.collapse_edges {
-        return collapse_and_solve(dist, params, |_| {});
+        return collapse_and_solve(dist, params, |_| Ok(()));
     }
-    solver::compute(dist, params)
+    factorization::compute_sparse(dist, params)
 }
 
 /// The collapse pipeline behind [`rips_persistence`]. One run-wide pool
-/// serves the selected collapse and then the reduction. The serial
+/// covers the selected collapse and then the reduction. The serial
 /// schedule collapses before the pool exists, so the pool goes to the
 /// reduction alone. Every surviving edge lies at or below the terminal
 /// level, so the terminal level is the exact threshold for the reduced
 /// complex. `report` sees the collapse result before the reduction
-/// starts. The CLI prints its statistics from that callback, without a
-/// second pool.
+/// starts.
 pub(crate) fn collapse_and_solve<D: distances::Distances + Sync>(
     dist: &D,
     params: &RipsParams,
-    report: impl FnOnce(&collapse::CollapsedRips),
+    report: impl FnOnce(&collapse::CollapsedRips) -> Result<()>,
 ) -> Result<Diagram> {
-    let build_pool = || -> Result<Option<rayon::ThreadPool>> {
-        if params.threads > 1 {
-            Ok(Some(
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(params.threads)
-                    .build()
-                    .map_err(|e| Error::Io(format!("thread pool: {e}")))?,
-            ))
-        } else {
-            Ok(None)
-        }
-    };
-    let (collapsed, pool) = match params.collapse_schedule {
-        CollapseSchedule::Serial => {
-            let collapsed = collapse::collapse_serial_in(dist, params.threshold)?;
-            (collapsed, build_pool()?)
-        }
-        CollapseSchedule::Ordered => {
-            let pool = build_pool()?;
-            let collapsed = collapse::collapse_ordered_in(dist, params.threshold, pool.as_ref())?;
-            (collapsed, pool)
-        }
-        CollapseSchedule::Rounds => {
-            let pool = build_pool()?;
-            let collapsed = collapse::collapse_rounds_in(dist, params.threshold, pool.as_ref())?;
-            (collapsed, pool)
-        }
-    };
-    report(&collapsed);
+    let (collapsed, pool) = execute_collapse(dist, params)?;
+    report(&collapsed)?;
+    solve_collapsed(collapsed, pool, params)
+}
+
+fn collapse_pool(threads: usize) -> Result<Option<rayon::ThreadPool>> {
+    if threads <= 1 {
+        return Ok(None);
+    }
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map(Some)
+        .map_err(|error| Error::Io(format!("thread pool: {error}")))
+}
+
+fn execute_collapse<D: distances::Distances + Sync>(
+    dist: &D,
+    params: &RipsParams,
+) -> Result<(collapse::CollapsedRips, Option<rayon::ThreadPool>)> {
+    match params.collapse_schedule {
+        CollapseSchedule::Serial => collapse_serial_run(dist, params),
+        CollapseSchedule::Ordered => collapse_ordered_run(dist, params),
+        CollapseSchedule::Rounds => collapse_rounds_run(dist, params),
+        CollapseSchedule::Adaptive => collapse_adaptive_run(dist, params),
+    }
+}
+
+fn collapse_serial_run<D: distances::Distances>(
+    dist: &D,
+    params: &RipsParams,
+) -> Result<(collapse::CollapsedRips, Option<rayon::ThreadPool>)> {
+    Ok((
+        collapse::collapse_serial_in(dist, params.threshold)?,
+        collapse_pool(params.threads)?,
+    ))
+}
+
+fn collapse_ordered_run<D: distances::Distances + Sync>(
+    dist: &D,
+    params: &RipsParams,
+) -> Result<(collapse::CollapsedRips, Option<rayon::ThreadPool>)> {
+    let pool = collapse_pool(params.threads)?;
+    let collapsed = collapse::collapse_ordered_in(dist, params.threshold, pool.as_ref())?;
+    Ok((collapsed, pool))
+}
+
+fn collapse_rounds_run<D: distances::Distances + Sync>(
+    dist: &D,
+    params: &RipsParams,
+) -> Result<(collapse::CollapsedRips, Option<rayon::ThreadPool>)> {
+    let pool = collapse_pool(params.threads)?;
+    let collapsed = collapse::collapse_rounds_in(dist, params.threshold, pool.as_ref())?;
+    Ok((collapsed, pool))
+}
+
+fn collapse_adaptive_run<D: distances::Distances>(
+    dist: &D,
+    params: &RipsParams,
+) -> Result<(collapse::CollapsedRips, Option<rayon::ThreadPool>)> {
+    Ok((
+        collapse::collapse_adaptive_in(dist, params.threshold, params.adaptive_collapse)?,
+        collapse_pool(params.threads)?,
+    ))
+}
+
+fn solve_collapsed(
+    collapsed: collapse::CollapsedRips,
+    pool: Option<rayon::ThreadPool>,
+    params: &RipsParams,
+) -> Result<Diagram> {
     let mut inner = params.clone();
     inner.collapse_edges = false;
     inner.threshold = Some(collapsed.certificate.terminal_level());
-    solver::compute_in(&collapsed.matrix, &inner, pool)
+    if inner.factorization == GraphFactorization::Off {
+        solver::compute_in(&collapsed.matrix, &inner, pool)
+    } else {
+        drop(pool);
+        factorization::compute_sparse(&collapsed.matrix, &inner)
+    }
 }
 
 #[cfg(test)]
@@ -1007,19 +1304,23 @@ mod tests {
             CollapseSchedule::Serial,
             CollapseSchedule::Ordered,
             CollapseSchedule::Rounds,
+            CollapseSchedule::Adaptive,
         ] {
             let params = RipsParams::new(2)
                 .with_threads(4)
                 .with_collapse_schedule(schedule);
             let mut captured = None;
-            let diagram =
-                collapse_and_solve(&dist, &params, |c| captured = Some(c.clone())).unwrap();
+            let diagram = collapse_and_solve(&dist, &params, |c| {
+                captured = Some(c.clone());
+                Ok(())
+            })
+            .unwrap();
             let captured = captured.expect("report must see the collapse");
             verify_dense(&dist, None, &captured).unwrap();
-            let expected_version = if schedule == CollapseSchedule::Rounds {
-                2
-            } else {
-                1
+            let expected_version = match schedule {
+                CollapseSchedule::Serial | CollapseSchedule::Ordered => 1,
+                CollapseSchedule::Rounds => 2,
+                CollapseSchedule::Adaptive => 3,
             };
             assert_eq!(captured.certificate.algorithm_version(), expected_version);
             let mut a = diagram.clone();

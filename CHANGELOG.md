@@ -4,6 +4,44 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-29
+
+### Added
+
+- Finite collapse portfolios select the exact minimum over declared serial,
+  rounds, and adaptive schedules by edge or reduction-column count.
+- Explicit filtered-complex certificates record dimension-generic
+  `D V = R` factorizations. The separate checker rebuilds the diagram.
+- Persistence atlases, immutable indexes, atomic patches, proof deltas, and
+  local durable streams support checked reuse and updates.
+- Canonical cohomology spaces, affine event schedules, kinetic zigzags, and
+  weighted interventions track named classes through change.
+- Proof trees certify weighted topology synthesis over finite or complete
+  affine state schedules.
+- Relative interfaces compose filtered pieces across protected subcomplexes.
+- Failure-tolerant coverage synthesis can bind graph claims to exact planar
+  radius geometry over binary64 input.
+- Rust, CLI, Python, and `holos-check` entry points expose these workflows.
+- A consolidated study and the `formal/v07` suite cover their proof kernels.
+
+### Changed
+
+- The workspace uses Rust edition 2024 and declares Rust 1.85 as its minimum
+  supported toolchain.
+- Public APIs now center on filtered complexes, proof artifacts, immutable
+  indexes, and typed synthesis specifications. Experimental pre-1.0 APIs are
+  not source compatible.
+- The v0.7 certified-workflow study replaces historical one-release drivers.
+
+### Correctness and limits
+
+- `holos-tda-check` does not link the producer. Collapse artifacts still use
+  the linked collapse verifier.
+- The SMT suite checks logical kernels, not the compiled Rust implementation.
+- Portfolio optimality covers only the declared schedules. Geometry binding
+  covers finite planar states. SHA-256 does not authenticate a producer.
+- The new workflows make no general performance or priority claim.
+
 ## [0.6.0] - 2026-08-26
 
 ### Performance
@@ -495,6 +533,9 @@ First public release.
 - Reproducible benchmark harness (`benchmarks/run.sh`) that refuses dirty
   trees, records full provenance, and fails on any diagram mismatch.
 
+[Unreleased]: https://github.com/t0rsion/holos/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/t0rsion/holos/releases/tag/v0.7.0
+[0.6.0]: https://github.com/t0rsion/holos/releases/tag/v0.6.0
 [0.5.0]: https://github.com/t0rsion/holos/releases/tag/v0.5.0
 [0.4.0]: https://github.com/t0rsion/holos/releases/tag/v0.4.0
 [0.3.1]: https://github.com/t0rsion/holos/releases/tag/v0.3.1

@@ -4,7 +4,7 @@
 use std::f64::consts::PI;
 
 use holos_tda::oracle::rips_persistence_oracle;
-use holos_tda::{rips_persistence, Bar, Diagram, DistanceMatrix, RipsParams};
+use holos_tda::{Bar, Diagram, DistanceMatrix, RipsParams, rips_persistence};
 
 struct Rng(u64);
 
@@ -127,7 +127,7 @@ fn two_disjoint_circles_have_two_components_and_two_loops() {
 #[test]
 fn circle_betti_numbers_at_prescribed_thresholds() {
     // 20 points on the unit circle: pairwise distances are 2 sin(pi k / 20),
-    // k = 1..10, i.e. 0.3129, 0.6180, 0.9080, 1.1756, ... The single H1
+    // k = 1..10: 0.3129, 0.6180, 0.9080, 1.1756, ... The single H1
     // class is born with the k=1 edges and dies at 2 sin(7 pi/20) = 1.7820.
     // Steps up to 6 of 20 still yield a circle; 7/20 >= 1/3 fills it.
     // The probe values sit in the open gaps between those scales.
@@ -179,11 +179,13 @@ fn figure_eight_has_two_long_h1_classes() {
 fn sphere_sample_has_one_dominant_h2_class() {
     let mut rng = Rng::new(2);
     let points: Vec<Vec<f64>> = (0..30)
-        .map(|_| loop {
-            let g = [rng.gaussian(), rng.gaussian(), rng.gaussian()];
-            let norm = g.iter().map(|x| x * x).sum::<f64>().sqrt();
-            if norm > 1e-3 {
-                break g.iter().map(|x| x / norm).collect();
+        .map(|_| {
+            loop {
+                let g = [rng.gaussian(), rng.gaussian(), rng.gaussian()];
+                let norm = g.iter().map(|x| x * x).sum::<f64>().sqrt();
+                if norm > 1e-3 {
+                    break g.iter().map(|x| x / norm).collect();
+                }
             }
         })
         .collect();

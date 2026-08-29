@@ -3,11 +3,11 @@
 //!
 //! Workers test windows of due edges in parallel against a frozen graph
 //! state. The retirement walk then commits them strictly in the serial
-//! order: it reuses a cached verdict only when no removal committed since
-//! the test conflicts with it, and recomputes an invalidated verdict once
-//! against the current graph. Every worker count therefore produces the
-//! serial matrix and certificate, field for field, floats bit for bit.
-//! Only the work counters and the timings depend on the window and
+//! order. It reuses a cached verdict only when no later committed
+//! removal conflicts with the test. It recomputes an invalidated verdict
+//! once against the current graph. Every worker count therefore produces
+//! the serial matrix and certificate, field for field, floats bit for
+//! bit. Only the work counters and the timings depend on the window and
 //! worker configuration.
 
 use std::time::{Duration, Instant};
@@ -15,8 +15,9 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 
 use super::{
-    build_pool, finish, mark_dirty, prepare, test_edge, tombstone, CollapseStats, CollapseTimings,
-    CollapsedRips, Execution, Prepared, RemovalStep, Scratch,
+    AdjEntry, CollapseStats, CollapseTimings, CollapsedRips, EdgeRec, Execution, Prepared,
+    RemovalStep, Run, SchedulePosition, Scratch, build_pool, finish, mark_dirty, prepare,
+    test_edge, tombstone,
 };
 use crate::distances::Distances;
 use crate::{DistanceMatrix, Result, SparseDistanceMatrix};
@@ -45,14 +46,10 @@ fn nanos(d: Duration) -> u64 {
     u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
 }
 
-/// Run the ordered schedule on a dense distance matrix.
+/// Collapse a dense distance matrix with the ordered schedule.
 ///
-/// Workers test a window of due edges in parallel, then the run retires
-/// them in serial order. `threshold` follows the engine's rule: `None`
-/// means the enclosing radius. The output equals the output of
-/// [`super::collapse_dense`] at any `threads`; 0 and 1 run the serial
-/// implementation. A standalone call owns its thread pool for the
-/// duration.
+/// The output equals [`super::collapse_dense`] at any `threads`. 0 and 1
+/// run the serial implementation. A standalone call owns its thread pool.
 pub fn collapse_dense_ordered_parallel(
     dist: &DistanceMatrix,
     threshold: Option<f64>,
@@ -61,9 +58,9 @@ pub fn collapse_dense_ordered_parallel(
     collapse_ordered_owned(dist, threshold, threads, None)
 }
 
-/// Run the ordered schedule on a sparse distance matrix.
+/// Collapse a sparse distance matrix with the ordered schedule.
 ///
-/// Same contract as [`collapse_dense_ordered_parallel`]; `None` keeps
+/// Same contract as [`collapse_dense_ordered_parallel`]. `None` keeps
 /// every listed edge.
 pub fn collapse_sparse_ordered_parallel(
     dist: &SparseDistanceMatrix,
@@ -73,11 +70,11 @@ pub fn collapse_sparse_ordered_parallel(
     collapse_ordered_owned(dist, threshold, threads, None)
 }
 
-/// Run the ordered schedule on a dense distance matrix with a forced
+/// Collapse a dense distance matrix with the ordered schedule and a forced
 /// window size.
 ///
 /// Hidden and unstable. It exists for the invariance gates, which cross
-/// worker counts with window sizes; the window is not public API and no
+/// worker counts with window sizes. The window is not public API and no
 /// output field depends on it. A `window` of 0 becomes 1.
 #[doc(hidden)]
 pub fn collapse_dense_ordered_with_window(
@@ -89,7 +86,7 @@ pub fn collapse_dense_ordered_with_window(
     collapse_ordered_owned(dist, threshold, threads, Some(window.max(1)))
 }
 
-/// Run the ordered schedule on a sparse distance matrix with a forced
+/// Collapse a sparse distance matrix with the ordered schedule and a forced
 /// window size.
 ///
 /// Same contract as [`collapse_dense_ordered_with_window`]: hidden,
@@ -140,10 +137,9 @@ pub(crate) fn collapse_ordered_in<D: Distances + Sync>(
     }
 }
 
-/// The serial schedule, used when the ordered schedule has nothing to
-/// speculate on. Its logical trace is its own test sequence, so the
-/// logical count is the physical count. The run has no stages, so window
-/// counters stay at zero and timings are the serial defaults.
+/// The serial version 1 run, reported as an ordered run. Its logical
+/// trace is its own test sequence, so the logical count is the physical
+/// count. Window counters stay at zero.
 fn serial<D: Distances>(dist: &D, threshold: Option<f64>) -> Result<CollapsedRips> {
     super::collapse_impl(dist, threshold)
 }
@@ -154,209 +150,293 @@ fn serial<D: Distances>(dist: &D, threshold: Option<f64>) -> Result<CollapsedRip
 /// positions from the cursor without touching a dirty flag. TEST
 /// evaluates the predicate for every member against the frozen graph.
 /// RETIRE walks every position of the window span in schedule order and
-/// commits it exactly as the serial schedule would, reusing a member's
-/// cached verdict when no earlier removal of this stage conflicts with it.
+/// commits it exactly as version 1 would, reusing a member's cached
+/// verdict when no earlier removal of this stage conflicts with it.
 fn collapse_ordered_core<D: Distances + Sync>(
     dist: &D,
     threshold: Option<f64>,
     pool: Option<&rayon::ThreadPool>,
     window: usize,
 ) -> Result<CollapsedRips> {
-    let Prepared {
-        mut edges,
-        mut adj,
-        run,
-    } = prepare(dist, threshold)?;
-    let window = window.max(1);
+    OrderedExecution::new(prepare(dist, threshold)?).run(pool, window.max(1))
+}
 
-    let mut stats = CollapseStats::new(edges.len());
-    let mut steps: Vec<RemovalStep> = Vec::new();
-    let mut scratch = Scratch::default();
-    // Same pruning contract as the serial schedule: a pass tests the
-    // edges the previous removals marked dirty, or every live edge after
-    // a removal whose neighborhood was too large to mark finely.
-    let mut dirty: Vec<bool> = vec![false; edges.len()];
-    let mut test_all = true;
-    let mut members: Vec<usize> = Vec::new();
-    let mut stale: Vec<bool> = Vec::new();
-    let mut predicate_time = Duration::ZERO;
-    let mut retirement_time = Duration::ZERO;
-    let mut repair_time = Duration::ZERO;
-    loop {
-        stats.epochs += 1;
-        let mut removed_any = false;
-        let mut test_all_next = false;
-        let mut c = 0usize;
-        while c < edges.len() {
-            // FORM leaves dirty flags as they are: a member is due because
-            // its flag is set, and only its own retirement may clear it.
-            members.clear();
-            let mut scan = c;
-            while scan < edges.len() && members.len() < window {
-                if edges[scan].alive && (test_all || dirty[scan]) {
-                    members.push(scan);
-                }
-                scan += 1;
-            }
-            // No due position remains ahead: the pass ends here.
-            let Some(&last) = members.last() else {
-                break;
-            };
-            stats.window_batches += 1;
-            stats.window_slots_offered = stats.window_slots_offered.saturating_add(window);
-            stats.window_members_formed += members.len();
+struct SpeculativeStage {
+    members: Vec<usize>,
+    cached: Vec<(Option<Witnesses>, usize)>,
+    stale: Vec<bool>,
+    last: usize,
+}
 
-            // TEST is read-only against the frozen graph. Results collect
-            // in member order, so the worker count cannot reach the output.
-            stats.edge_tests += members.len();
-            let predicate_start = Instant::now();
-            let mut cached: Vec<(Option<Witnesses>, usize)> = match pool {
-                Some(pool) => pool.install(|| {
-                    members
-                        .par_iter()
-                        .map_init(Scratch::default, |s, &idx| {
-                            let e = &edges[idx];
-                            let w = test_edge(&adj, e.u, e.v, e.value, run.terminal, s);
-                            (w, s.cands.len())
-                        })
-                        .collect()
-                }),
-                None => members
-                    .iter()
-                    .map(|&idx| {
-                        let e = &edges[idx];
-                        let w = test_edge(&adj, e.u, e.v, e.value, run.terminal, &mut scratch);
-                        (w, scratch.cands.len())
-                    })
-                    .collect(),
-            };
-            predicate_time += predicate_start.elapsed();
-            for &(_, k) in &cached {
-                stats.max_common_neighborhood = stats.max_common_neighborhood.max(k);
-            }
-            stale.clear();
-            stale.resize(members.len(), false);
+struct OrderedExecution {
+    edges: Vec<EdgeRec>,
+    adj: Vec<Vec<AdjEntry>>,
+    run: Run,
+    stats: CollapseStats,
+    steps: Vec<RemovalStep>,
+    scratch: Scratch,
+    dirty: Vec<bool>,
+    test_all: bool,
+    predicate_time: Duration,
+    retirement_time: Duration,
+    repair_time: Duration,
+}
 
-            // RETIRE walks every position of the span in schedule order,
-            // with the serial schedule's state at each step: the graph,
-            // the dirty flags, `test_all`, and the pass number.
-            let retirement_start = Instant::now();
-            let mut next = 0usize;
-            for j in c..=last {
-                let slot = if next < members.len() && members[next] == j {
-                    next += 1;
-                    Some(next - 1)
-                } else {
-                    None
-                };
-                // A removal clears only its own `alive` flag, and RETIRE
-                // clears a dirty flag only at the position it retires, so
-                // a member is still alive and still due at its turn. A
-                // non-member here was armed after FORM.
-                if !edges[j].alive || !(test_all || dirty[j]) {
-                    continue;
-                }
-                stats.logical_tests += 1;
-                dirty[j] = false;
-                let (u, v, value) = (edges[j].u, edges[j].v, edges[j].value);
-                let witnesses = match slot.filter(|&k| !stale[k]) {
-                    Some(k) => {
-                        stats.window_members_reused += 1;
-                        cached[k].0.take()
-                    }
-                    None => {
-                        stats.edge_tests += 1;
-                        // A non-member here was armed after FORM, so its
-                        // serial test repairs nothing. Every stale member
-                        // comes through here, so `invalidated_results` is
-                        // also the repair count.
-                        let repairing = slot.is_some();
-                        let repair_start = repairing.then(Instant::now);
-                        let w = test_edge(&adj, u, v, value, run.terminal, &mut scratch);
-                        if let Some(start) = repair_start {
-                            repair_time += start.elapsed();
-                        }
-                        stats.max_common_neighborhood =
-                            stats.max_common_neighborhood.max(scratch.cands.len());
-                        w
-                    }
-                };
-                let Some(witnesses) = witnesses else {
-                    continue;
-                };
-                edges[j].alive = false;
-                if mark_dirty(&adj, &mut dirty, u, v, &mut scratch) {
-                    // Staleness cannot be read back from `dirty`: a member
-                    // still ahead has had its flag set since FORM, so a
-                    // set flag says nothing about this removal. A true
-                    // return leaves `marks` holding exactly the sorted S
-                    // that the marking walked, against this same
-                    // pre-tombstone graph, so the stale set is read from
-                    // there. Both false returns leave it unusable and take
-                    // the branch below.
-                    let set = &scratch.marks;
-                    for (k, &pos) in members.iter().enumerate().skip(next) {
-                        if stale[k] {
-                            continue;
-                        }
-                        let m = &edges[pos];
-                        if set.binary_search(&m.u).is_ok() && set.binary_search(&m.v).is_ok() {
-                            stale[k] = true;
-                            stats.invalidated_results += 1;
-                        }
-                    }
-                } else {
-                    // The marking bailed and left no usable set behind, so
-                    // the conflict set is unknown: every cached result
-                    // still ahead goes.
-                    test_all_next = true;
-                    let mut dropped = 0usize;
-                    for st in stale.iter_mut().skip(next) {
-                        if !*st {
-                            *st = true;
-                            dropped += 1;
-                        }
-                    }
-                    if dropped > 0 {
-                        stats.global_invalidations += 1;
-                        stats.invalidated_results += dropped;
-                    }
-                }
-                tombstone(&mut adj, u, v);
-                stats.witness_segments += witnesses.len();
-                steps.push(RemovalStep {
-                    u,
-                    v,
-                    value,
-                    epoch: stats.epochs,
-                    witnesses,
-                });
-                removed_any = true;
-            }
-            retirement_time += retirement_start.elapsed();
-            // The cursor stops after the last member, not where the FORM
-            // scan stopped: a position the scan passed over may have been
-            // armed during RETIRE, and the next stage must see it.
-            c = last + 1;
+impl OrderedExecution {
+    fn new(prepared: Prepared) -> Self {
+        let edge_count = prepared.edges.len();
+        Self {
+            edges: prepared.edges,
+            adj: prepared.adj,
+            run: prepared.run,
+            stats: CollapseStats::new(edge_count),
+            steps: Vec::new(),
+            scratch: Scratch::default(),
+            dirty: vec![false; edge_count],
+            test_all: true,
+            predicate_time: Duration::ZERO,
+            retirement_time: Duration::ZERO,
+            repair_time: Duration::ZERO,
         }
-        if !removed_any {
-            break;
-        }
-        test_all = test_all_next;
     }
 
-    let timings = CollapseTimings {
-        predicate_ns: nanos(predicate_time),
-        retirement_ns: nanos(retirement_time),
-        repair_ns: nanos(repair_time),
-    };
-    finish(run, Execution::Ordered, &edges, steps, stats, timings)
+    fn run(mut self, pool: Option<&rayon::ThreadPool>, window: usize) -> Result<CollapsedRips> {
+        while self.run_pass(pool, window) {}
+        let timings = CollapseTimings {
+            predicate_ns: nanos(self.predicate_time),
+            retirement_ns: nanos(self.retirement_time),
+            repair_ns: nanos(self.repair_time),
+        };
+        finish(
+            self.run,
+            Execution::Ordered,
+            &self.edges,
+            self.steps,
+            self.stats,
+            timings,
+        )
+    }
+
+    fn run_pass(&mut self, pool: Option<&rayon::ThreadPool>, window: usize) -> bool {
+        self.stats.epochs += 1;
+        let mut removed_any = false;
+        let mut test_all_next = false;
+        let mut cursor = 0usize;
+        while let Some(mut stage) = self.form_stage(cursor, window) {
+            self.test_stage(pool, &mut stage);
+            removed_any |= self.retire_stage(cursor, &mut stage, &mut test_all_next);
+            // Retirement can arm a position scanned during formation. The
+            // next stage therefore starts after the last member, not after
+            // the formation scan.
+            cursor = stage.last + 1;
+        }
+        self.test_all = test_all_next;
+        removed_any
+    }
+
+    fn form_stage(&mut self, cursor: usize, window: usize) -> Option<SpeculativeStage> {
+        let mut members = Vec::with_capacity(window);
+        let mut scan = cursor;
+        while scan < self.edges.len() && members.len() < window {
+            if self.edges[scan].alive && (self.test_all || self.dirty[scan]) {
+                members.push(scan);
+            }
+            scan += 1;
+        }
+        let last = members.last().copied()?;
+        self.stats.window_batches += 1;
+        self.stats.window_slots_offered = self.stats.window_slots_offered.saturating_add(window);
+        self.stats.window_members_formed += members.len();
+        Some(SpeculativeStage {
+            stale: vec![false; members.len()],
+            members,
+            cached: Vec::new(),
+            last,
+        })
+    }
+
+    fn test_stage(&mut self, pool: Option<&rayon::ThreadPool>, stage: &mut SpeculativeStage) {
+        self.stats.edge_tests += stage.members.len();
+        let started = Instant::now();
+        stage.cached = match pool {
+            Some(pool) => pool.install(|| {
+                stage
+                    .members
+                    .par_iter()
+                    .map_init(Scratch::default, |scratch, &index| {
+                        let edge = &self.edges[index];
+                        let witnesses = test_edge(
+                            &self.adj,
+                            edge.u,
+                            edge.v,
+                            edge.value,
+                            self.run.terminal,
+                            scratch,
+                        );
+                        (witnesses, scratch.cands.len())
+                    })
+                    .collect()
+            }),
+            None => stage
+                .members
+                .iter()
+                .map(|&index| {
+                    let edge = &self.edges[index];
+                    let witnesses = test_edge(
+                        &self.adj,
+                        edge.u,
+                        edge.v,
+                        edge.value,
+                        self.run.terminal,
+                        &mut self.scratch,
+                    );
+                    (witnesses, self.scratch.cands.len())
+                })
+                .collect(),
+        };
+        self.predicate_time += started.elapsed();
+        for &(_, size) in &stage.cached {
+            self.stats.max_common_neighborhood = self.stats.max_common_neighborhood.max(size);
+        }
+    }
+
+    fn retire_stage(
+        &mut self,
+        cursor: usize,
+        stage: &mut SpeculativeStage,
+        test_all_next: &mut bool,
+    ) -> bool {
+        let started = Instant::now();
+        let mut removed_any = false;
+        let mut next_member = 0usize;
+        for position in cursor..=stage.last {
+            let slot = stage_slot(stage, position, &mut next_member);
+            removed_any |= self.retire_position(position, slot, next_member, stage, test_all_next);
+        }
+        self.retirement_time += started.elapsed();
+        removed_any
+    }
+
+    fn retire_position(
+        &mut self,
+        position: usize,
+        slot: Option<usize>,
+        next_member: usize,
+        stage: &mut SpeculativeStage,
+        test_all_next: &mut bool,
+    ) -> bool {
+        if !self.edges[position].alive || !(self.test_all || self.dirty[position]) {
+            return false;
+        }
+        self.stats.logical_tests += 1;
+        self.dirty[position] = false;
+        let edge = &self.edges[position];
+        let (u, v, value) = (edge.u, edge.v, edge.value);
+        let Some(witnesses) = self.retirement_witnesses(slot, stage, u, v, value) else {
+            return false;
+        };
+        self.edges[position].alive = false;
+        self.invalidate_stage(stage, next_member, u, v, test_all_next);
+        self.commit_removal(u, v, value, witnesses);
+        true
+    }
+
+    fn retirement_witnesses(
+        &mut self,
+        slot: Option<usize>,
+        stage: &mut SpeculativeStage,
+        u: usize,
+        v: usize,
+        value: f64,
+    ) -> Option<Witnesses> {
+        if let Some(index) = slot.filter(|&index| !stage.stale[index]) {
+            self.stats.window_members_reused += 1;
+            return stage.cached[index].0.take();
+        }
+        self.stats.edge_tests += 1;
+        let started = slot.is_some().then(Instant::now);
+        let witnesses = test_edge(&self.adj, u, v, value, self.run.terminal, &mut self.scratch);
+        if let Some(started) = started {
+            self.repair_time += started.elapsed();
+        }
+        self.stats.max_common_neighborhood = self
+            .stats
+            .max_common_neighborhood
+            .max(self.scratch.cands.len());
+        witnesses
+    }
+
+    fn invalidate_stage(
+        &mut self,
+        stage: &mut SpeculativeStage,
+        next_member: usize,
+        u: usize,
+        v: usize,
+        test_all_next: &mut bool,
+    ) {
+        if mark_dirty(&self.adj, &mut self.dirty, u, v, &mut self.scratch) {
+            self.invalidate_conflicts(stage, next_member);
+        } else {
+            *test_all_next = true;
+            self.invalidate_remaining(stage, next_member);
+        }
+    }
+
+    fn invalidate_conflicts(&mut self, stage: &mut SpeculativeStage, next_member: usize) {
+        for (index, &position) in stage.members.iter().enumerate().skip(next_member) {
+            if stage.stale[index] {
+                continue;
+            }
+            let edge = &self.edges[position];
+            let conflict = self.scratch.marks.binary_search(&edge.u).is_ok()
+                && self.scratch.marks.binary_search(&edge.v).is_ok();
+            if conflict {
+                stage.stale[index] = true;
+                self.stats.invalidated_results += 1;
+            }
+        }
+    }
+
+    fn invalidate_remaining(&mut self, stage: &mut SpeculativeStage, next_member: usize) {
+        let mut dropped = 0usize;
+        for stale in stage.stale.iter_mut().skip(next_member) {
+            if !*stale {
+                *stale = true;
+                dropped += 1;
+            }
+        }
+        if dropped > 0 {
+            self.stats.global_invalidations += 1;
+            self.stats.invalidated_results += dropped;
+        }
+    }
+
+    fn commit_removal(&mut self, u: usize, v: usize, value: f64, witnesses: Witnesses) {
+        tombstone(&mut self.adj, u, v);
+        self.stats.witness_segments += witnesses.len();
+        self.steps.push(RemovalStep {
+            u,
+            v,
+            value,
+            position: SchedulePosition::Pass(self.stats.epochs),
+            witnesses,
+        });
+    }
+}
+
+fn stage_slot(stage: &SpeculativeStage, position: usize, next_member: &mut usize) -> Option<usize> {
+    if *next_member < stage.members.len() && stage.members[*next_member] == position {
+        *next_member += 1;
+        Some(*next_member - 1)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collapse::{collapse_dense, collapse_sparse, CollapseCertificate};
+    use crate::collapse::{CollapseCertificate, collapse_dense, collapse_sparse};
 
     const WINDOWS: [usize; 5] = [1, 2, 8, 64, 10_000];
 
@@ -385,7 +465,7 @@ mod tests {
         for (x, y) in a.steps().iter().zip(b.steps()) {
             assert_eq!(x.edge(), y.edge(), "{label}");
             assert_eq!(x.value().to_bits(), y.value().to_bits(), "{label}");
-            assert_eq!(x.epoch(), y.epoch(), "{label}");
+            assert_eq!(x.position().number(), y.position().number(), "{label}");
             let wx: Vec<_> = x
                 .witnesses()
                 .iter()
@@ -560,8 +640,8 @@ mod tests {
     // removable against the frozen graph, but after (0,1), (0,2), and
     // (1,2) fall, the three edges at vertex 3 have no common neighbor
     // left. Their cached verdicts are stale positives; the repairs turn
-    // them into refusals and the star at 3 survives, as in the serial
-    // schedule. Reusing a stale cache here would delete the whole graph.
+    // them into refusals and the star at 3 survives, as in v1. Reusing a
+    // stale cache here would delete the whole graph.
     #[test]
     fn stale_member_repair_flips_a_verdict() {
         let d = unit_k4();

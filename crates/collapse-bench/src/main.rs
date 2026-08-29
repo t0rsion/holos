@@ -24,13 +24,13 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use holos_tda::collapse::{
-    collapse_dense, collapse_dense_ordered_parallel, collapse_dense_rounds_parallel,
-    collapse_sparse, collapse_sparse_ordered_parallel, collapse_sparse_rounds_parallel,
-    CollapseCertificate, CollapsedRips,
+    CollapseCertificate, CollapsedRips, RemovalStep, collapse_dense,
+    collapse_dense_ordered_parallel, collapse_dense_rounds_parallel, collapse_sparse,
+    collapse_sparse_ordered_parallel, collapse_sparse_rounds_parallel,
 };
 use holos_tda::{
-    rips_persistence, rips_persistence_sparse, CollapseSchedule, Diagram, DistanceMatrix,
-    RipsParams, SparseDistanceMatrix,
+    CollapseSchedule, Diagram, DistanceMatrix, RipsParams, SparseDistanceMatrix, rips_persistence,
+    rips_persistence_sparse,
 };
 
 const USAGE: &str = "\
@@ -261,6 +261,36 @@ struct Args {
     collapse_input: InputKind,
 }
 
+struct ArgsBuilder {
+    input: Option<String>,
+    entry: Option<String>,
+    threshold_text: Option<String>,
+    max_dim: usize,
+    modulus: u32,
+    collapse_threads: Vec<usize>,
+    reducer_threads: usize,
+    reps: usize,
+    mode: Mode,
+    collapse_input: InputKind,
+}
+
+impl Default for ArgsBuilder {
+    fn default() -> Self {
+        Self {
+            input: None,
+            entry: None,
+            threshold_text: None,
+            max_dim: 1,
+            modulus: 2,
+            collapse_threads: vec![1],
+            reducer_threads: 1,
+            reps: 5,
+            mode: Mode::All,
+            collapse_input: InputKind::Sparse,
+        }
+    }
+}
+
 struct Config {
     name: String,
     kind: Kind,
@@ -318,6 +348,21 @@ struct Summary {
     max: f64,
 }
 
+struct Verification {
+    outcomes: Vec<Outcome>,
+    gate_lines: Vec<String>,
+}
+
+struct Samples {
+    phases: Vec<Vec<Vec<f64>>>,
+    counters: Vec<Vec<Counters>>,
+}
+
+struct OrderedGate {
+    serial_v1: Option<CollapsedRips>,
+    lines: Vec<String>,
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.iter().any(|a| a == "-h" || a == "--help") {
@@ -344,14 +389,48 @@ fn run(argv: &[String]) -> Result<(), String> {
         return Err(format!("{}: need at least two points", args.input));
     }
     let configs = configurations(&args);
+    let verification = verify_configurations(&points, &args, &configs)?;
+    let hwm_start = vm_hwm_kb();
+    let rotation = rotation_orders(configs.len(), args.reps);
+    print_header(
+        &args,
+        points.len(),
+        &configs,
+        &verification.outcomes,
+        &rotation,
+    );
+    for line in &verification.gate_lines {
+        println!("{line}");
+    }
+    let mut samples = collect_samples(&points, &args, &configs, &verification.outcomes, &rotation)?;
+    print_samples(
+        &args,
+        &configs,
+        &verification.outcomes,
+        &mut samples.phases,
+        &samples.counters,
+    );
+    println!(
+        "kind=memory entry={} config=all vm_hwm_kb={} vm_hwm_kb_at_start={} scope=process_high_water",
+        args.entry,
+        report_kb(vm_hwm_kb()),
+        report_kb(hwm_start)
+    );
+    Ok(())
+}
 
-    // Agreement first. No timed repetition runs until every configuration
-    // has produced its diagram and matched the reference.
+fn verify_configurations(
+    points: &[Vec<f64>],
+    args: &Args,
+    configs: &[Config],
+) -> Result<Verification, String> {
     let mut verified: Vec<Outcome> = Vec::with_capacity(configs.len());
-    let mut serial_v1: Option<CollapsedRips> = None;
-    let mut gate_lines: Vec<String> = Vec::new();
-    for cfg in &configs {
-        let mut outcome = run_pipeline(&points, &args, cfg, true)?;
+    let mut gate = OrderedGate {
+        serial_v1: None,
+        lines: Vec::new(),
+    };
+    for cfg in configs {
+        let mut outcome = run_pipeline(points, args, cfg, true)?;
         if let Some(first) = verified.first() {
             if !diagrams_equal(&first.diagram, &outcome.diagram) {
                 return Err(format!(
@@ -364,49 +443,65 @@ fn run(argv: &[String]) -> Result<(), String> {
                 ));
             }
         }
-        let collapsed = outcome.collapsed.take();
-        match cfg.kind {
-            Kind::V1 => serial_v1 = collapsed,
-            Kind::V1Ordered => {
-                let ordered = collapsed.ok_or_else(|| {
-                    format!("configuration {} produced no collapse result", cfg.name)
-                })?;
-                match &serial_v1 {
-                    Some(reference) => {
-                        ordered_equal(reference, &ordered).map_err(|diff| {
-                            format!(
-                                "entry {}: {} does not reproduce v1-c1: {diff}; timings void",
-                                args.entry, cfg.name
-                            )
-                        })?;
-                        gate_lines.push(format!(
-                            "kind=ordered_gate entry={} config={} reference=v1-c1 checked=yes matrix=match certificate=match counters=match",
-                            args.entry, cfg.name
-                        ));
-                    }
-                    None => {
-                        return Err(format!(
-                            "entry {}: configuration {} has no v1-c1 reference in this run, so its ordered gate cannot run; add v1 to --mode",
-                            args.entry, cfg.name
-                        ))
-                    }
-                }
-            }
-            Kind::V2 | Kind::V1Product | Kind::NoCollapse => {}
-        }
+        gate.observe(args, cfg, outcome.collapsed.take())?;
         verified.push(outcome);
     }
-    // Drop the serial reference before timed runs, which must not allocate
-    // on top of it.
-    drop(serial_v1);
+    Ok(Verification {
+        outcomes: verified,
+        gate_lines: gate.lines,
+    })
+}
 
-    let hwm_start = vm_hwm_kb();
-    let rotation = rotation_orders(configs.len(), args.reps);
-    print_header(&args, points.len(), &configs, &verified, &rotation);
-    for line in &gate_lines {
-        println!("{line}");
+impl OrderedGate {
+    fn observe(
+        &mut self,
+        args: &Args,
+        cfg: &Config,
+        collapsed: Option<CollapsedRips>,
+    ) -> Result<(), String> {
+        match cfg.kind {
+            Kind::V1 => self.serial_v1 = collapsed,
+            Kind::V1Ordered => self.check_ordered(args, cfg, collapsed)?,
+            Kind::V2 | Kind::V1Product | Kind::NoCollapse => {}
+        }
+        Ok(())
     }
 
+    fn check_ordered(
+        &mut self,
+        args: &Args,
+        cfg: &Config,
+        collapsed: Option<CollapsedRips>,
+    ) -> Result<(), String> {
+        let ordered = collapsed
+            .ok_or_else(|| format!("configuration {} produced no collapse result", cfg.name))?;
+        let reference = self.serial_v1.as_ref().ok_or_else(|| {
+            format!(
+                "entry {}: configuration {} has no v1-c1 reference in this run, so its ordered gate cannot run; add v1 to --mode",
+                args.entry, cfg.name
+            )
+        })?;
+        ordered_equal(reference, &ordered).map_err(|diff| {
+            format!(
+                "entry {}: {} does not reproduce v1-c1: {diff}; timings void",
+                args.entry, cfg.name
+            )
+        })?;
+        self.lines.push(format!(
+            "kind=ordered_gate entry={} config={} reference=v1-c1 checked=yes matrix=match certificate=match counters=match",
+            args.entry, cfg.name
+        ));
+        Ok(())
+    }
+}
+
+fn collect_samples(
+    points: &[Vec<f64>],
+    args: &Args,
+    configs: &[Config],
+    verified: &[Outcome],
+    rotation: &[Vec<usize>],
+) -> Result<Samples, String> {
     let mut samples: Vec<Vec<Vec<f64>>> = verified
         .iter()
         .map(|verify| vec![Vec::with_capacity(args.reps); verify.phases.len()])
@@ -421,7 +516,7 @@ fn run(argv: &[String]) -> Result<(), String> {
     for (rep, order) in rotation.iter().enumerate() {
         for &index in order {
             let cfg = &configs[index];
-            let mut outcome = run_pipeline(&points, &args, cfg, false)?;
+            let mut outcome = run_pipeline(points, args, cfg, false)?;
             // After the clocks stop: a mid-run diagram change is a hard
             // failure, not a timing.
             if !diagrams_equal(&outcome.diagram, &verified[index].diagram) {
@@ -438,16 +533,22 @@ fn run(argv: &[String]) -> Result<(), String> {
             }
         }
     }
+    Ok(Samples {
+        phases: samples,
+        counters: counter_runs,
+    })
+}
 
-    // Ceiling predictor denominator. Read it before the report loop sorts
-    // the samples.
-    let serial_collapse_s = serial_collapse_median(&configs, &verified, &samples);
-
-    for (((cfg, verify), values), runs) in configs
-        .iter()
-        .zip(&verified)
-        .zip(&mut samples)
-        .zip(&counter_runs)
+fn print_samples(
+    args: &Args,
+    configs: &[Config],
+    verified: &[Outcome],
+    samples: &mut [Vec<Vec<f64>>],
+    counter_runs: &[Vec<Counters>],
+) {
+    let serial_collapse_s = serial_collapse_median(configs, verified, samples);
+    for (((cfg, verify), values), runs) in
+        configs.iter().zip(verified).zip(samples).zip(counter_runs)
     {
         for ((name, _), phase_samples) in verify.phases.iter().zip(values) {
             let summary = summarize(phase_samples);
@@ -457,7 +558,7 @@ fn run(argv: &[String]) -> Result<(), String> {
                 cfg.name,
                 mode_name(cfg.kind),
                 cfg.collapse_threads,
-                reducer_threads(&args, cfg),
+                reducer_threads(args, cfg),
                 name,
                 args.reps,
                 summary.median,
@@ -468,17 +569,8 @@ fn run(argv: &[String]) -> Result<(), String> {
                 summary.max
             );
         }
-        print_counters(&args, cfg, runs, serial_collapse_s);
+        print_counters(args, cfg, runs, serial_collapse_s);
     }
-    // Process-wide mark. The repetitions interleave, so no configuration
-    // can claim it.
-    println!(
-        "kind=memory entry={} config=all vm_hwm_kb={} vm_hwm_kb_at_start={} scope=process_high_water",
-        args.entry,
-        report_kb(vm_hwm_kb()),
-        report_kb(hwm_start)
-    );
-    Ok(())
 }
 
 /// The counterbalancing rotation: repetition r starts at configuration r and
@@ -594,62 +686,49 @@ fn print_header(
 /// configuration, over its timed repetitions. `serial_collapse_s` is the
 /// median collapse phase of v1-c1 in this run, the denominator of the
 /// ceiling predictor.
-fn print_counters(args: &Args, cfg: &Config, runs: &[Counters], serial_collapse_s: Option<f64>) {
-    let Some(first) = runs.first() else {
-        return;
-    };
-    // Batch widths come from the certificate, which the ordered gate already
-    // matched against the serial run, so one repetition carries them.
-    let widths: Vec<f64> = first.batch_widths.iter().map(|&(_, w)| w as f64).collect();
-    let (width_min, width_max, width_mean, width_median) = if widths.is_empty() {
-        (0.0, 0.0, 0.0, 0.0)
-    } else {
-        let mut sorted = widths.clone();
-        let summary = summarize(&mut sorted);
-        (
-            summary.min,
-            summary.max,
-            widths.iter().sum::<f64>() / widths.len() as f64,
-            summary.median,
-        )
-    };
-    let reference = count_vector(first);
-    let stable = runs.iter().all(|run| count_vector(run) == reference);
+fn width_summary(first: &Counters) -> (f64, f64, f64, f64) {
+    let widths: Vec<f64> = first
+        .batch_widths
+        .iter()
+        .map(|&(_, width)| width as f64)
+        .collect();
+    if widths.is_empty() {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    let mut sorted = widths.clone();
+    let summary = summarize(&mut sorted);
+    (
+        summary.min,
+        summary.max,
+        widths.iter().sum::<f64>() / widths.len() as f64,
+        summary.median,
+    )
+}
 
-    let median = |pick: fn(&Counters) -> f64| counter_median(runs, pick);
-    let input_edges = median(|c| c.input_edges as f64);
-    let edge_tests = median(|c| c.edge_tests as f64);
-    let logical_tests = median(|c| c.logical_tests as f64);
-    let invalidated_results = median(|c| c.invalidated_results as f64);
-    let offered = median(|c| c.window_slots_offered as f64);
-    let formed = median(|c| c.window_members_formed as f64);
-    // unused_window_capacity_derived is offered minus formed: an upper
-    // bound on pass-tail loss, not the loss. A stage fills short only when
-    // its scan reached the end of the edge list, which can happen mid-pass
-    // when retiring a window arms a position the form scan already passed.
-    // The counters are run totals, so this names no single stage.
-    let (occupancy, unused_capacity) = if offered > 0.0 {
+fn occupancy_text(offered: f64, formed: f64) -> (String, String) {
+    if offered > 0.0 {
         (
             format!("{:.4}", formed / offered),
             count_text(offered - formed),
         )
     } else {
         ("unavailable".to_string(), "unavailable".to_string())
-    };
+    }
+}
 
-    // Only the ordered path clocks its subphases, and only when it really
-    // speculates: at one worker it delegates to the serial collapse, which
-    // has no stages and returns zero timings. Elsewhere the timings are
-    // zero because nothing clocked them, and a printed zero would read as
-    // a measurement.
-    let clocked = cfg.kind == Kind::V1Ordered && cfg.collapse_threads > 1;
-    let repair_s = median(|c| c.repair_ns as f64) / 1e9;
-    let (subphases, predicate_text, retirement_text, repair_text) = if clocked {
+fn subphase_text(runs: &[Counters], clocked: bool) -> (&'static str, String, String, String, f64) {
+    let median = |pick: fn(&Counters) -> f64| counter_median(runs, pick);
+    let repair_s = median(|counter| counter.repair_ns as f64) / 1e9;
+    if clocked {
         (
             "predicate,retirement,repair",
-            format!("{:.6}", median(|c| c.predicate_ns as f64) / 1e9),
-            format!("{:.6}", median(|c| c.retirement_ns as f64) / 1e9),
+            format!("{:.6}", median(|counter| counter.predicate_ns as f64) / 1e9),
+            format!(
+                "{:.6}",
+                median(|counter| counter.retirement_ns as f64) / 1e9
+            ),
             format!("{repair_s:.6}"),
+            repair_s,
         )
     } else {
         (
@@ -657,9 +736,17 @@ fn print_counters(args: &Args, cfg: &Config, runs: &[Counters], serial_collapse_
             "unavailable".to_string(),
             "unavailable".to_string(),
             "unavailable".to_string(),
+            repair_s,
         )
-    };
-    let (cost_weighted, denominator, denominator_s) = match (clocked, serial_collapse_s) {
+    }
+}
+
+fn weighted_repair_text(
+    clocked: bool,
+    repair_s: f64,
+    serial_collapse_s: Option<f64>,
+) -> (String, &'static str, String) {
+    match (clocked, serial_collapse_s) {
         (true, Some(seconds)) if seconds > 0.0 => (
             format!("{:.6}", repair_s / seconds),
             "v1-c1_collapse_phase_median_s",
@@ -675,7 +762,43 @@ fn print_counters(args: &Args, cfg: &Config, runs: &[Counters], serial_collapse_
             "unavailable_this_path_has_no_repair_clock",
             "unavailable".to_string(),
         ),
+    }
+}
+
+fn batch_width_text(first: &Counters) -> String {
+    let widths: Vec<String> = first
+        .batch_widths
+        .iter()
+        .map(|&(epoch, width)| format!("{epoch}:{width}"))
+        .collect();
+    if widths.is_empty() {
+        "none".to_string()
+    } else {
+        widths.join(",")
+    }
+}
+
+fn print_counters(args: &Args, cfg: &Config, runs: &[Counters], serial_collapse_s: Option<f64>) {
+    let Some(first) = runs.first() else {
+        return;
     };
+    let (width_min, width_max, width_mean, width_median) = width_summary(first);
+    let reference = count_vector(first);
+    let stable = runs.iter().all(|run| count_vector(run) == reference);
+
+    let median = |pick: fn(&Counters) -> f64| counter_median(runs, pick);
+    let input_edges = median(|c| c.input_edges as f64);
+    let edge_tests = median(|c| c.edge_tests as f64);
+    let logical_tests = median(|c| c.logical_tests as f64);
+    let invalidated_results = median(|c| c.invalidated_results as f64);
+    let offered = median(|c| c.window_slots_offered as f64);
+    let formed = median(|c| c.window_members_formed as f64);
+    let (occupancy, unused_capacity) = occupancy_text(offered, formed);
+    let clocked = cfg.kind == Kind::V1Ordered && cfg.collapse_threads > 1;
+    let (subphases, predicate_text, retirement_text, repair_text, repair_s) =
+        subphase_text(runs, clocked);
+    let (cost_weighted, denominator, denominator_s) =
+        weighted_repair_text(clocked, repair_s, serial_collapse_s);
 
     println!(
         "kind=counters entry={} config={} mode={} collapse_threads={} stat=median_over_timed_reps reps={} counters_stable={} algorithm_version={} terminal_level={:?} input_edges={} output_edges={} removed_edges={} epochs={} removal_epochs={} edge_tests={} logical_tests={} work_inflation_derived={} retests_derived={} invalidated_results={} repair_fraction_derived={} global_invalidations={} window_batches={} window_slots_offered={} window_members_formed={} window_members_reused={} window_occupancy_derived={} unused_window_capacity_derived={} witness_segments={} max_common_neighborhood={} batch_width_min={} batch_width_median={:.2} batch_width_mean={:.2} batch_width_max={} collapse_subphases={} predicate_median_s={} retirement_median_s={} repair_median_s={} cost_weighted_invalidated_fraction={} cost_weighted_denominator={} cost_weighted_denominator_s={} blocked_successful=unavailable blocked_successful_retests=unavailable conflict_blocking=unavailable",
@@ -719,21 +842,12 @@ fn print_counters(args: &Args, cfg: &Config, runs: &[Counters], serial_collapse_
         denominator,
         denominator_s
     );
-    let widths: Vec<String> = first
-        .batch_widths
-        .iter()
-        .map(|&(epoch, width)| format!("{epoch}:{width}"))
-        .collect();
     println!(
         "kind=batch_widths entry={} config={} epochs={} widths={}",
         args.entry,
         cfg.name,
         first.epochs,
-        if widths.is_empty() {
-            "none".to_string()
-        } else {
-            widths.join(",")
-        }
+        batch_width_text(first)
     );
 }
 
@@ -819,91 +933,19 @@ fn run_pipeline(
 ) -> Result<Outcome, String> {
     let mut phases: Vec<(&'static str, f64)> = Vec::with_capacity(5);
     let whole = Instant::now();
-
-    let clock = Instant::now();
-    let dist = DistanceMatrix::from_points(points).map_err(|e| e.to_string())?;
-    phases.push(("distance", clock.elapsed().as_secs_f64()));
-
-    let mut graph_edges = None;
-    let sparse = if args.collapse_input == InputKind::Sparse {
-        let clock = Instant::now();
-        let sparse = threshold_to_sparse(&dist, args.threshold)?;
-        phases.push(("graph", clock.elapsed().as_secs_f64()));
-        graph_edges = Some(sparse.num_edges());
-        Some(sparse)
-    } else {
-        None
-    };
-
+    let dist = timed(&mut phases, "distance", || {
+        DistanceMatrix::from_points(points).map_err(|error| error.to_string())
+    })?;
+    let sparse = collapse_graph(&dist, args, &mut phases)?;
+    let graph_edges = sparse.as_ref().map(SparseDistanceMatrix::num_edges);
     if cfg.kind == Kind::V1Product {
-        // One call, one run-wide pool. No phase boundary an outside clock
-        // can see.
-        let params = RipsParams::new(args.max_dim)
-            .with_threshold(args.threshold)
-            .with_modulus(args.modulus)
-            .with_threads(cfg.collapse_threads)
-            .with_collapse_schedule(CollapseSchedule::Ordered);
-        let clock = Instant::now();
-        let mut diagram = match &sparse {
-            Some(sparse) => rips_persistence_sparse(sparse, &params),
-            None => rips_persistence(&dist, &params),
-        }
-        .map_err(|e| e.to_string())?;
-        phases.push(("pipeline", clock.elapsed().as_secs_f64()));
-        phases.push(("total", whole.elapsed().as_secs_f64()));
-        diagram.canonicalize();
-        return Ok(Outcome {
-            phases,
-            diagram,
-            counters: None,
-            graph_edges,
-            collapsed: None,
-        });
+        return product_outcome(dist, sparse, args, cfg, phases, whole);
     }
-
-    let mut counters = None;
-    let mut collapsed: Option<CollapsedRips> = None;
-    if cfg.kind != Kind::NoCollapse {
-        let threshold = Some(args.threshold);
-        let clock = Instant::now();
-        let result = match (cfg.kind, &sparse) {
-            (Kind::V2, Some(sparse)) => {
-                collapse_sparse_rounds_parallel(sparse, threshold, cfg.collapse_threads)
-            }
-            (Kind::V1, Some(sparse)) => collapse_sparse(sparse, threshold),
-            (Kind::V1Ordered, Some(sparse)) => {
-                collapse_sparse_ordered_parallel(sparse, threshold, cfg.collapse_threads)
-            }
-            (Kind::V2, None) => {
-                collapse_dense_rounds_parallel(&dist, threshold, cfg.collapse_threads)
-            }
-            (Kind::V1, None) => collapse_dense(&dist, threshold),
-            (Kind::V1Ordered, None) => {
-                collapse_dense_ordered_parallel(&dist, threshold, cfg.collapse_threads)
-            }
-            (Kind::V1Product | Kind::NoCollapse, _) => {
-                unreachable!("both take a branch above")
-            }
-        };
-        let result = result.map_err(|e| e.to_string())?;
-        phases.push(("collapse", clock.elapsed().as_secs_f64()));
-        counters = Some(counters_of(&result));
-        collapsed = Some(result);
-    }
-
-    let clock = Instant::now();
-    let mut diagram = match (&collapsed, &sparse) {
-        (Some(collapsed), _) => {
-            let params = reduce_params(args, collapsed.certificate.terminal_level());
-            rips_persistence_sparse(&collapsed.matrix, &params)
-        }
-        (None, Some(sparse)) => {
-            rips_persistence_sparse(sparse, &reduce_params(args, args.threshold))
-        }
-        (None, None) => rips_persistence(&dist, &reduce_params(args, args.threshold)),
-    }
-    .map_err(|e| e.to_string())?;
-    phases.push(("reduce", clock.elapsed().as_secs_f64()));
+    let collapsed = collapse_phase(&dist, sparse.as_ref(), args, cfg, &mut phases)?;
+    let counters = collapsed.as_ref().map(counters_of);
+    let mut diagram = timed(&mut phases, "reduce", || {
+        reduce_after_collapse(&dist, sparse.as_ref(), collapsed.as_ref(), args)
+    })?;
     phases.push(("total", whole.elapsed().as_secs_f64()));
     diagram.canonicalize();
 
@@ -914,6 +956,130 @@ fn run_pipeline(
         graph_edges,
         collapsed: if retain { collapsed } else { None },
     })
+}
+
+fn timed<T>(
+    phases: &mut Vec<(&'static str, f64)>,
+    name: &'static str,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let clock = Instant::now();
+    let value = operation()?;
+    phases.push((name, clock.elapsed().as_secs_f64()));
+    Ok(value)
+}
+
+fn collapse_graph(
+    dist: &DistanceMatrix,
+    args: &Args,
+    phases: &mut Vec<(&'static str, f64)>,
+) -> Result<Option<SparseDistanceMatrix>, String> {
+    if args.collapse_input == InputKind::Dense {
+        return Ok(None);
+    }
+    let sparse = timed(phases, "graph", || {
+        threshold_to_sparse(dist, args.threshold)
+    })?;
+    Ok(Some(sparse))
+}
+
+fn product_outcome(
+    dist: DistanceMatrix,
+    sparse: Option<SparseDistanceMatrix>,
+    args: &Args,
+    cfg: &Config,
+    mut phases: Vec<(&'static str, f64)>,
+    whole: Instant,
+) -> Result<Outcome, String> {
+    let params = RipsParams::new(args.max_dim)
+        .with_threshold(args.threshold)
+        .with_modulus(args.modulus)
+        .with_threads(cfg.collapse_threads)
+        .with_collapse_schedule(CollapseSchedule::Ordered);
+    let mut diagram = timed(&mut phases, "pipeline", || {
+        match &sparse {
+            Some(matrix) => rips_persistence_sparse(matrix, &params),
+            None => rips_persistence(&dist, &params),
+        }
+        .map_err(|error| error.to_string())
+    })?;
+    phases.push(("total", whole.elapsed().as_secs_f64()));
+    diagram.canonicalize();
+    Ok(Outcome {
+        phases,
+        diagram,
+        counters: None,
+        graph_edges: sparse.as_ref().map(SparseDistanceMatrix::num_edges),
+        collapsed: None,
+    })
+}
+
+fn collapse_phase(
+    dist: &DistanceMatrix,
+    sparse: Option<&SparseDistanceMatrix>,
+    args: &Args,
+    cfg: &Config,
+    phases: &mut Vec<(&'static str, f64)>,
+) -> Result<Option<CollapsedRips>, String> {
+    if cfg.kind == Kind::NoCollapse {
+        return Ok(None);
+    }
+    let result = timed(phases, "collapse", || match sparse {
+        Some(matrix) => collapse_sparse_kind(matrix, args, cfg),
+        None => collapse_dense_kind(dist, args, cfg),
+    })?;
+    Ok(Some(result))
+}
+
+fn collapse_sparse_kind(
+    sparse: &SparseDistanceMatrix,
+    args: &Args,
+    cfg: &Config,
+) -> Result<CollapsedRips, String> {
+    let threshold = Some(args.threshold);
+    let result = match cfg.kind {
+        Kind::V2 => collapse_sparse_rounds_parallel(sparse, threshold, cfg.collapse_threads),
+        Kind::V1 => collapse_sparse(sparse, threshold),
+        Kind::V1Ordered => {
+            collapse_sparse_ordered_parallel(sparse, threshold, cfg.collapse_threads)
+        }
+        Kind::V1Product | Kind::NoCollapse => unreachable!("both take an earlier branch"),
+    };
+    result.map_err(|error| error.to_string())
+}
+
+fn collapse_dense_kind(
+    dist: &DistanceMatrix,
+    args: &Args,
+    cfg: &Config,
+) -> Result<CollapsedRips, String> {
+    let threshold = Some(args.threshold);
+    let result = match cfg.kind {
+        Kind::V2 => collapse_dense_rounds_parallel(dist, threshold, cfg.collapse_threads),
+        Kind::V1 => collapse_dense(dist, threshold),
+        Kind::V1Ordered => collapse_dense_ordered_parallel(dist, threshold, cfg.collapse_threads),
+        Kind::V1Product | Kind::NoCollapse => unreachable!("both take an earlier branch"),
+    };
+    result.map_err(|error| error.to_string())
+}
+
+fn reduce_after_collapse(
+    dist: &DistanceMatrix,
+    sparse: Option<&SparseDistanceMatrix>,
+    collapsed: Option<&CollapsedRips>,
+    args: &Args,
+) -> Result<Diagram, String> {
+    let result = match (collapsed, sparse) {
+        (Some(result), _) => {
+            let params = reduce_params(args, result.certificate.terminal_level());
+            rips_persistence_sparse(&result.matrix, &params)
+        }
+        (None, Some(matrix)) => {
+            rips_persistence_sparse(matrix, &reduce_params(args, args.threshold))
+        }
+        (None, None) => rips_persistence(dist, &reduce_params(args, args.threshold)),
+    };
+    result.map_err(|error| error.to_string())
 }
 
 fn reduce_params(args: &Args, threshold: f64) -> RipsParams {
@@ -927,7 +1093,7 @@ fn counters_of(collapsed: &CollapsedRips) -> Counters {
     let stats = &collapsed.stats;
     let mut batch_widths: Vec<(usize, usize)> = Vec::new();
     for step in collapsed.certificate.steps() {
-        let epoch = step.epoch();
+        let epoch = step.position().number();
         match batch_widths.last_mut() {
             Some(last) if last.0 == epoch => last.1 += 1,
             _ => batch_widths.push((epoch, 1)),
@@ -1130,6 +1296,19 @@ fn certificates_equal(
     reference: &CollapseCertificate,
     ordered: &CollapseCertificate,
 ) -> Result<(), String> {
+    certificate_version_equal(reference, ordered)?;
+    certificate_header_equal(reference, ordered)?;
+    certificate_levels_equal(reference, ordered)?;
+    for (index, (want, got)) in reference.steps().iter().zip(ordered.steps()).enumerate() {
+        removal_step_equal(index, want, got)?;
+    }
+    Ok(())
+}
+
+fn certificate_version_equal(
+    reference: &CollapseCertificate,
+    ordered: &CollapseCertificate,
+) -> Result<(), String> {
     if reference.algorithm_version() != ordered.algorithm_version() {
         return Err(format!(
             "the certificate is algorithm version {}, the serial run is version {}",
@@ -1137,6 +1316,13 @@ fn certificates_equal(
             reference.algorithm_version()
         ));
     }
+    Ok(())
+}
+
+fn certificate_header_equal(
+    reference: &CollapseCertificate,
+    ordered: &CollapseCertificate,
+) -> Result<(), String> {
     let header = [
         (
             "vertex_count",
@@ -1162,6 +1348,13 @@ fn certificates_equal(
             ));
         }
     }
+    Ok(())
+}
+
+fn certificate_levels_equal(
+    reference: &CollapseCertificate,
+    ordered: &CollapseCertificate,
+) -> Result<(), String> {
     if optional_bits(reference.requested_threshold())
         != optional_bits(ordered.requested_threshold())
     {
@@ -1178,42 +1371,48 @@ fn certificates_equal(
             reference.terminal_level()
         ));
     }
-    for (index, (want, got)) in reference.steps().iter().zip(ordered.steps()).enumerate() {
-        if want.edge() != got.edge() {
+    Ok(())
+}
+
+fn removal_step_equal(index: usize, want: &RemovalStep, got: &RemovalStep) -> Result<(), String> {
+    if want.edge() != got.edge() {
+        return Err(format!(
+            "removal {index} is edge {:?}, the serial run removes {:?}",
+            got.edge(),
+            want.edge()
+        ));
+    }
+    if want.value().to_bits() != got.value().to_bits() {
+        return Err(format!(
+            "removal {index} has value {:?}, the serial run has {:?}",
+            got.value(),
+            want.value()
+        ));
+    }
+    if want.position().number() != got.position().number() {
+        return Err(format!(
+            "removal {index} is in pass {}, the serial run puts it in pass {}",
+            got.position().number(),
+            want.position().number()
+        ));
+    }
+    witness_steps_equal(index, want, got)
+}
+
+fn witness_steps_equal(index: usize, want: &RemovalStep, got: &RemovalStep) -> Result<(), String> {
+    if want.witnesses().len() != got.witnesses().len() {
+        return Err(format!(
+            "removal {index} has {} witness segments, the serial run has {}",
+            got.witnesses().len(),
+            want.witnesses().len()
+        ));
+    }
+    for (segment, (want, got)) in want.witnesses().iter().zip(got.witnesses()).enumerate() {
+        if want.0.to_bits() != got.0.to_bits() || want.1 != got.1 {
             return Err(format!(
-                "removal {index} is edge {:?}, the serial run removes {:?}",
-                got.edge(),
-                want.edge()
+                "removal {index} witness segment {segment} is {:?}, the serial run has {:?}",
+                got, want
             ));
-        }
-        if want.value().to_bits() != got.value().to_bits() {
-            return Err(format!(
-                "removal {index} has value {:?}, the serial run has {:?}",
-                got.value(),
-                want.value()
-            ));
-        }
-        if want.epoch() != got.epoch() {
-            return Err(format!(
-                "removal {index} is in pass {}, the serial run puts it in pass {}",
-                got.epoch(),
-                want.epoch()
-            ));
-        }
-        if want.witnesses().len() != got.witnesses().len() {
-            return Err(format!(
-                "removal {index} has {} witness segments, the serial run has {}",
-                got.witnesses().len(),
-                want.witnesses().len()
-            ));
-        }
-        for (segment, (want, got)) in want.witnesses().iter().zip(got.witnesses()).enumerate() {
-            if want.0.to_bits() != got.0.to_bits() || want.1 != got.1 {
-                return Err(format!(
-                    "removal {index} witness segment {segment} is {:?}, the serial run has {:?}",
-                    got, want
-                ));
-            }
         }
     }
     Ok(())
@@ -1232,7 +1431,7 @@ fn diagrams_equal(a: &Diagram, b: &Diagram) -> bool {
         })
 }
 
-/// Quantiles interpolate linearly between the two neighbouring order
+/// Quantiles interpolate linearly between the two neighboring order
 /// statistics, the rule benchmarks/_common.sh uses.
 fn summarize(samples: &mut [f64]) -> Summary {
     if samples.is_empty() {
@@ -1314,104 +1513,165 @@ fn file_stem(path: &str) -> String {
 }
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
-    let mut input = None;
-    let mut entry = None;
-    let mut threshold_text = None;
-    let mut max_dim = 1usize;
-    let mut modulus = 2u32;
-    let mut collapse_threads = vec![1usize];
-    let mut reducer_threads = 1usize;
-    let mut reps = 5usize;
-    let mut mode = Mode::All;
-    let mut collapse_input = InputKind::Sparse;
-
+    let mut builder = ArgsBuilder::default();
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
-        let mut value = || {
-            it.next()
-                .cloned()
-                .ok_or_else(|| format!("{flag} needs a value"))
-        };
-        match flag.as_str() {
-            "--input" => input = Some(value()?),
-            "--entry" => entry = Some(value()?),
-            "--threshold" => threshold_text = Some(value()?),
-            "--max-dim" => max_dim = parse_usize(&value()?, "--max-dim")?,
-            "--modulus" => {
-                modulus = u32::try_from(parse_usize(&value()?, "--modulus")?)
-                    .map_err(|_| "--modulus is out of range".to_string())?
-            }
-            "--collapse-threads" => {
-                let list = value()?;
-                let mut threads = Vec::new();
-                for part in list.split(',') {
-                    threads.push(parse_usize(part, "--collapse-threads")?.max(1));
-                }
-                collapse_threads = threads;
-            }
-            "--reducer-threads" => {
-                reducer_threads = parse_usize(&value()?, "--reducer-threads")?.max(1)
-            }
-            "--reps" => reps = parse_usize(&value()?, "--reps")?,
-            "--mode" => {
-                let name = value()?;
-                mode = match name.as_str() {
-                    "v2" => Mode::V2,
-                    "v1" => Mode::V1,
-                    "v1o" => Mode::V1Ordered,
-                    "v1p" => Mode::V1Product,
-                    "none" => Mode::NoCollapse,
-                    "rounds" => Mode::Rounds,
-                    "all" => Mode::All,
-                    other => {
-                        return Err(format!(
-                            "unknown mode {other}; use v2, v1, v1o, v1p, none, rounds, or all"
-                        ))
-                    }
-                }
-            }
-            "--collapse-input" => {
-                let name = value()?;
-                collapse_input = match name.as_str() {
-                    "sparse" => InputKind::Sparse,
-                    "dense" => InputKind::Dense,
-                    other => {
-                        return Err(format!(
-                            "unknown collapse input {other}; use sparse or dense"
-                        ))
-                    }
-                }
-            }
-            other => return Err(format!("unknown argument {other}; run with --help")),
+        if !ArgsBuilder::accepts(flag) {
+            return Err(format!("unknown argument {flag}; run with --help"));
         }
+        let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
+        builder.set(flag, value)?;
+    }
+    builder.finish()
+}
+
+impl ArgsBuilder {
+    fn accepts(flag: &str) -> bool {
+        matches!(
+            flag,
+            "--input"
+                | "--entry"
+                | "--threshold"
+                | "--max-dim"
+                | "--modulus"
+                | "--collapse-threads"
+                | "--reducer-threads"
+                | "--reps"
+                | "--mode"
+                | "--collapse-input"
+        )
     }
 
-    let input = input.ok_or_else(|| "--input is required".to_string())?;
-    let threshold_text = threshold_text.ok_or_else(|| "--threshold is required".to_string())?;
+    fn set(&mut self, flag: &str, value: &str) -> Result<(), String> {
+        if self.set_identity(flag, value) {
+            return Ok(());
+        }
+        if self.set_dimensions(flag, value)? || self.set_threads(flag, value)? {
+            return Ok(());
+        }
+        if self.set_choice(flag, value)? {
+            return Ok(());
+        }
+        Err(format!("unknown argument {flag}; run with --help"))
+    }
+
+    fn set_identity(&mut self, flag: &str, value: &str) -> bool {
+        match flag {
+            "--input" => self.input = Some(value.to_string()),
+            "--entry" => self.entry = Some(value.to_string()),
+            "--threshold" => self.threshold_text = Some(value.to_string()),
+            _ => return false,
+        }
+        true
+    }
+
+    fn set_dimensions(&mut self, flag: &str, value: &str) -> Result<bool, String> {
+        match flag {
+            "--max-dim" => self.max_dim = parse_usize(value, flag)?,
+            "--modulus" => {
+                self.modulus = u32::try_from(parse_usize(value, flag)?)
+                    .map_err(|_| "--modulus is out of range".to_string())?;
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn set_threads(&mut self, flag: &str, value: &str) -> Result<bool, String> {
+        if flag == "--collapse-threads" {
+            self.collapse_threads = parse_thread_list(value)?;
+            return Ok(true);
+        }
+        let target = match flag {
+            "--reducer-threads" => &mut self.reducer_threads,
+            "--reps" => &mut self.reps,
+            _ => return Ok(false),
+        };
+        *target = parse_usize(value, flag)?;
+        if flag == "--reducer-threads" {
+            *target = (*target).max(1);
+        }
+        Ok(true)
+    }
+
+    fn set_choice(&mut self, flag: &str, value: &str) -> Result<bool, String> {
+        match flag {
+            "--mode" => self.mode = parse_mode(value)?,
+            "--collapse-input" => self.collapse_input = parse_input_kind(value)?,
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn finish(self) -> Result<Args, String> {
+        let input = self
+            .input
+            .ok_or_else(|| "--input is required".to_string())?;
+        let threshold_text = self
+            .threshold_text
+            .ok_or_else(|| "--threshold is required".to_string())?;
+        let threshold = parse_threshold(&threshold_text)?;
+        if self.reps == 0 {
+            return Err("--reps must be at least 1".to_string());
+        }
+        let entry = self.entry.unwrap_or_else(|| file_stem(&input));
+        Ok(Args {
+            input,
+            entry,
+            threshold,
+            threshold_text,
+            max_dim: self.max_dim,
+            modulus: self.modulus,
+            collapse_threads: self.collapse_threads,
+            reducer_threads: self.reducer_threads,
+            reps: self.reps,
+            mode: self.mode,
+            collapse_input: self.collapse_input,
+        })
+    }
+}
+
+fn parse_thread_list(text: &str) -> Result<Vec<usize>, String> {
+    text.split(',')
+        .map(|part| parse_usize(part, "--collapse-threads").map(|value| value.max(1)))
+        .collect()
+}
+
+fn parse_mode(text: &str) -> Result<Mode, String> {
+    const MODES: [(&str, Mode); 7] = [
+        ("v2", Mode::V2),
+        ("v1", Mode::V1),
+        ("v1o", Mode::V1Ordered),
+        ("v1p", Mode::V1Product),
+        ("none", Mode::NoCollapse),
+        ("rounds", Mode::Rounds),
+        ("all", Mode::All),
+    ];
+    MODES
+        .iter()
+        .find(|(name, _)| *name == text)
+        .map(|(_, mode)| *mode)
+        .ok_or_else(|| format!("unknown mode {text}; use v2, v1, v1o, v1p, none, rounds, or all"))
+}
+
+fn parse_input_kind(text: &str) -> Result<InputKind, String> {
+    match text {
+        "sparse" => Ok(InputKind::Sparse),
+        "dense" => Ok(InputKind::Dense),
+        other => Err(format!(
+            "unknown collapse input {other}; use sparse or dense"
+        )),
+    }
+}
+
+fn parse_threshold(threshold_text: &str) -> Result<f64, String> {
     let threshold: f64 = threshold_text
         .parse()
         .map_err(|_| format!("--threshold {threshold_text} is not a number"))?;
     if threshold.is_nan() || threshold < 0.0 {
         return Err(format!("--threshold {threshold_text} must be non-negative"));
     }
-    if reps == 0 {
-        return Err("--reps must be at least 1".to_string());
-    }
-    let entry = entry.unwrap_or_else(|| file_stem(&input));
-
-    Ok(Args {
-        input,
-        entry,
-        threshold,
-        threshold_text,
-        max_dim,
-        modulus,
-        collapse_threads,
-        reducer_threads,
-        reps,
-        mode,
-        collapse_input,
-    })
+    Ok(threshold)
 }
 
 fn parse_usize(text: &str, flag: &str) -> Result<usize, String> {

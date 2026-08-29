@@ -3,7 +3,7 @@
 //! shared table under column-order priority. A column whose pivot is held by
 //! a larger-indexed column evicts that owner and re-queues it. A column that
 //! finds a smaller-indexed owner reduces against it. The table converges to
-//! the unique reduced pivot set, so the barcode is identical to the serial
+//! the unique reduced pivot set. The barcode is identical to the serial
 //! engine at every thread count.
 //!
 //! Each pivot's V-column lives in its table entry, so a reader observes an
@@ -14,15 +14,15 @@ use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use dashmap::mapref::entry::Entry as MapEntry;
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry as MapEntry;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
+use crate::Bar;
 use crate::distances::Distances;
 use crate::field::{Coeffs, Entry, HeapEntry};
 use crate::reduce::{Engine, PairScratch, Pivots};
 use crate::simplex::Simplex;
-use crate::Bar;
 
 /// A reduced column that owns a pivot: the pivot's coefficient and diameter,
 /// the owning column, and the column's V-column (the reducers combined into
@@ -70,7 +70,7 @@ fn claim(table: &Table, index: u64, owner: Owner) -> Claim {
     }
 }
 
-/// One field on a cache line of its own. Two workers that hammer two
+/// One field on a cache line of its own. Two workers that write two
 /// separate counters must not share a line, or each write costs the other a
 /// miss. The alignment covers the adjacent-line prefetch as well.
 #[repr(align(128))]
@@ -90,6 +90,7 @@ const IDLE_SLEEP_DOUBLINGS: u32 = 7;
 /// `next` on every column, so a `pending` on the same line would cost every
 /// other worker a miss per column.
 struct WorkQueue {
+    /// The next undispensed column.
     next: Padded<AtomicUsize>,
     /// Columns not yet in a final state; the region ends when it hits zero.
     pending: Padded<AtomicUsize>,
@@ -169,7 +170,7 @@ struct Scratch {
     pairs: PairScratch,
 }
 
-/// Outcome of one reduction pass over a column.
+/// The state in which one reduction pass over a column ended.
 enum Pass {
     /// Owns a pivot; carries a column it displaced (to re-reduce), if any.
     Owned(Option<usize>),
@@ -232,9 +233,10 @@ impl<C: Coeffs + Sync, D: Distances + Sync> Engine<'_, C, D> {
         (table, bars)
     }
 
-    /// The converged pivot registry: (pivot index, coefficient, owner
-    /// column, diameter bits), sorted by pivot index. The thread-invariance
-    /// gate compares this. The reduced output drops the diameter.
+    /// The converged pivot registry, with the pivot diameter the reduced
+    /// output drops: (pivot index, coefficient, owner column, diameter
+    /// bits), by pivot index. The thread-invariance gate compares this,
+    /// which is wider than the diagram.
     #[cfg(test)]
     pub(crate) fn parallel_pivot_registry(
         &self,
@@ -503,10 +505,10 @@ mod tests {
     }
 
     /// The pivot registry the workers converge to must not depend on how many
-    /// of them there are, nor on the block the queue hands out. The check is
-    /// wider than the diagram: it compares the pivot index, the coefficient,
-    /// the owning column, and the diameter bits, and it compares the first
-    /// three against the serial reducer as well.
+    /// of them there are. The check is wider than the diagram: it compares
+    /// the pivot index, the coefficient, the owning column, and the diameter
+    /// bits, and it compares the first three against the serial reducer as
+    /// well.
     fn assert_registry_is_worker_invariant(dist: &DistanceMatrix, label: &str) {
         let mut serial_params = RipsParams::new(1);
         serial_params.threads = 1;

@@ -15,9 +15,9 @@ targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-da
 install-path = "CARGO_HOME"
 # Where to host releases
 hosting = "github"
-# Homebrew tap to publish the formula to
+# A GitHub repo to push Homebrew formulas to
 tap = "t0rsion/homebrew-tap"
-# Publishers to run after artifacts are built
+# Publish jobs to run in CI
 publish-jobs = ["homebrew"]
 # Whether to install an updater program
 install-updater = false

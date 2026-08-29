@@ -1,7 +1,7 @@
 [package]
 name = "holos-tda"
-version = "0.6.0"
-edition = "2021"
+version = "0.7.0"
+edition = "2024"
 rust-version = "1.85"
 description = "Vietoris-Rips persistent homology with an implicit ripser-class engine"
 license = "MIT OR Apache-2.0"
@@ -14,6 +14,7 @@ readme = "../../README.md"
 include = [
     "src/**",
     "tests/**",
+    "examples/**",
     "build.rs",
     "LICENSE-APACHE",
     "LICENSE-MIT",
@@ -25,8 +26,12 @@ fast-float2 = "0.2"
 clap = { version = "4", features = ["derive", "string"] }
 rayon = "1"
 dashmap = "6"
+sha2 = "0.10"
+num-rational = "0.4"
+num-traits = "0.2"
 
 [dev-dependencies]
+holos-tda-check = { path = "../holos-tda-check" }
 proptest = "1"
 
 [[bin]]

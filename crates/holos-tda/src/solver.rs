@@ -3,8 +3,8 @@
 //! [`crate::reduce`], and the field arithmetic lives in [`crate::field`].
 
 use crate::distances::Distances;
-use crate::field::{is_prime, Fp, MODULUS_LIMIT, Z2};
-use crate::reduce::Engine;
+use crate::field::{Fp, MODULUS_LIMIT, Z2, is_prime};
+use crate::reduce::{Engine, RawH1Class};
 use crate::{Diagram, Error, Result, RipsParams};
 
 pub(crate) fn compute<D: Distances + Sync>(dist: &D, params: &RipsParams) -> Result<Diagram> {
@@ -62,9 +62,53 @@ where
     Ok(diagram)
 }
 
+pub(crate) fn compute_with_h1_classes<D: Distances + Sync>(
+    dist: &D,
+    params: &RipsParams,
+) -> Result<(Diagram, Vec<RawH1Class>)> {
+    if let Some(t) = params.threshold {
+        if t.is_nan() || t < 0.0 {
+            return Err(Error::InvalidInput(format!(
+                "threshold must be non-negative, got {t}"
+            )));
+        }
+    }
+    let p = params.modulus as u64;
+    if !is_prime(p) || p >= MODULUS_LIMIT {
+        return Err(Error::InvalidInput(format!(
+            "modulus must be a prime below {MODULUS_LIMIT}, got {p}"
+        )));
+    }
+    if p == 2 {
+        compute_with_h1_impl(dist, Z2, params)
+    } else {
+        compute_with_h1_impl(dist, Fp::new(p), params)
+    }
+}
+
+fn compute_with_h1_impl<C, D>(
+    dist: &D,
+    ops: C,
+    params: &RipsParams,
+) -> Result<(Diagram, Vec<RawH1Class>)>
+where
+    C: crate::field::Coeffs + Sync,
+    D: Distances + Sync,
+{
+    let mut diagram = Diagram::default();
+    let mut classes = Vec::new();
+    if dist.len() == 0 {
+        return Ok((diagram, classes));
+    }
+    let engine = Engine::new(dist, params, ops)?;
+    engine.run_with_h1_classes(&mut diagram, &mut classes);
+    diagram.canonicalize();
+    Ok((diagram, classes))
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{rips_persistence, DistanceMatrix, RipsParams};
+    use crate::{DistanceMatrix, RipsParams, rips_persistence};
 
     #[test]
     fn triangle_unit_distances() {

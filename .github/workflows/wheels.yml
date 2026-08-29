@@ -21,9 +21,9 @@ permissions:
 
 jobs:
   # On tags, refuse to proceed unless the tag matches every declared version
-  # (core crate, py crate, pyproject, and both benchmark drivers); a stray or
-  # RC v* tag must not publish. The benchmark drivers are not published, but
-  # their versions are printed into the records attached to the release.
+  # (core crate, py crate, pyproject, benchmark driver); a stray or RC v* tag
+  # must not publish. The benchmark driver is not published, but its version
+  # is printed into the benchmark records attached to the release.
   version-check:
     runs-on: ubuntu-latest
     steps:
@@ -33,10 +33,8 @@ jobs:
           v_py=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/holos-tda-py/Cargo.toml | head -1)
           v_proj=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/holos-tda-py/pyproject.toml | head -1)
           v_bench=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/collapse-bench/Cargo.toml | head -1)
-          v_engine=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/engine-bench/Cargo.toml | head -1)
-          echo "core=$v_core py=$v_py pyproject=$v_proj bench=$v_bench engine=$v_engine ref=$GITHUB_REF"
-          [ "$v_core" = "$v_py" ] && [ "$v_core" = "$v_proj" ] \
-            && [ "$v_core" = "$v_bench" ] && [ "$v_core" = "$v_engine" ] \
+          echo "core=$v_core py=$v_py pyproject=$v_proj bench=$v_bench ref=$GITHUB_REF"
+          [ "$v_core" = "$v_py" ] && [ "$v_core" = "$v_proj" ] && [ "$v_core" = "$v_bench" ] \
             || { echo "version mismatch"; exit 1; }
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             [ "$GITHUB_REF" = "refs/tags/v$v_core" ] || { echo "tag does not match version v$v_core"; exit 1; }

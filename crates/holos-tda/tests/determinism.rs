@@ -11,8 +11,8 @@ use std::f64::consts::PI;
 
 use holos_tda::oracle::rips_persistence_oracle_mod;
 use holos_tda::{
-    rips_persistence, rips_persistence_sparse, Diagram, DistanceMatrix, RipsParams,
-    SparseDistanceMatrix,
+    Diagram, DistanceMatrix, RipsParams, SparseDistanceMatrix, rips_persistence,
+    rips_persistence_sparse,
 };
 
 const THREAD_COUNTS: [usize; 4] = [1, 2, 4, 8];

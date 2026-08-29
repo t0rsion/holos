@@ -2,11 +2,11 @@
 //! Both sides read the same f64 matrix entries and take maxima only, so
 //! births and deaths must agree bit-for-bit.
 
-use holos_tda::collapse::{collapse_dense, CollapsedRips};
+use holos_tda::collapse::{CollapsedRips, collapse_dense};
 use holos_tda::oracle::{rips_persistence_oracle, rips_persistence_oracle_mod};
 use holos_tda::{
-    rips_persistence, rips_persistence_sparse, CollapseSchedule, Diagram, DistanceMatrix, Engine,
-    RipsParams,
+    CollapseSchedule, Diagram, DistanceMatrix, Engine, RipsParams, rips_persistence,
+    rips_persistence_sparse,
 };
 
 struct Rng(u64);
@@ -103,10 +103,10 @@ fn exhaustive_two_valued_matrices() {
 
 // Release gate: all 2^15 two-valued matrices on 6 points, dims 0..=3, all 16
 // combinations of the three optimization toggles and edge collapse. The
-// oracle runs once per matrix at max_dim 3. For a lower max_dim, the
-// expectation is that result restricted to bars of dimension <= max_dim.
-// Reduction decomposes by dimension, and the (k+1)-skeleton settles the
-// essential dim-k classes.
+// oracle runs once per matrix at
+// max_dim 3. For a lower max_dim, the expectation is that result restricted
+// to bars of dimension <= max_dim. Reduction decomposes by dimension, and
+// the (k+1)-skeleton settles the essential dim-k classes.
 #[test]
 #[ignore = "exhaustive 6-point sweep; run with --ignored, preferably in release"]
 fn exhaustive_six_point_sweep_all_dims_and_toggles() {
@@ -165,7 +165,7 @@ fn sweep_one_matrix(mask: u32, modulus: u32) {
         (CollapseSchedule::Serial, 1),
         (CollapseSchedule::Ordered, 2),
         (CollapseSchedule::Rounds, 2),
-        (CollapseSchedule::Serial, 2),
+        (CollapseSchedule::Adaptive, 2),
     ];
     for (max_dim, &(schedule, threads)) in schedules.iter().enumerate() {
         let expected: Vec<_> = full
