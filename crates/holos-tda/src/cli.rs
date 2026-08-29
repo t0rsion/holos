@@ -131,7 +131,7 @@ enum DiagramFormat {
 fn version_string() -> &'static str {
     let profile = crate::BUILD_PROFILE;
     // clap without its "string" feature wants &'static str. The one-time
-    // leak lives for the whole process anyway.
+    // leak lives for the whole process.
     Box::leak(format!("{} ({}, {profile})", crate::VERSION, crate::GIT_HASH).into_boxed_str())
 }
 
@@ -249,8 +249,8 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = DiagramFormat::Ripser)]
     output: DiagramFormat,
 
-    // Debug toggles. Each flag disables one pure optimization. Barcodes must
-    // be identical either way (tested), so the flags are hidden from help.
+    // Debug flags. Each disables one optimization. Barcodes must be identical
+    // either way (tested).
     #[arg(long, hide = true)]
     no_emergent_pairs: bool,
 
@@ -686,7 +686,7 @@ struct SynthesisCli {
     name = "holos synthesize-kinetic",
     version = version_string(),
     about = "Synthesize a minimum-cost plan over an exact affine threshold schedule",
-    after_help = "This command certifies a Rips cohomology rank condition. It does not by itself certify physical sensor coverage. Check the result with: holos-check ARTIFACT"
+    after_help = "This command certifies a Rips cohomology rank condition. It does not certify physical sensor coverage. Check the result with: holos-check ARTIFACT"
 )]
 struct KineticSynthesisCli {
     /// Affine trajectory with rows `u v intercept velocity`
@@ -1081,10 +1081,6 @@ fn infer_format(path: &Path) -> InputFormat {
     }
 }
 
-// Report the collapse before the reduction starts. The pipeline owns the
-// collapse result and, for a parallel schedule, shares one worker pool
-// across both phases, so the statistics come out of it rather than from a
-// separate standalone call.
 fn report_collapse(collapsed: &crate::collapse::CollapsedRips) {
     let s = &collapsed.stats;
     let epoch = match collapsed.certificate.algorithm_version() {
@@ -1583,8 +1579,7 @@ fn write_cli_diagram(cli: &Cli, diagram: &crate::Diagram, n_points: usize) -> cr
         DiagramFormat::Ripser => OutputFormat::Ripser,
         DiagramFormat::Csv => OutputFormat::Csv,
     };
-    // Stdout flushes on every line; a diagram of many bars is written once
-    // through a buffer.
+    // Stdout flushes on every line.
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::with_capacity(1 << 16, stdout.lock());
     io::write_diagram(
@@ -2813,7 +2808,7 @@ fn run_verify_intervention(cli: VerifyInterventionCli) -> crate::Result<()> {
 /// Run the `holos` CLI on `argv` and return the process exit code.
 ///
 /// `argv[0]` is the program name. The binary and the Python bindings both
-/// enter here, so the CLI behaves the same either way.
+/// enter here.
 pub fn run_cli<I, T>(argv: I) -> i32
 where
     I: IntoIterator<Item = T>,
