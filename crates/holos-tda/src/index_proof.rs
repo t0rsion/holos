@@ -159,7 +159,7 @@ impl ProofNode {
     }
 }
 
-/// One complete proof-carrying persistence-index snapshot.
+/// One complete persistence-index snapshot.
 #[derive(Debug, Clone)]
 pub struct IndexSnapshotProof {
     max_dim: usize,
@@ -173,7 +173,7 @@ pub struct IndexSnapshotProof {
 }
 
 impl IndexSnapshotProof {
-    /// Capture a complete index version.
+    /// Capture the current index version.
     pub fn from_index(index: &PersistenceIndex) -> Result<Self, IndexProofError> {
         let mut nodes = Vec::new();
         let mut seen = BTreeSet::new();

@@ -115,7 +115,7 @@ pub struct CohomologySubspaceGenerator {
 /// A basis-independent subspace of one canonical cohomology space.
 ///
 /// The stored generators are reduced coordinates in the ambient canonical
-/// basis. Changing a generating family does not change the constructed value.
+/// basis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CohomologySubspace {
     space: CohomologySpaceId,

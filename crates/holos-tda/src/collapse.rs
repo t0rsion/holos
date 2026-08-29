@@ -1,9 +1,9 @@
 //! Filtered edge collapse for flag filtrations.
 //!
 //! The collapse removes edges that are dominated at every scale from their
-//! birth to the terminal level (the filtration-wide multi-witness criterion
-//! of Boissonnat and Pritam). The flag filtration of the reduced graph has
-//! the same persistence diagram as the input, in every dimension. Each
+//! birth to the terminal level. That is the filtration-wide multi-witness
+//! criterion of Boissonnat and Pritam. The flag filtration of the reduced
+//! graph has the same persistence diagram as the input, in every dimension. Each
 //! removal is recorded in a replayable [`CollapseCertificate`] that the
 //! independent checker in [`verify`] can validate.
 //!
@@ -35,7 +35,7 @@ mod ordered;
 mod parallel;
 mod portfolio;
 pub mod verify;
-/// Portable collapse certificates and their reduced graphs.
+/// Collapse certificates and their reduced graphs.
 pub mod wire;
 
 pub(crate) use adaptive::collapse_adaptive_in;
@@ -144,7 +144,7 @@ impl SchedulePosition {
 }
 
 /// One removed edge: endpoints, original value, schedule position, and the
-/// piecewise witness function that certifies the removal.
+/// piecewise witness function.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemovalStep {
     u: usize,
@@ -182,8 +182,8 @@ impl RemovalStep {
 /// Replayable record of one collapse run.
 ///
 /// The certificate plus the collapsed matrix reconstruct the thresholded
-/// input. [`verify`] can replay and check every removal. The certificate
-/// is not a chain map and does not transport representatives.
+/// input. The certificate is not a chain map and does not transport
+/// representatives.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollapseCertificate {
     algorithm_version: u32,
@@ -240,8 +240,8 @@ impl CollapseCertificate {
         self.requested_threshold
     }
 
-    /// The level through which every removal is certified: the resolved
-    /// threshold if finite, otherwise the largest finite edge value.
+    /// Terminal filtration level: the resolved threshold if finite,
+    /// otherwise the largest finite edge value.
     pub fn terminal_level(&self) -> f64 {
         self.terminal_level
     }
@@ -301,8 +301,8 @@ pub struct CollapseStats {
     pub logical_tests: usize,
     /// Cached speculative results dropped before use, whether a
     /// conflicting removal or a large-neighborhood bail invalidated them.
-    /// Every dropped result runs again serially at its turn, so this is
-    /// also the repair count. Ordered schedule only.
+    /// Each dropped result is re-evaluated serially at its turn. Ordered
+    /// schedule only.
     pub invalidated_results: usize,
     /// Large-neighborhood marking bails during retirement that dropped at
     /// least one cached result ahead of them. Ordered schedule only.
@@ -389,9 +389,8 @@ pub struct CollapsedRips {
 ///
 /// `threshold` follows the engine's rule: `None` means the enclosing
 /// radius. Edges above the resolved threshold are dropped before the
-/// collapse and are not part of the certified input. The parallel forms
-/// are [`collapse_dense_ordered_parallel`] and
-/// [`collapse_dense_rounds_parallel`].
+/// collapse. The parallel forms are [`collapse_dense_ordered_parallel`]
+/// and [`collapse_dense_rounds_parallel`].
 pub fn collapse_dense(dist: &DistanceMatrix, threshold: Option<f64>) -> Result<CollapsedRips> {
     collapse_impl(dist, threshold)
 }
@@ -421,8 +420,8 @@ struct EdgeRec {
 /// the position of the edge in the schedule array.
 type AdjEntry = (usize, f64, usize);
 
-/// The certificate header of a run: the vertex count, the level through
-/// which removals are certified, and the threshold the caller passed.
+/// The certificate header of a run: vertex count, terminal level, and
+/// the threshold the caller passed.
 struct Run {
     n: usize,
     terminal: f64,

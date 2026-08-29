@@ -70,11 +70,10 @@ pub struct RelativeInterfaceWork {
     pub reduction_additions: usize,
 }
 
-/// A proof-carrying filtered chain core relative to protected vertices.
+/// A filtered chain core relative to protected vertices.
 ///
 /// The record includes its input chain complex, cancellation trace, retained
-/// core, and one `D V = R` reduction per boundary dimension. [`Self::verify`]
-/// checks these objects without the implicit persistence engine.
+/// core, and one `D V = R` reduction per boundary dimension.
 #[derive(Debug, Clone)]
 pub struct RelativeInterfaceCertificate {
     max_dim: usize,

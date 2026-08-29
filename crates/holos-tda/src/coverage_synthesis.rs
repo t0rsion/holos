@@ -698,7 +698,7 @@ impl From<&CoveragePlanEvaluation> for EvaluationClaim {
     }
 }
 
-/// Proof-carrying coverage synthesis result.
+/// Coverage synthesis result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoverageSynthesisArtifact {
     specification: CoverageSpecification,
@@ -911,7 +911,7 @@ impl CoverageSynthesisArtifact {
         self.after.minimum_witness_triangles
     }
 
-    /// Content digest of the complete claim.
+    /// Content digest of the claim.
     pub fn digest(&self) -> &[u8; 32] {
         &self.digest
     }

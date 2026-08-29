@@ -478,7 +478,7 @@ enum ProofNode {
     },
 }
 
-/// Proof-carrying synthesis result.
+/// Synthesis result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SynthesisArtifact {
     specification: TopologicalSpecification,
@@ -717,7 +717,7 @@ impl SynthesisArtifact {
         &self.after_ranks
     }
 
-    /// Content digest of the complete claim.
+    /// Content digest of the claim.
     pub fn digest(&self) -> &[u8; 32] {
         &self.digest
     }

@@ -141,10 +141,10 @@ pub fn verify_sparse(
     )
 }
 
-/// Check a portable artifact against the dense input it claims to describe.
+/// Check an artifact against the dense input it claims to describe.
 ///
 /// Checks the artifact's cryptographic graph bindings first, then runs the
-/// same independent replay as [`verify_dense`].
+/// same replay as [`verify_dense`].
 pub fn verify_dense_artifact(
     dist: &DistanceMatrix,
     threshold: Option<f64>,
@@ -172,10 +172,10 @@ pub fn verify_dense_artifact(
     )
 }
 
-/// Check a portable artifact against the sparse input it claims to describe.
+/// Check an artifact against the sparse input it claims to describe.
 ///
 /// Checks the artifact's cryptographic graph bindings first, then runs the
-/// same independent replay as [`verify_sparse`].
+/// same replay as [`verify_sparse`].
 pub fn verify_sparse_artifact(
     dist: &SparseDistanceMatrix,
     threshold: Option<f64>,

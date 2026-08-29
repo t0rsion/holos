@@ -1,4 +1,4 @@
-//! Canonical portable artifacts for certified edge collapse.
+//! Canonical artifacts for edge collapse.
 //!
 //! An artifact contains the reduced graph and its collapse certificate. It
 //! binds both the thresholded input graph and the reduced graph with SHA-256.

@@ -95,7 +95,7 @@ pub enum KineticEventKind {
     },
 }
 
-/// Certified enclosure of one exact kinetic event time.
+/// Adjacent-`f64` enclosure of one kinetic event time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KineticEvent {
     /// Best `f64` approximation to the exact rational time.
@@ -191,7 +191,7 @@ pub struct KineticZigzag {
     pub barcode: ZigzagBarcode,
 }
 
-/// Position represented by one graph in a complete fixed-scale schedule.
+/// Position represented by one graph in a fixed-scale schedule.
 #[derive(Debug, Clone, PartialEq)]
 pub enum KineticGraphStateKind {
     /// Exact first time of the closed interval.
@@ -207,7 +207,7 @@ pub enum KineticGraphStateKind {
     End,
 }
 
-/// One active graph in a complete fixed-scale kinetic schedule.
+/// One active graph in a fixed-scale kinetic schedule.
 #[derive(Debug, Clone)]
 pub struct KineticGraphState {
     /// Endpoint, open cell, or exact event represented by this state.

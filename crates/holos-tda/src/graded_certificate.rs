@@ -197,7 +197,7 @@ fn graded_repair_mode(work: &GradedReductionRepairWork) -> ReductionRepairMode {
 }
 
 impl GradedReductionCertificate {
-    /// Produce an exact certificate through the requested homology dimension.
+    /// Produce a certificate through the requested homology dimension.
     ///
     /// The producer materializes flag simplices through dimension
     /// `max_dim + 1`. [`CertificateLimits`] bounds each simplex collection
@@ -271,7 +271,7 @@ impl GradedReductionCertificate {
         Ok(self.verify_parts(input, limits)?.1.diagram)
     }
 
-    /// Highest certified homology dimension.
+    /// Highest homology dimension.
     pub fn max_dim(&self) -> usize {
         self.max_dim
     }

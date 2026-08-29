@@ -62,7 +62,7 @@ impl ExplicitReductionCertificate {
         &self.complex
     }
 
-    /// Highest certified homology dimension.
+    /// Highest homology dimension.
     pub fn max_homology_dimension(&self) -> usize {
         self.max_homology_dimension
     }
@@ -82,7 +82,7 @@ impl ExplicitReductionCertificate {
         &self.diagram
     }
 
-    /// Content digest of the complete payload.
+    /// Content digest of the payload.
     pub fn digest(&self) -> &[u8; 32] {
         &self.digest
     }

@@ -43,10 +43,10 @@ impl Default for IndexParams {
     }
 }
 
-/// Policy for exact parent interfaces.
+/// Policy for parent interfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterfacePolicy {
-    /// Compose exact relative cores through arbitrary protected separators.
+    /// Compose relative cores through arbitrary protected separators.
     Relative,
     /// Compose at a certified separator and materialize other parents.
     Compose,
@@ -282,7 +282,7 @@ pub struct IndexDiff {
 pub struct IndexBranch {
     /// Position of the alternative in the input batch.
     pub index: usize,
-    /// Exact transition from the shared branch point.
+    /// Transition from the shared branch point.
     pub transition: IndexTransition,
 }
 
@@ -402,7 +402,7 @@ impl InterfaceNode {
     }
 }
 
-/// An immutable, versioned exact persistence index.
+/// An immutable, versioned persistence index.
 ///
 /// The listed vertices and edges form an envelope. Weight changes and
 /// threshold crossings inside that envelope preserve the separator tree.
@@ -419,7 +419,7 @@ pub struct PersistenceIndex {
 }
 
 impl PersistenceIndex {
-    /// Compile an exact separator-tree index through `params.max_dim`.
+    /// Compile a separator-tree index through `params.max_dim`.
     pub fn compile(
         input: &SparseDistanceMatrix,
         params: &RipsParams,
@@ -462,7 +462,7 @@ impl PersistenceIndex {
         })
     }
 
-    /// Exact current diagram through the configured homology dimension.
+    /// Current diagram through the configured homology dimension.
     pub fn diagram(&self) -> &Diagram {
         self.root.diagram()
     }

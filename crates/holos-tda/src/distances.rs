@@ -189,9 +189,8 @@ impl DistanceMatrix {
         })
     }
 
-    /// Minimum over i of the maximum over j of d(i, j). Past that radius
-    /// the complex is a cone and acquires no further homology. This is the
-    /// default threshold.
+    /// Default threshold: the minimum over i of the maximum over j of d(i, j).
+    /// Past that radius the complex is a cone and acquires no further homology.
     pub fn enclosing_radius(&self) -> f64 {
         if self.n < 2 {
             return 0.0;

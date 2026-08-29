@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{Error, Result, SparseDistanceMatrix};
 
-/// One schedule in an exact collapse portfolio.
+/// One schedule in a collapse portfolio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CollapsePortfolioCandidate {
@@ -37,7 +37,7 @@ pub enum CollapsePortfolioCandidate {
     },
 }
 
-/// Exact objective used to compare collapsed graphs.
+/// Objective used to compare collapsed graphs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CollapsePortfolioObjective {
@@ -55,7 +55,7 @@ pub enum CollapsePortfolioObjective {
     },
 }
 
-/// Resource limits for exact collapse portfolio selection.
+/// Resource limits for collapse portfolio selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CollapsePortfolioLimits {
@@ -91,7 +91,7 @@ impl CollapsePortfolioLimits {
     }
 }
 
-/// Exact surviving-simplex score for one candidate.
+/// Surviving-simplex score for one candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollapsePortfolioScore {
     simplex_counts: Vec<u64>,
@@ -111,7 +111,7 @@ impl CollapsePortfolioScore {
     }
 }
 
-/// One verified candidate and its exact score.
+/// One verified candidate and its score.
 #[derive(Debug, Clone)]
 pub struct CollapsePortfolioEntry {
     candidate: CollapsePortfolioCandidate,
@@ -125,7 +125,7 @@ impl CollapsePortfolioEntry {
         self.candidate
     }
 
-    /// Exact score recomputed from the reduced graph.
+    /// Score recomputed from the reduced graph.
     pub fn score(&self) -> &CollapsePortfolioScore {
         &self.score
     }
@@ -136,7 +136,7 @@ impl CollapsePortfolioEntry {
     }
 }
 
-/// Exact result over one declared collapse portfolio.
+/// Result over one declared collapse portfolio.
 #[derive(Debug, Clone)]
 pub struct CollapsePortfolio {
     objective: CollapsePortfolioObjective,
@@ -155,7 +155,7 @@ impl CollapsePortfolio {
         &self.entries
     }
 
-    /// Index of the exact lexicographic minimum.
+    /// Index of the lexicographic minimum.
     pub fn selected_index(&self) -> usize {
         self.selected
     }
@@ -199,7 +199,7 @@ impl CollapsePortfolio {
     }
 }
 
-/// Run and verify an exact portfolio of sparse collapse schedules.
+/// Run and verify a portfolio of sparse collapse schedules.
 ///
 /// Ties keep the first candidate in caller order. Candidate order is part of
 /// the declared finite optimization problem.
@@ -471,7 +471,7 @@ fn portfolio_error(message: impl Into<String>) -> Error {
 const PORTFOLIO_MAGIC: &[u8; 8] = b"HOLOSPOR";
 const PORTFOLIO_VERSION: u16 = 1;
 
-/// Decoder limits for a portable collapse portfolio.
+/// Decoder limits for a collapse portfolio artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CollapsePortfolioDecodeLimits {
@@ -493,7 +493,7 @@ impl Default for CollapsePortfolioDecodeLimits {
     }
 }
 
-/// One candidate carried by a portable collapse portfolio.
+/// One candidate carried by a collapse portfolio artifact.
 #[derive(Debug, Clone)]
 pub struct CollapsePortfolioArtifactEntry {
     candidate: CollapsePortfolioCandidate,
@@ -507,7 +507,7 @@ impl CollapsePortfolioArtifactEntry {
         self.candidate
     }
 
-    /// Declared exact score.
+    /// Declared score.
     pub fn score(&self) -> &CollapsePortfolioScore {
         &self.score
     }
@@ -518,7 +518,7 @@ impl CollapsePortfolioArtifactEntry {
     }
 }
 
-/// Portable proof of exact selection over a finite collapse portfolio.
+/// Proof of exact selection over a finite collapse portfolio.
 #[derive(Debug, Clone)]
 pub struct CollapsePortfolioArtifact {
     objective: CollapsePortfolioObjective,
@@ -528,7 +528,7 @@ pub struct CollapsePortfolioArtifact {
 }
 
 impl CollapsePortfolioArtifact {
-    /// Build a portable artifact from a computed portfolio.
+    /// Build an artifact from a computed portfolio.
     pub fn from_portfolio(
         portfolio: &CollapsePortfolio,
         limits: CollapsePortfolioLimits,
@@ -554,7 +554,7 @@ impl CollapsePortfolioArtifact {
         Ok(artifact)
     }
 
-    /// Exact score objective.
+    /// Score objective.
     pub fn objective(&self) -> CollapsePortfolioObjective {
         self.objective
     }
@@ -579,7 +579,7 @@ impl CollapsePortfolioArtifact {
         &self.digest
     }
 
-    /// Recheck every collapse proof, exact score, and the selected minimum.
+    /// Recheck every collapse proof, score, and the selected minimum.
     pub fn verify_sparse(
         &self,
         input: &SparseDistanceMatrix,

@@ -58,7 +58,7 @@ impl GeometryBoundCoverageArtifact {
         &self.coverage
     }
 
-    /// Content digest of the complete outer payload.
+    /// Content digest of the outer payload.
     pub fn digest(&self) -> &[u8; 32] {
         &self.digest
     }

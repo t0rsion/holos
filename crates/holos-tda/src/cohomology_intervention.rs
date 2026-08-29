@@ -171,7 +171,7 @@ impl CohomologyInterventionStatus {
     }
 }
 
-/// Self-contained weighted multi-scenario intervention certificate.
+/// Weighted multi-scenario intervention certificate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CohomologyInterventionArtifact {
     vertex_count: usize,
@@ -357,7 +357,7 @@ impl CohomologyInterventionArtifact {
         Ok(artifact)
     }
 
-    /// Recompute the complete bounded search and compare every claim.
+    /// Recompute the bounded search and compare every claim.
     pub fn verify(&self, limits: CohomologyInterventionLimits) -> Result<()> {
         if self.oracle_limit > limits.max_oracle_calls || self.node_limit > limits.max_search_nodes
         {
@@ -513,7 +513,7 @@ impl CohomologyInterventionArtifact {
     pub fn after_ranks(&self) -> &[usize] {
         &self.after_ranks
     }
-    /// Content digest of the complete claim.
+    /// Content digest of the claim.
     pub fn digest(&self) -> &[u8; 32] {
         &self.digest
     }

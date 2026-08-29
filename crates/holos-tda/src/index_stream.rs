@@ -1,4 +1,4 @@
-//! Stateful exact index streams with proof output.
+//! Stateful index streams with proof output.
 
 use crate::{
     CorrespondenceMode, Error, IndexDeltaProof, IndexProofError, IndexSnapshotProof,
@@ -36,7 +36,7 @@ pub struct IndexStreamStep {
     pub sequence: u64,
     /// Exact index transition.
     pub transition: IndexTransition,
-    /// Independently checkable proof for the new root.
+    /// Proof of the new root.
     pub proof: IndexStreamProof,
 }
 
