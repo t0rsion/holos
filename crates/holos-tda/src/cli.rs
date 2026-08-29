@@ -900,13 +900,13 @@ struct AffineCoverageCli {
 #[command(
     name = "holos verify-collapse",
     version = version_string(),
-    about = "Verify a portable collapse artifact against its input"
+    about = "Verify a collapse artifact against its input"
 )]
 struct VerifyCli {
     /// Original point cloud, lower-distance matrix, or sparse triplets
     input: PathBuf,
 
-    /// Portable collapse artifact written by --collapse-certificate
+    /// Collapse artifact written by --collapse-certificate
     artifact: PathBuf,
 
     /// Input format. Inferred from the input extension when omitted.
@@ -937,7 +937,7 @@ struct VerifyAtlasCli {
     /// Original point cloud, lower-distance matrix, or sparse triplets
     input: PathBuf,
 
-    /// Portable atlas written by --atlas
+    /// Atlas written by --atlas
     artifact: PathBuf,
 
     /// Input format. Inferred from the input extension when omitted.
@@ -961,7 +961,7 @@ struct VerifyAtlasCli {
     about = "Verify a self-contained persistence trajectory"
 )]
 struct VerifyTrajectoryCli {
-    /// Portable trajectory artifact
+    /// Trajectory artifact
     artifact: PathBuf,
 
     /// Largest artifact accepted while reading the file
@@ -979,7 +979,7 @@ struct VerifyProgramCli {
     /// Original point cloud, lower-distance matrix, or sparse triplets
     input: PathBuf,
 
-    /// Portable program written by --program
+    /// Program written by --program
     artifact: PathBuf,
 
     /// Input format. Inferred from the input extension when omitted.
@@ -1003,7 +1003,7 @@ struct VerifyProgramCli {
     about = "Verify a self-contained compositional persistence trace"
 )]
 struct VerifyProgramTraceCli {
-    /// Portable program trace artifact
+    /// Program trace artifact
     artifact: PathBuf,
 
     /// Largest artifact accepted while reading the file
@@ -1060,7 +1060,7 @@ struct InterveneCli {
     about = "Verify a self-contained finite H1 intervention"
 )]
 struct VerifyInterventionCli {
-    /// Portable intervention artifact
+    /// Intervention artifact
     artifact: PathBuf,
 
     /// Largest artifact accepted while reading the file

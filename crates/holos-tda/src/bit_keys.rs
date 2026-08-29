@@ -1,11 +1,10 @@
 //! Test-only gate on the heap's bit keys.
 //!
 //! The working column's heap orders diameters by their IEEE bit pattern
-//! read as `u64`. It used to order them with `f64::total_cmp`. The two
-//! agree on every value the engine can produce: not NaN, not negative, and
-//! with no negative zero. This module holds the arbitrary-pattern gate on
-//! that claim, and a trace gate that drains the same column through both
-//! comparators and compares what comes out.
+//! read as `u64`. That order agrees with `f64::total_cmp` on every value
+//! the engine can produce: not NaN, not negative, and with no negative
+//! zero. The tests also drain the same column through both comparators
+//! and compare the traces.
 //!
 //! The gate lives in the crate because the heap, the entry packing, and the
 //! cancellation rule are internal.

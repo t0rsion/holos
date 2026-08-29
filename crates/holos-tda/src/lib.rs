@@ -9,12 +9,12 @@
 pub(crate) mod adjacency;
 /// Certified local models of H1 persistence under changing inputs.
 pub mod atlas;
-/// Portable proof-carrying persistence atlases.
+/// Wire format for persistence atlases.
 pub mod atlas_wire;
 #[cfg(test)]
 mod bit_keys;
 pub(crate) mod budget;
-/// Solver-independent algebraic reduction certificates.
+/// Algebraic reduction certificates.
 pub mod certificate;
 /// Stable H1 classes and cocycle validation.
 pub mod classes;
@@ -61,18 +61,18 @@ pub mod intervention;
 pub mod io;
 /// Exact events for affine edge-weight trajectories.
 pub mod kinetic;
-/// Self-contained certificates for exact kinetic cohomology zigzags.
+/// Certificates for kinetic cohomology zigzags.
 pub mod kinetic_zigzag_artifact;
 mod monotone_proof;
 mod monotone_search;
-/// Independent brute-force reference implementation used by the test gates.
+/// Brute-force reference implementation used by the test gates.
 pub mod oracle;
 pub(crate) mod parallel;
-/// Compositional, change-sensitive persistence programs.
+/// Compositional H0 and H1 persistence programs.
 pub mod program;
-/// Portable independently checked persistence-program update traces.
+/// Update traces for persistence programs.
 pub mod program_trace;
-/// Portable proof-carrying compositional persistence programs.
+/// Wire format for persistence programs.
 pub mod program_wire;
 /// Unified proof DAGs for checked persistence trajectories.
 pub mod proof;
@@ -83,7 +83,7 @@ pub(crate) mod simplex;
 pub(crate) mod solver;
 /// Proof-carrying synthesis for finite temporal topology specifications.
 pub mod synthesis;
-/// Portable checked trajectories across atlas regions.
+/// Trajectories across atlas regions.
 pub mod trajectory;
 mod union_find;
 /// Exact interval decomposition of finite zigzag modules.
@@ -295,18 +295,16 @@ pub struct RipsParams {
     /// The diagram is identical either way. See [`collapse`].
     pub collapse_edges: bool,
     /// The schedule the collapse uses with `collapse_edges` set. Default
-    /// [`CollapseSchedule::Serial`]. The diagram is identical under every
-    /// schedule.
+    /// [`CollapseSchedule::Serial`]. See [`CollapseSchedule`].
     pub collapse_schedule: CollapseSchedule,
     /// Objective and deterministic work limit for
     /// [`CollapseSchedule::Adaptive`]. Other schedules ignore this field.
     pub adaptive_collapse: collapse::AdaptiveCollapseParams,
-    /// Which engine reduces a dense input. Default [`Engine::Auto`]. The
-    /// diagram is identical under every setting. See [`Engine`].
+    /// Which engine reduces a dense input. Default [`Engine::Auto`]. See
+    /// [`Engine`].
     pub engine: Engine,
     /// Which storage form the dense engine reduces from. Default
-    /// [`DenseStorage::Auto`]. The diagram is identical under every
-    /// setting. See [`DenseStorage`].
+    /// [`DenseStorage::Auto`]. See [`DenseStorage`].
     pub dense_storage: DenseStorage,
     /// Structural decomposition of a sparse terminal graph. Default
     /// [`GraphFactorization::Off`]. Dense runs use it only after routing to
@@ -420,8 +418,7 @@ pub enum GraphFactorization {
     /// Reduce the whole terminal graph.
     #[default]
     Off,
-    /// Split every terminal graph. This is useful for exactness tests and
-    /// controlled measurements.
+    /// Split every terminal graph.
     Force,
 }
 
@@ -517,8 +514,8 @@ impl RipsParams {
     }
 
     /// Collapse dominated edges with the given schedule before the engine
-    /// runs. Also sets [`RipsParams::collapse_edges`]. The diagram is
-    /// identical under every schedule.
+    /// runs. Also sets [`RipsParams::collapse_edges`]. See
+    /// [`CollapseSchedule`].
     pub fn with_collapse_schedule(mut self, schedule: CollapseSchedule) -> Self {
         self.collapse_edges = true;
         self.collapse_schedule = schedule;
@@ -534,22 +531,21 @@ impl RipsParams {
         self
     }
 
-    /// Choose the engine for a dense input. The diagram is identical under
-    /// every setting. See [`Engine`].
+    /// Choose the engine for a dense input. See [`Engine`].
     pub fn with_engine(mut self, engine: Engine) -> Self {
         self.engine = engine;
         self
     }
 
-    /// Choose the storage form the dense engine reduces from. The diagram
-    /// is identical under every setting. See [`DenseStorage`].
+    /// Choose the storage form the dense engine reduces from. See
+    /// [`DenseStorage`].
     pub fn with_dense_storage(mut self, storage: DenseStorage) -> Self {
         self.dense_storage = storage;
         self
     }
 
-    /// Choose structural factorization for sparse reduction. The diagram is
-    /// identical under every setting.
+    /// Choose structural factorization for sparse reduction. See
+    /// [`GraphFactorization`].
     pub fn with_factorization(mut self, factorization: GraphFactorization) -> Self {
         self.factorization = factorization;
         self
@@ -669,8 +665,7 @@ fn memory_routes(n: usize, edges: usize) -> bool {
 }
 
 /// True when the counted graph is worth building: its density is at or
-/// below the cutoff and its conversion fits the budget. This is the whole
-/// decision [`Engine::Auto`] makes after the counting pass.
+/// below the cutoff and its conversion fits the budget.
 fn graph_routes(n: usize, edges: usize) -> bool {
     density_routes(n, edges) && memory_routes(n, edges)
 }
@@ -878,8 +873,7 @@ pub fn rips_persistence_sparse(
 /// reduction alone. Every surviving edge lies at or below the terminal
 /// level, so the terminal level is the exact threshold for the reduced
 /// complex. `report` sees the collapse result before the reduction
-/// starts, which is how the CLI prints its statistics without building a
-/// second pool.
+/// starts.
 pub(crate) fn collapse_and_solve<D: distances::Distances + Sync>(
     dist: &D,
     params: &RipsParams,
