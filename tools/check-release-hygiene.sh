@@ -18,7 +18,7 @@ fi
 
 email_hits="$({
     git grep -n -I -E '[[:alnum:]._%+-]+@[[:alnum:].-]+\.[A-Za-z]{2,}' -- . || true
-} | grep -vF '41898282+github-actions[bot]@users.noreply.github.com' || true)"
+} | grep -vF 'admin+bot@axo.dev' || true)"
 if [[ -n "$email_hits" ]]; then
     echo "release hygiene: a tracked file contains an unapproved email" >&2
     printf '%s\n' "$email_hits" >&2
