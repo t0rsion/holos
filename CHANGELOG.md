@@ -4,75 +4,43 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-This entry describes the local 0.7.0 release candidate. It has not been
-published.
+## [0.7.0] - 2026-08-29
 
 ### Added
 
-- Finite collapse portfolios. A portfolio runs serial, rounds, or
-  adaptive schedules, verifies every removal, counts surviving flag simplices,
-  and selects the exact minimum under an edge or reduction-column objective.
-  The `HOLOSPOR` artifact binds every candidate, score, and tie break.
-- Proof-carrying persistence for explicit scalar filtered complexes.
-  `ExplicitReductionCertificate` records dimension-generic
-  `D V = R` factorizations and exact diagrams in `HOLOSEXP`. The separate
-  checker reconstructs faces, boundaries, basis changes, pivots, and bars.
-- Geometry-bound finite coverage. `CoverageGeometry` checks a simple
-  nondegenerate fence polygon, sensor containment, and the complete Euclidean
-  radius graph with exact rational predicates over binary64 input.
-  `HOLOSGEO` combines that geometry with a failure-tolerant minimum-cost
-  coverage proof. The separate checker validates both layers.
-- Canonical H1 class spaces, point and edge sensitivity records, reusable
-  persistence atlases, proof-carrying programs, and validity-region events.
-- An immutable persistence index with structural sharing, atomic topology
-  patches, warm proof deltas, durable streams, and exact diagrams through a
-  requested bounded dimension.
-- Exact compositional interfaces for disjoint pieces, zero-filtration
-  contractible intersections, and arbitrary protected subcomplexes. Local
-  content-addressed storage supports ordered folds and recovery. It does
-  not provide networking or multi-writer coordination.
-- Dimension-generic fixed-scale cohomology spaces, exact relations, affine
-  event arrangements, kinetic zigzag intervals, and weighted interventions
-  for named classes.
-- Exact weighted synthesis over finite and complete affine state schedules.
-  Proof trees certify optimal, infeasible, and incomplete results. The
-  checker does not rerun branch-and-bound search.
-- Relative planar coverage witnesses, maximal-failure reduction,
-  state-action component composition, and minimum-cost activation synthesis.
-- CLI and Python entry points for the certified workflows. `holos-check`
-  recognizes the independent proof, explicit-complex, kinetic, synthesis,
-  intervention, relative-interface, distributed-interface, and coverage
-  artifacts.
-- One consolidated certified-workflow study and one `formal/v07` suite for
-  the finite-choice, reduction, coverage, and optimization proof kernels.
+- Finite collapse portfolios select the exact minimum over declared serial,
+  rounds, and adaptive schedules by edge or reduction-column count.
+- Explicit filtered-complex certificates record dimension-generic
+  `D V = R` factorizations. The separate checker rebuilds the diagram.
+- Persistence atlases, immutable indexes, atomic patches, proof deltas, and
+  local durable streams support checked reuse and updates.
+- Canonical cohomology spaces, affine event schedules, kinetic zigzags, and
+  weighted interventions track named classes through change.
+- Proof trees certify weighted topology synthesis over finite or complete
+  affine state schedules.
+- Relative interfaces compose filtered pieces across protected subcomplexes.
+- Failure-tolerant coverage synthesis can bind graph claims to exact planar
+  radius geometry over binary64 input.
+- Rust, CLI, Python, and `holos-check` entry points expose these workflows.
+- A consolidated study and the `formal/v07` suite cover their proof kernels.
 
 ### Changed
 
 - The workspace uses Rust edition 2024 and declares Rust 1.85 as its minimum
   supported toolchain.
-- Public APIs are organized around filtered complexes, proof artifacts,
-  immutable indexes, and typed synthesis specifications. Pre-1.0 source
-  compatibility with experimental interfaces is not preserved.
-- Historical one-release benchmark drivers were replaced by the v0.7
-  certified-workflow study. Published 0.6 engine and collapse studies remain
-  unchanged.
+- Public APIs now center on filtered complexes, proof artifacts, immutable
+  indexes, and typed synthesis specifications. Experimental pre-1.0 APIs are
+  not source compatible.
+- The v0.7 certified-workflow study replaces historical one-release drivers.
 
 ### Correctness and limits
 
-- The tracked Rust and Python functions have McCabe complexity below 11.
-  Release work rejects any function above that threshold.
-- `holos-tda-check` shares mathematical specifications and wire formats with
-  the producer, but does not link the producer crate. The collapse portfolio
-  still uses the linked collapse verifier.
-- The SMT suite checks small logical obligations. It is not a machine proof of
-  the Rust implementation or of the controlled-boundary theorem.
-- SHA-256 binds artifact content. It does not authenticate a producer.
-- Geometry binding accepts finite planar states. Affine coverage remains a
-  graph-level conditional claim.
-- The new certified workflows make no public performance or priority claim
-  until their registered confirmation records exist.
+- `holos-tda-check` does not link the producer. Collapse artifacts still use
+  the linked collapse verifier.
+- The SMT suite checks logical kernels, not the compiled Rust implementation.
+- Portfolio optimality covers only the declared schedules. Geometry binding
+  covers finite planar states. SHA-256 does not authenticate a producer.
+- The new workflows make no general performance or priority claim.
 
 ## [0.6.0] - 2026-08-26
 
@@ -565,7 +533,8 @@ First public release.
 - Reproducible benchmark harness (`benchmarks/run.sh`) that refuses dirty
   trees, records full provenance, and fails on any diagram mismatch.
 
-[Unreleased]: https://github.com/t0rsion/holos/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/t0rsion/holos/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/t0rsion/holos/releases/tag/v0.7.0
 [0.6.0]: https://github.com/t0rsion/holos/releases/tag/v0.6.0
 [0.5.0]: https://github.com/t0rsion/holos/releases/tag/v0.5.0
 [0.4.0]: https://github.com/t0rsion/holos/releases/tag/v0.4.0

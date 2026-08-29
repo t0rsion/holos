@@ -12,6 +12,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  release-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: tools/check-release-hygiene.sh
+
   fmt:
     runs-on: ubuntu-latest
     steps:

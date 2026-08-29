@@ -10,10 +10,10 @@ accepts point clouds, dense distance matrices, and sparse weighted graphs. The
 implicit engine uses clearing, emergent pairs, apparent pairs, and sparse
 cofacet enumeration.
 
-Version 0.7 is a work in progress. It adds proof-carrying and dynamic topology
-around that engine. The main new paths cover checked edge-collapse choice,
-explicit filtered complexes, reusable reductions, exact class dynamics,
-topological synthesis, and planar coverage.
+Version 0.7 adds proof-carrying and dynamic topology around that engine. The
+main new paths cover checked edge-collapse choice, explicit filtered
+complexes, reusable reductions, exact class dynamics, topological synthesis,
+and planar coverage.
 
 The project does not implement Mapper, Cech, alpha, cubical, or
 multiparameter persistence. The explicit filtered-complex API is the

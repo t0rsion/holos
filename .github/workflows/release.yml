@@ -45,7 +45,7 @@ on:
       - '**[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
-  # Run 'dist plan' (or host) to determine what tasks we need to do
+  # Compute the release plan.
   plan:
     runs-on: "ubuntu-22.04"
     outputs:
@@ -70,11 +70,8 @@ jobs:
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/dist
-      # sure would be cool if github gave us proper conditionals...
-      # so here's a doubly-nested ternary-via-truthiness to try to provide the best possible
-      # functionality based on whether this is a pull_request, and whether it's from a fork.
-      # (PRs run on the *source* but secrets are usually on the *target* -- that's *good*
-      # but also really annoying to build CI around when it needs secrets to work right.)
+      # Pull requests plan a release. Tags create one. Pull requests from
+      # forks cannot read repository secrets.
       - id: plan
         run: |
           dist ${{ (!github.event.pull_request && format('host --steps=create --tag={0}', github.ref_name)) || 'plan' }} --output-format=json > plan-dist-manifest.json
@@ -90,13 +87,13 @@ jobs:
   # Build and packages all the platform-specific things
   build-local-artifacts:
     name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
-    # Let the initial task tell us to not run (currently very blunt)
+    # Skip this job when the release plan has no local artifacts.
     needs:
       - plan
     if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
     strategy:
       fail-fast: false
-      # Target platforms/runners are computed by dist in create-release.
+      # Dist computes the target platforms and runners.
       # Each member of the matrix has the following arguments:
       #
       # - runner: the github runner
@@ -141,14 +138,12 @@ jobs:
           ${{ matrix.packages_install }}
       - name: Build artifacts
         run: |
-          # Actually do builds and make zips and whatnot
+          # Build archives and platform installers.
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
       - id: cargo-dist
         name: Post-build
-        # We force bash here just because github makes it really hard to get values up
-        # to "real" actions without writing to env-vars, and writing to env-vars has
-        # inconsistent syntax between shell and powershell.
+        # Bash gives output variables one syntax on every runner.
         shell: bash
         run: |
           # Parse out what we just built and upload it to scratch storage
@@ -211,13 +206,13 @@ jobs:
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
-  # Determines if we should publish/announce
+  # Publish the artifacts after every required build succeeds.
   host:
     needs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
-    # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
+    # A pull request does not publish. Skipped artifact jobs are acceptable.
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -255,7 +250,7 @@ jobs:
           # Overwrite the previous copy
           name: artifacts-dist-manifest
           path: dist-manifest.json
-      # Create a GitHub Release while uploading all files to it
+      # Create the GitHub release and attach every public artifact.
       - name: "Download GitHub Artifacts"
         uses: actions/download-artifact@v8
         with:
@@ -264,7 +259,7 @@ jobs:
           merge-multiple: true
       - name: Cleanup
         run: |
-          # Remove the granular manifests
+          # Remove internal manifests from the public artifact set.
           rm -f artifacts/*-dist-manifest.json
       - name: Create GitHub Release
         env:
@@ -273,7 +268,7 @@ jobs:
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
         run: |
-          # Write and read notes from a file to avoid quoting breaking things
+          # Pass release notes through a file to preserve their quoting.
           echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
@@ -286,8 +281,8 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PLAN: ${{ needs.plan.outputs.val }}
-      GITHUB_USER: "axo bot"
-      GITHUB_EMAIL: "admin+bot@axo.dev"
+      GITHUB_USER: "github-actions[bot]"
+      GITHUB_EMAIL: "41898282+github-actions[bot]@users.noreply.github.com"
     if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
     steps:
       - uses: actions/checkout@v6
@@ -295,15 +290,15 @@ jobs:
           persist-credentials: true
           repository: "t0rsion/homebrew-tap"
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-      # So we have access to the formula
+      # Download the generated Homebrew formula.
       - name: Fetch homebrew formulae
         uses: actions/download-artifact@v8
         with:
           pattern: artifacts-*
           path: Formula/
           merge-multiple: true
-      # This is extra complex because you can make your Formula name not match your app name
-      # so we need to find releases with a *.rb file, and publish with that filename.
+      # A formula name can differ from its application name. Select releases
+      # by the generated `.rb` file.
       - name: Commit formula files
         run: |
           git config --global user.name "${GITHUB_USER}"
@@ -316,7 +311,7 @@ jobs:
 
             export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
             brew update
-            # We avoid reformatting user-provided data such as the app description and homepage.
+            # Keep the application description and homepage unchanged.
             brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}" || true
 
             git add "Formula/${filename}"
@@ -329,9 +324,8 @@ jobs:
       - plan
       - host
       - publish-homebrew-formula
-    # use "always() && ..." to allow us to wait for all publish jobs while
-    # still allowing individual publish jobs to skip themselves (for prereleases).
-    # "host" however must run to completion, no skipping allowed!
+    # Wait for every publish job. A prerelease may skip the Homebrew job, but
+    # the host job must succeed.
     if: ${{ always() && needs.host.result == 'success' && (needs.publish-homebrew-formula.result == 'skipped' || needs.publish-homebrew-formula.result == 'success') }}
     runs-on: "ubuntu-22.04"
     env:
