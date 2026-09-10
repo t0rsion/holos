@@ -1,0 +1,41 @@
+{
+  "format": "holos-external-bipersistence-input-v1",
+  "modulus": 2,
+  "homology_dimension": 1,
+  "cases": [
+    {
+      "name": "two-cycles",
+      "source_id": "explicit-two-cycles-v1",
+      "vertex_count": 7,
+      "threshold": 3.0,
+      "scales": [1.0, 2.0, 3.0],
+      "minimum_degrees": [6, 5, 4, 3, 2, 1, 0],
+      "edges": [
+        [0, 1, 1.0],
+        [1, 2, 1.0],
+        [2, 3, 1.0],
+        [0, 3, 1.0],
+        [0, 4, 2.0],
+        [4, 5, 2.0],
+        [5, 6, 2.0],
+        [0, 6, 2.0]
+      ]
+    },
+    {
+      "name": "square-with-diagonals",
+      "source_id": "explicit-square-diagonals-v1",
+      "vertex_count": 4,
+      "threshold": 2.0,
+      "scales": [1.0, 2.0],
+      "minimum_degrees": [3, 2, 1, 0],
+      "edges": [
+        [0, 1, 1.0],
+        [1, 2, 1.0],
+        [2, 3, 1.0],
+        [0, 3, 1.0],
+        [0, 2, 2.0],
+        [1, 3, 2.0]
+      ]
+    }
+  ]
+}

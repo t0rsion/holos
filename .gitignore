@@ -1,6 +1,7 @@
 /target/
 benchmarks/results*.txt
 benchmarks/results*.md
+benchmarks/results*.json
 benchmarks/data/
 benchmarks/*.csv
 __pycache__/

@@ -1,19 +1,25 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::process::ExitCode;
 
 use holos_tda_check::{
-    IndexProofState, ProofBundle, ProofLimits, VerifiedCoverageSource, VerifiedSynthesisSource,
-    is_cohomology_intervention, is_coverage, is_distributed_interface, is_explicit_persistence,
-    is_geometry_bound_coverage, is_index_snapshot, is_kinetic_zigzag, is_relative_interface,
-    is_synthesis, verify_cohomology_intervention, verify_coverage,
-    verify_distributed_interface_with, verify_explicit_persistence, verify_geometry_bound_coverage,
-    verify_kinetic_zigzag, verify_relative_interface, verify_synthesis,
+    BipersistenceProofLimits, CircularProofLimits, ProgramGraph, ProgramProofLimits,
+    ProgramTraceProofLimits, ProofBundle, ProofLimits, VerifiedCoverageSource,
+    VerifiedSynthesisSource, is_bipersistence, is_circular_coordinate, is_cohomology_intervention,
+    is_coverage, is_distributed_interface, is_explicit_persistence, is_geometry_bound_coverage,
+    is_index_snapshot, is_kinetic_zigzag, is_program, is_program_trace, is_relative_interface,
+    is_synthesis, verify_bipersistence, verify_circular_coordinate, verify_cohomology_intervention,
+    verify_coverage, verify_explicit_persistence, verify_geometry_bound_coverage,
+    verify_kinetic_zigzag, verify_program, verify_program_trace, verify_relative_interface,
+    verify_synthesis,
 };
-use sha2::Digest;
+
+#[path = "main/records.rs"]
+mod records;
+
+use records::{run_distributed, run_index};
 
 fn run() -> Result<(), String> {
     let mut arguments = env::args_os();
@@ -31,6 +37,10 @@ fn run() -> Result<(), String> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ArtifactKind {
+    Program,
+    ProgramTrace,
+    Bipersistence,
+    Circular,
     GeometryBoundCoverage,
     Coverage,
     Synthesis,
@@ -53,8 +63,12 @@ fn artifact_kind(bytes: &[u8]) -> ArtifactKind {
 type ArtifactProbe = fn(&[u8]) -> bool;
 type ArtifactRunner = fn(&str, &[u8], &[std::ffi::OsString]) -> Result<(), String>;
 
-fn artifact_probes() -> [(ArtifactProbe, ArtifactKind); 9] {
+fn artifact_probes() -> [(ArtifactProbe, ArtifactKind); 13] {
     [
+        (is_program_trace, ArtifactKind::ProgramTrace),
+        (is_program, ArtifactKind::Program),
+        (is_bipersistence, ArtifactKind::Bipersistence),
+        (is_circular_coordinate, ArtifactKind::Circular),
         (
             is_geometry_bound_coverage,
             ArtifactKind::GeometryBoundCoverage,
@@ -83,8 +97,12 @@ fn run_artifact(
     runner(program, bytes, rest)
 }
 
-fn artifact_runners() -> [(ArtifactKind, ArtifactRunner); 10] {
+fn artifact_runners() -> [(ArtifactKind, ArtifactRunner); 14] {
     [
+        (ArtifactKind::ProgramTrace, run_program_trace),
+        (ArtifactKind::Program, run_program),
+        (ArtifactKind::Bipersistence, run_bipersistence),
+        (ArtifactKind::Circular, run_circular),
         (
             ArtifactKind::GeometryBoundCoverage,
             run_geometry_bound_coverage,
@@ -99,6 +117,93 @@ fn artifact_runners() -> [(ArtifactKind, ArtifactRunner); 10] {
         (ArtifactKind::Index, run_index_adapter),
         (ArtifactKind::Trajectory, run_trajectory),
     ]
+}
+
+fn run_program_trace(
+    program: &str,
+    bytes: &[u8],
+    rest: &[std::ffi::OsString],
+) -> Result<(), String> {
+    require_single_artifact(
+        rest,
+        format!("usage for a persistence program trace: {program} TRACE"),
+    )?;
+    let checked = verify_program_trace(bytes, ProgramTraceProofLimits::default())
+        .map_err(|error| error.to_string())?;
+    println!(
+        "verified H0 and H1 persistence trace over Z/{} on {} vertices and {} edges across {} steps with {} final bars; graph bindings, reduction replay, work counters, continuations, and correspondences checked, scheduling policy not certified",
+        checked.modulus, checked.vertices, checked.edges, checked.steps, checked.bars,
+    );
+    Ok(())
+}
+
+fn run_program(program: &str, bytes: &[u8], rest: &[std::ffi::OsString]) -> Result<(), String> {
+    if rest.len() != 1 {
+        return Err(format!(
+            "usage for a persistence program: {program} PROGRAM SOURCE_GRAPH"
+        ));
+    }
+    let graph_bytes = fs::read(&rest[0]).map_err(|error| format!("read {:?}: {error}", rest[0]))?;
+    let graph = ProgramGraph::parse_text(&graph_bytes).map_err(|error| error.to_string())?;
+    let checked = verify_program(bytes, &graph, ProgramProofLimits::default())
+        .map_err(|error| error.to_string())?;
+    println!(
+        "verified H0 and H1 persistence program over Z/{} on {} vertices and {} edges with {} atoms, {} cyclic atoms, {} class spaces, {} reduction columns, and {} bars",
+        checked.modulus,
+        checked.vertices,
+        checked.edges,
+        checked.atoms,
+        checked.cyclic_atoms,
+        checked.class_spaces,
+        checked.reduction_columns,
+        checked.bars,
+    );
+    Ok(())
+}
+
+fn run_bipersistence(
+    program: &str,
+    bytes: &[u8],
+    rest: &[std::ffi::OsString],
+) -> Result<(), String> {
+    require_single_artifact(rest, format!("usage for bipersistence: {program} ARTIFACT"))?;
+    let checked = verify_bipersistence(bytes, BipersistenceProofLimits::default())
+        .map_err(|error| error.to_string())?;
+    println!(
+        "verified degree-Rips H1 bipersistence over Z/{} on {} vertices, {} edges, a {} by {} grid, {} cover maps, {} rectangle claims, {} connected-region claims, {} class atlases, and {} circular families",
+        checked.modulus,
+        checked.vertices,
+        checked.edges,
+        checked.scales,
+        checked.density_levels,
+        checked.cover_maps,
+        checked.rectangles,
+        checked.regions,
+        checked.class_atlases,
+        checked.circular_families,
+    );
+    Ok(())
+}
+
+fn run_circular(program: &str, bytes: &[u8], rest: &[std::ffi::OsString]) -> Result<(), String> {
+    require_single_artifact(
+        rest,
+        format!("usage for a circular coordinate: {program} ARTIFACT"),
+    )?;
+    let checked = verify_circular_coordinate(bytes, CircularProofLimits::default())
+        .map_err(|error| error.to_string())?;
+    println!(
+        "verified {} circular coordinates over Z/{} on {} states and {} active edges at scale {} with maximum relative residual {}, divisibilities {:?}, and continuation {:?}",
+        checked.coordinates,
+        checked.modulus,
+        checked.states,
+        checked.edges,
+        checked.scale,
+        checked.max_relative_residual,
+        checked.divisibilities,
+        checked.continuation,
+    );
+    Ok(())
 }
 
 fn run_geometry_bound_coverage(
@@ -247,45 +352,6 @@ fn run_intervention(
     Ok(())
 }
 
-fn run_distributed(bytes: &[u8], rest: &[std::ffi::OsString]) -> Result<(), String> {
-    let paths = distributed_paths(rest)?;
-    let checked = verify_distributed_interface_with(
-        bytes,
-        |id| {
-            let path = paths
-                .get(id)
-                .ok_or_else(|| holos_tda_check::ProofError::new("distributed object is absent"))?;
-            fs::read(path).map_err(|error| {
-                holos_tda_check::ProofError::new(format!("read {:?}: {error}", path))
-            })
-        },
-        ProofLimits::default(),
-    )
-    .map_err(|error| error.to_string())?;
-    if checked.objects != paths.len() {
-        return Err("distributed object set differs from the manifest references".into());
-    }
-    println!(
-        "verified distributed interface through dimension {} with {} shards, {} composition folds, and {} unique objects",
-        checked.max_dim, checked.shards, checked.folds, checked.objects,
-    );
-    Ok(())
-}
-
-fn distributed_paths(
-    rest: &[std::ffi::OsString],
-) -> Result<BTreeMap<[u8; 32], std::ffi::OsString>, String> {
-    let mut paths = BTreeMap::new();
-    for path in rest {
-        let object = fs::read(path).map_err(|error| format!("read {:?}: {error}", path))?;
-        let id: [u8; 32] = sha2::Sha256::digest(&object).into();
-        if paths.insert(id, path.clone()).is_some() {
-            return Err("distributed object list repeats an artifact".into());
-        }
-    }
-    Ok(paths)
-}
-
 fn run_relative(program: &str, bytes: &[u8], rest: &[std::ffi::OsString]) -> Result<(), String> {
     require_single_artifact(
         rest,
@@ -321,64 +387,6 @@ fn run_explicit(program: &str, bytes: &[u8], rest: &[std::ffi::OsString]) -> Res
         checked.change_terms,
         checked.bars.len(),
     );
-    Ok(())
-}
-
-fn run_index(bytes: &[u8], rest: &[std::ffi::OsString]) -> Result<(), String> {
-    let (mut state, cold) = IndexProofState::verify_snapshot(bytes, ProofLimits::default())
-        .map_err(|error| error.to_string())?;
-    let mut counts = IndexCounts {
-        checkpoints: 1,
-        higher_columns: cold.higher_columns_checked,
-        ..IndexCounts::default()
-    };
-    for path in rest {
-        apply_index_record(&mut state, &mut counts, path)?;
-    }
-    println!(
-        "verified persistence through dimension {} across {} index checkpoints and {} later records with {} initial interfaces, {} changed interfaces, {} edge changes, and {} higher boundary columns",
-        state.max_dim(),
-        counts.checkpoints,
-        counts.records,
-        cold.nodes_checked,
-        counts.changed_nodes,
-        counts.edge_changes,
-        counts.higher_columns,
-    );
-    Ok(())
-}
-
-#[derive(Default)]
-struct IndexCounts {
-    records: usize,
-    checkpoints: usize,
-    changed_nodes: usize,
-    edge_changes: usize,
-    higher_columns: usize,
-}
-
-fn apply_index_record(
-    state: &mut IndexProofState,
-    counts: &mut IndexCounts,
-    path: &std::ffi::OsString,
-) -> Result<(), String> {
-    let bytes = fs::read(path).map_err(|error| format!("read {:?}: {error}", path))?;
-    if is_index_snapshot(&bytes) {
-        let (next, checked) = IndexProofState::verify_snapshot(&bytes, ProofLimits::default())
-            .map_err(|error| error.to_string())?;
-        *state = next;
-        counts.checkpoints += 1;
-        counts.changed_nodes += checked.nodes_checked;
-        counts.higher_columns += checked.higher_columns_checked;
-    } else {
-        let checked = state
-            .apply_delta(&bytes, ProofLimits::default())
-            .map_err(|error| error.to_string())?;
-        counts.changed_nodes += checked.nodes_checked;
-        counts.edge_changes += checked.edge_changes;
-        counts.higher_columns += checked.higher_columns_checked;
-    }
-    counts.records += 1;
     Ok(())
 }
 

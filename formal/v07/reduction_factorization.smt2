@@ -1,4 +1,4 @@
-(set-logic AUF)
+(set-logic AUFLIA)
 
 (declare-sort ChainQ 0)
 (declare-sort ChainQMinusOne 0)

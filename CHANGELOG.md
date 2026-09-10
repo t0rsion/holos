@@ -4,6 +4,192 @@ All notable changes to this project are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.8.0] - 2026-09-10
+
+### Workflow validation and maintenance
+
+- Rust and Python tests export circular, finite-module, program, and trace
+  artifacts to the independent checker. Python tests invoke `holos-check` as
+  a separate process and reject mismatched program source graphs.
+- Bipersistence claim recording checks collection limits before insertion.
+  A rejected insertion leaves the artifact bytes and digest unchanged.
+  Replacing an existing claim at capacity remains valid.
+- The program checker accepts essential class representatives when the
+  requested threshold exceeds the graph's largest edge weight. It uses the
+  same capped representative scale as the producer.
+- The relative-interface graph sweep covers every edge subset on five
+  vertices. Ignored scalar oracle sweeps cap their internal workers at two.
+- Shared validation, finite-field arithmetic, proof accounting, and Python
+  input conversion remove duplicate implementation paths. The independent
+  checker retains its own arithmetic implementation.
+
+### Result-sensitive programs
+
+#### Added
+
+- Scalar class records bind the active labeled graph, persistence interval,
+  field, representative scale, and canonical class identity.
+- Python exposes `circular_coordinates_class` for square distance matrices.
+- `holos circular --class SPACE BASIS` consumes the class JSON written by
+  `--representatives`. The selected record supplies its field, scale, source
+  graph binding, interval, cocycle, and canonical class identity.
+- `HOLOSATL` version 2 preserves optional class provenance in its bounded
+  envelope. The independent checker reads the same version and fields.
+- `PersistenceProgram` compiles sparse H0 and H1 persistence into local atoms,
+  derives result-sensitive guards from checked reductions, and composes exact
+  diagrams across those atoms.
+- `ProgramArtifact` and `ProgramTraceArtifact` encode `HOLOSPRG` programs and
+  `HOLOSDLT` update traces. Traces record graph states, update modes, work,
+  events, class continuation, correspondence, and repair checkpoints.
+- The independent checker rebuilds program decompositions, nested reductions,
+  result-sensitive guards, local repairs, class relations, and exact diagrams.
+- A fixed strict-containment witness and an ignored exhaustive sweep exercise
+  guard acceptance, local suffix repair, and composition against monolithic
+  reduction.
+- Registered constructed and public temporal-graph studies record exact
+  diagrams, artifacts, independent checks, and build provenance. A separate
+  pinned external-baseline runner supports fixed-graph H0 and H1 comparisons.
+
+#### Changed
+
+- Persistent class validation accepts positive infinity for essential classes.
+  It rejects NaN, negative infinity, negative zero, and representatives outside
+  finite intervals.
+- Class-bound automatic circular lifting requires an odd prime. The Rust
+  supplied-lift path continues to support modulus two.
+- Program updates repair only affected cyclic atoms when their topology and
+  result-sensitive guards permit it. A topology or threshold-membership change
+  recompiles the program.
+- Program diagram evaluation recomputes H0 death-edge provenance on the updated
+  active graph. Stored local reductions supply the accepted H1 endpoints.
+
+#### Correctness and limits
+
+- `HOLOSATL` version 1 artifacts are not accepted by the version 2 decoder.
+  Re-encode them with the current producer before verification.
+- Class identity uses the canonical `BasisClassId` digest. It does not add a
+  second cocycle canonicalization pass.
+- Result-sensitive guards certify exact evaluation only for the recorded graph
+  topology, threshold, and local reduction conditions. The trace checker
+  validates recorded transitions and does not certify a scheduling policy.
+- Program trace decoders reject collection counts that cannot fit in the
+  remaining bounded envelope before they allocate those collections.
+- Program artifacts reject composite and out-of-range moduli, negative-zero
+  thresholds, and negative-zero diagram endpoints on every verification path.
+- External and public studies are controls on their declared fixed inputs. They
+  do not establish a general performance or priority claim.
+
+### Finite bipersistence
+
+#### Added
+
+- `DegreeRipsBifiltration` constructs a multicritical flag bifiltration from a
+  sparse weighted graph. A full grid uses every critical scale and minimum
+  degree. A declared grid uses exact caller-supplied axes.
+- `BipersistenceModule` computes canonical H1 spaces at every grid node, all
+  horizontal and vertical cover maps, and every commutative square over a
+  prime field.
+- Comparable-grade maps compose the checked covers. Generalized-rank queries
+  compute the exact limit-to-colimit rank on any finite region with a
+  connected comparability graph. Closed rectangle queries use the same path.
+- `CohomologyClassAtlas` classifies the affine extension fiber of a selected
+  nonzero class throughout its upper parameter cone. It records unique,
+  ambiguous, and empty fibers and their connected regions.
+- `CircularCoordinateFamily` computes a checked phase at each unique class
+  extension. Ambiguous and empty extensions have no phase.
+- `BipersistenceArtifact` records the source graph, finite H1 functor,
+  generalized ranks, class atlases, and circular families. The independent
+  checker reconstructs every claim from `HOLOSBP` bytes.
+- `holos bipersistence` accepts declared grid axes, rectangles, connected
+  region files, canonical basis classes, and cocycle rows in Ripser.py format.
+  Its JSON report includes node, rectangle, region, atlas, and phase data.
+- Python exposes finite modules, maps, generalized ranks, class atlases,
+  circular families, artifact mutation, decoding, and replay.
+- Dense and ignored oracle sweeps compare nodes, maps, rectangles, and
+  connected regions with direct chain-level arithmetic. The `formal/v09`
+  models check bounded soundness obligations.
+- Registered studies check the full artifact path on synthetic graphs,
+  compare finite node ranks with multipers and GUDHI, and run two selected
+  cocycles on a 400-landmark Gardner grid-cell graph.
+
+#### Changed
+
+- Circular-coordinate families normalize extension representatives
+  projectively before lifting. A selected cohomology line therefore keeps the
+  same coordinate convention when its canonical coefficient vector changes
+  by a nonzero field scalar.
+- The command implementation, Python bindings, bipersistence producer, and
+  independent checker are split by responsibility.
+
+#### Correctness and limits
+
+- The finite module covers H1 degree-Rips on its recorded axes. It does not
+  certify values between grid points or compute presentations, resolutions,
+  signed decompositions, or matching distances.
+- At scale `r`, degree is measured in the threshold graph before the induced
+  restriction to vertices of degree at least `k`.
+- A closed product rectangle has a unique minimum and maximum. Its
+  generalized rank equals the ordinary corner-map rank. Connected regions
+  without these extrema exercise the general limit-to-colimit computation.
+- Circular phases are withheld when the selected class extension is
+  ambiguous or absent. Automatic lifting keeps the odd-prime and
+  centered-search limits described in the circular-coordinate section.
+- External comparisons cover finite node ranks on frozen examples. They do
+  not compare generalized ranks with signed measures.
+- The checker is independent Rust code, not formal verification. The bounded
+  SMT models specify proof obligations, not the compiled implementation.
+
+### Circular coordinates
+
+#### Added
+
+- Class-aware circular coordinates resolve a selected H1 cocycle in the
+  canonical fixed-scale cohomology basis, check an integral lift, and compute
+  an unweighted harmonic phase with a component-wise gauge.
+- `cocycle_from_ripser_terms` accepts Ripser-shaped rows. It restricts the
+  representative to active edges before orientation and projective
+  normalization.
+- Circular continuation computes the exact affine fiber induced by both
+  restrictions to the common active flag subcomplex. It returns `Unique`,
+  `Ambiguous`, `NoExtension`, or `NoNonzeroContinuation`. An ambiguous result
+  includes its additive direction.
+- `CircularCoordinateArtifact` stores one fixed-scale graph, field class,
+  integral cocycle, divisibility, potential, residual tolerance, and optional
+  continuation. `holos-tda-check` reconstructs these claims without depending
+  on the producer crate.
+- `holos circular` writes phases and a `HOLOSCC` artifact. Python exposes
+  point, condensed-distance, square-distance, and sparse-graph paths.
+- Registered synthetic and Gardner grid-cell studies compare the circular
+  path with DREiMac and independent SciPy least-squares solves. The study
+  records include dependency versions, input and artifact digests, and
+  separate-checker results.
+
+#### Changed
+
+- `cohomology_relation` now returns the complete kernel of the paired
+  restriction map. Version 0.7 omitted both restriction kernels from the
+  relation basis. Its `relation_rank` therefore described only the matched
+  restriction image, despite the documented full-relation contract.
+- `CohomologyRelation::relation_rank` now means the dimension of the complete
+  relation. `old_kernel_rank` and `new_kernel_rank` report the omitted kernel
+  dimensions. Python `cohomology_relation` returns both fields.
+- Circular interfaces default to prime 47. Automatic lifting requires an odd
+  prime. The Rust supplied-lift path accepts prime 2.
+
+#### Correctness and limits
+
+- A checked artifact covers an active graph and class at one scale. It does
+  not certify persistence-interval provenance or the original weighted input.
+- Automatic lifting searches centered representatives of nonzero scalar
+  multiples. It can reject a class that has another integral lift.
+- The harmonic objective is unweighted. The residual checks stationarity of
+  that objective, not phase error or scientific meaning.
+- Exact H1 construction enumerates active triangles. The checker is
+  independent Rust code, not formal verification. SHA-256 detects changes but
+  does not authenticate a producer.
+
 ## [0.7.0] - 2026-08-29
 
 ### Added
@@ -533,7 +719,8 @@ First public release.
 - Reproducible benchmark harness (`benchmarks/run.sh`) that refuses dirty
   trees, records full provenance, and fails on any diagram mismatch.
 
-[Unreleased]: https://github.com/t0rsion/holos/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/t0rsion/holos/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/t0rsion/holos/releases/tag/v0.8.0
 [0.7.0]: https://github.com/t0rsion/holos/releases/tag/v0.7.0
 [0.6.0]: https://github.com/t0rsion/holos/releases/tag/v0.6.0
 [0.5.0]: https://github.com/t0rsion/holos/releases/tag/v0.5.0

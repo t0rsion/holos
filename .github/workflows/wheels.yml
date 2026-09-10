@@ -21,30 +21,52 @@ permissions:
 
 jobs:
   # On tags, refuse to proceed unless the tag matches every declared version
-  # (core crate, py crate, pyproject, benchmark driver); a stray or RC v* tag
-  # must not publish. The benchmark driver is not published, but its version
-  # is printed into the benchmark records attached to the release.
+  # (published crates, pyproject, and benchmark drivers); a stray or RC v* tag
+  # must not publish. The benchmark drivers are not published, but their
+  # versions are printed into records attached to the release.
   version-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: |
           v_core=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/holos-tda/Cargo.toml | head -1)
+          v_check=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/holos-tda-check/Cargo.toml | head -1)
           v_py=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/holos-tda-py/Cargo.toml | head -1)
           v_proj=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/holos-tda-py/pyproject.toml | head -1)
-          v_bench=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/collapse-bench/Cargo.toml | head -1)
-          echo "core=$v_core py=$v_py pyproject=$v_proj bench=$v_bench ref=$GITHUB_REF"
-          [ "$v_core" = "$v_py" ] && [ "$v_core" = "$v_proj" ] && [ "$v_core" = "$v_bench" ] \
+          v_collapse=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/collapse-bench/Cargo.toml | head -1)
+          v_engine=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/engine-bench/Cargo.toml | head -1)
+          v_program=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/program-bench/Cargo.toml | head -1)
+          v_research=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/research-bench/Cargo.toml | head -1)
+          echo "core=$v_core check=$v_check py=$v_py pyproject=$v_proj collapse=$v_collapse engine=$v_engine program=$v_program research=$v_research ref=$GITHUB_REF"
+          [ "$v_core" = "$v_check" ] && [ "$v_core" = "$v_py" ] && [ "$v_core" = "$v_proj" ] \
+            && [ "$v_core" = "$v_collapse" ] && [ "$v_core" = "$v_engine" ] \
+            && [ "$v_core" = "$v_program" ] && [ "$v_core" = "$v_research" ] \
             || { echo "version mismatch"; exit 1; }
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             [ "$GITHUB_REF" = "refs/tags/v$v_core" ] || { echo "tag does not match version v$v_core"; exit 1; }
           fi
 
-  # Publication is irreversible, so every fallible build and test job runs
-  # before it. The extracted-package test would have caught the 0.2.1 sdist
-  # bug: it proves the crate builds and passes its tests outside the repo.
-  preflight:
+  release-review:
     needs: [version-check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: tools/check-release-hygiene.sh
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install rust-code-analysis-cli --version 0.0.25 --locked
+      - run: tools/check-complexity.sh
+        env:
+          SOURCE_REVIEW_BASE: ${{ github.sha }}^
+      - run: tools/report-source-loc.sh "$SOURCE_REVIEW_BASE"
+        env:
+          SOURCE_REVIEW_BASE: ${{ github.sha }}^
+
+  # Build and test the extracted crates before publication to check that
+  # package contents suffice outside the workspace.
+  preflight:
+    needs: [version-check, release-review]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,18 +95,42 @@ jobs:
           # PINNED upstream commit; keep it equal to the commit in ci.yml.
           git -C "$RUNNER_TEMP/ripser" checkout 01add51ff64aaf40889483260cc5c3b7d0f2a1e7
           make -C "$RUNNER_TEMP/ripser" ripser ripser-coeff
+          test -x "$RUNNER_TEMP/ripser/ripser"
+          test -x "$RUNNER_TEMP/ripser/ripser-coeff"
       - name: Test the workspace at the tag
         run: >-
           RIPSER_BIN="$RUNNER_TEMP/ripser/ripser"
           RIPSER_COEFF_BIN="$RUNNER_TEMP/ripser/ripser-coeff"
           cargo +stable test --workspace --locked
-      - name: Package, extract, and test the package at the MSRV
+      - name: Run exhaustive oracle serially
+        run: >-
+          RIPSER_BIN="$RUNNER_TEMP/ripser/ripser"
+          RIPSER_COEFF_BIN="$RUNNER_TEMP/ripser/ripser-coeff"
+          cargo +stable test --release --locked -- --ignored --test-threads=1
+      - name: Check bounded formal models
         run: |
+          sudo apt-get update
+          sudo apt-get install -y z3
+          z3 --version
+          for model in formal/v07/check.sh formal/v09/check.sh formal/v10/check.sh; do
+            timeout --foreground --signal=TERM --kill-after=30s 10m "$model"
+          done
+      - name: Package, extract, and test published crates at the MSRV
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/holos-tda/Cargo.toml | head -1)
           cargo +stable package -p holos-tda --locked
-          mkdir -p "$RUNNER_TEMP/pkg"
-          tar xzf target/package/holos-tda-*.crate -C "$RUNNER_TEMP/pkg"
-          cd "$RUNNER_TEMP"/pkg/holos-tda-*
-          cargo +1.85 test
+          cargo +stable package -p holos-tda-check --locked
+          mkdir -p "$RUNNER_TEMP/pkg/core" "$RUNNER_TEMP/pkg/checker"
+          tar xzf "target/package/holos-tda-$version.crate" -C "$RUNNER_TEMP/pkg/core"
+          tar xzf "target/package/holos-tda-check-$version.crate" -C "$RUNNER_TEMP/pkg/checker"
+          (
+            cd "$RUNNER_TEMP/pkg/core/holos-tda-$version"
+            cargo +1.85 test
+          )
+          (
+            cd "$RUNNER_TEMP/pkg/checker/holos-tda-check-$version"
+            cargo +1.85 test
+          )
 
   linux:
     needs: [version-check]
@@ -148,7 +194,7 @@ jobs:
           path: crates/holos-tda-py/dist
 
   # maturin sdist has no --locked; the path dependency pins the bundled core
-  # exactly, and the preflight extracted-package test covers buildability.
+  # exactly, and sdist-smoke builds the resulting archive.
   sdist:
     needs: [version-check]
     runs-on: ubuntu-latest
@@ -163,6 +209,28 @@ jobs:
         with:
           name: sdist
           path: crates/holos-tda-py/dist
+
+  sdist-smoke:
+    needs: [sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - run: |
+          pip install pytest dist/*.tar.gz
+          python crates/holos-tda-py/tests/smoke.py
+          python -m pytest crates/holos-tda-py/tests/bipersistence.py
+      - run: cargo build -p holos-tda-check --locked
+      - run: python crates/holos-tda-py/tests/checked_workflows.py
+        env:
+          HOLOS_CHECK_BIN: ${{ github.workspace }}/target/debug/holos-check
 
   # Install the built linux x86_64 wheel and run the smoke tests (license
   # texts present, pdist ordering, sparse, moduli, threads, console script).
@@ -179,8 +247,9 @@ jobs:
           name: wheels-linux-x86_64
           path: dist
       - run: |
-          pip install dist/*.whl
+          pip install pytest dist/*.whl
           python crates/holos-tda-py/tests/smoke.py
+          python -m pytest crates/holos-tda-py/tests/bipersistence.py
           python - <<'EOF'
           import glob, sys, zipfile
           whl = glob.glob("dist/*.whl")[0]
@@ -191,17 +260,46 @@ jobs:
           print("license files:", licenses)
           EOF
 
+  checked-workflows:
+    needs: [linux, smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-linux-x86_64
+          path: dist
+      - run: pip install --no-deps dist/*.whl
+      - run: cargo build -p holos-tda-check --locked
+      - run: python crates/holos-tda-py/tests/checked_workflows.py
+        env:
+          HOLOS_CHECK_BIN: ${{ github.workspace }}/target/debug/holos-check
+
   # A wheel failure must not leave crates.io ahead of PyPI, so this runs
   # after every build and test job. Idempotent: re-tagging after a partial
   # failure skips an already-published version.
   crates-io:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [preflight, linux, macos, windows, sdist, smoke]
+    needs: [preflight, linux, macos, windows, sdist, sdist-smoke, smoke, checked-workflows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Publish unless this version is already on crates.io
+      - name: Publish the checker unless this version is already on crates.io
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          if curl -sf -A "holos-release-ci" "https://crates.io/api/v1/crates/holos-tda-check/$V" > /dev/null; then
+            echo "holos-tda-check $V already published; skipping"
+          else
+            cargo publish -p holos-tda-check --locked
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish the producer unless this version is already on crates.io
         run: |
           V="${GITHUB_REF_NAME#v}"
           if curl -sf -A "holos-release-ci" "https://crates.io/api/v1/crates/holos-tda/$V" > /dev/null; then
@@ -214,7 +312,7 @@ jobs:
 
   publish-pypi:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [version-check, preflight, crates-io, linux, macos, windows, sdist, smoke]
+    needs: [version-check, preflight, crates-io, linux, macos, windows, sdist, sdist-smoke, smoke, checked-workflows]
     runs-on: ubuntu-latest
     permissions:
       id-token: write

@@ -1,0 +1,25 @@
+[meta]
+version = 1
+date = "2026-08-31"
+
+# This corpus is a natural-data control for the result-sensitive program
+# study. Its outcome does not change the constructed-study decision. The
+# classifications in benchmarks/README.md were fixed before this trajectory
+# was prepared or timed.
+
+[[trajectory]]
+id = "snap-email-eu-dept3-z2"
+source_url = "https://snap.stanford.edu/data/email-Eu-core-temporal-Dept3.txt.gz"
+source_sha256 = "b1f92288e855044bbc74bacac39d42b12e59ec2a0130ad8df419786eb46a7bff"
+raw_events = 12216
+raw_vertices = 89
+raw_undirected_edges = 973
+first_timestamp = 0
+last_timestamp = 69317577
+bin_seconds = 604800
+warmup_bins = 12
+decay_numerator = 15
+decay_denominator = 16
+score_scale = 4096
+weight_offset = 4294967296
+modulus = 2
