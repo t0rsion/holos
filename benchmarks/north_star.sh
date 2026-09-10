@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Registered north-star engine study for public 0.6.0 (internal v0.7). The
-# corpus is benchmarks/north_star_corpus.toml, and its [meta] block quotes
+# Registered north-star engine study. The corpus is
+# benchmarks/north_star_corpus.toml, and its [meta] block quotes
 # the decision rule, the noise rule, the pinning rule, the arms, and the
 # timing protocol. Neither the corpus nor this runner changes in response
 # to a result.

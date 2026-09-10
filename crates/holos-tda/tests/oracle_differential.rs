@@ -128,11 +128,11 @@ fn exhaustive_six_point_sweep_mod_5() {
 }
 
 fn exhaustive_six_point_sweep(modulus: u32) {
-    // The three sweeps run at the same time under one test binary. Cap the
-    // fan-out so they do not oversubscribe the machine.
+    // Each case also tests reducers with two workers. Run the ignored test
+    // harness with --test-threads=1 to bound the combined worker count.
     let threads = std::thread::available_parallelism()
         .map_or(1, |p| p.get())
-        .min(8);
+        .min(2);
     let total = 1u32 << 15;
     let chunk = total.div_ceil(threads as u32);
     std::thread::scope(|scope| {

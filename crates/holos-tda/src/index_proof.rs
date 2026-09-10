@@ -4,12 +4,19 @@
 //! changed edge values and interface nodes absent from the preceding tree.
 //! The separate checker keeps the verified old tree and advances its root.
 
+mod wire;
+
+#[cfg(test)]
+mod tests;
+
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
 use crate::index::InterfaceNode;
 use crate::{Bar, CertificateLimits, ChangeColumn, InterfaceMode, PersistenceIndex};
+
+use wire::{encode_diagram, encode_header, encode_nodes, put_u64, put_usize};
 
 const SNAPSHOT_MAGIC: &[u8; 8] = b"HOLOSIP\0";
 const DELTA_MAGIC: &[u8; 8] = b"HOLOSDP\0";
@@ -177,10 +184,12 @@ impl IndexSnapshotProof {
     pub fn from_index(index: &PersistenceIndex) -> Result<Self, IndexProofError> {
         let mut nodes = Vec::new();
         let mut seen = BTreeSet::new();
+        let excluded = BTreeSet::new();
         collect_nodes(
             index.root(),
             index.params().max_dim,
             index.certificate_limits(),
+            &excluded,
             &mut seen,
             &mut nodes,
         )?;
@@ -277,7 +286,7 @@ impl IndexDeltaProof {
         collect_digests(old.root(), &mut old_nodes);
         let mut nodes = Vec::new();
         let mut seen = BTreeSet::new();
-        collect_new_nodes(
+        collect_nodes(
             new.root(),
             new.params().max_dim,
             new.certificate_limits(),
@@ -345,33 +354,16 @@ fn collect_nodes(
     node: &Arc<InterfaceNode>,
     max_dim: usize,
     limits: CertificateLimits,
+    excluded: &BTreeSet<[u8; 32]>,
     seen: &mut BTreeSet<[u8; 32]>,
     output: &mut Vec<ProofNode>,
 ) -> Result<(), IndexProofError> {
-    if !seen.insert(node.digest) {
+    if excluded.contains(&node.digest) || !seen.insert(node.digest) {
         return Ok(());
     }
     output.push(ProofNode::from_interface(node, max_dim, limits)?);
     for child in &node.children {
-        collect_nodes(child, max_dim, limits, seen, output)?;
-    }
-    Ok(())
-}
-
-fn collect_new_nodes(
-    node: &Arc<InterfaceNode>,
-    max_dim: usize,
-    limits: CertificateLimits,
-    old: &BTreeSet<[u8; 32]>,
-    seen: &mut BTreeSet<[u8; 32]>,
-    output: &mut Vec<ProofNode>,
-) -> Result<(), IndexProofError> {
-    if old.contains(&node.digest) || !seen.insert(node.digest) {
-        return Ok(());
-    }
-    output.push(ProofNode::from_interface(node, max_dim, limits)?);
-    for child in &node.children {
-        collect_new_nodes(child, max_dim, limits, old, seen, output)?;
+        collect_nodes(child, max_dim, limits, excluded, seen, output)?;
     }
     Ok(())
 }
@@ -394,210 +386,4 @@ fn proof_summary(nodes: &[ProofNode], edge_changes: usize) -> IndexProofSummary 
         node.summary(&mut summary);
     }
     summary
-}
-
-fn encode_header(
-    output: &mut Vec<u8>,
-    max_dim: usize,
-    modulus: u32,
-    threshold: Option<f64>,
-    vertices: usize,
-) -> Result<(), IndexProofError> {
-    put_u16(output, VERSION);
-    output.push(F64_BITS_CODEC);
-    put_usize(output, max_dim)?;
-    put_u32(output, modulus);
-    put_optional_f64(output, threshold);
-    put_usize(output, vertices)?;
-    Ok(())
-}
-
-fn encode_nodes(output: &mut Vec<u8>, nodes: &[ProofNode]) -> Result<(), IndexProofError> {
-    for node in nodes {
-        encode_node(output, node)?;
-    }
-    Ok(())
-}
-
-fn encode_node(output: &mut Vec<u8>, node: &ProofNode) -> Result<(), IndexProofError> {
-    encode_node_header(output, node)?;
-    encode_usizes(output, &node.vertices)?;
-    encode_usizes(output, &node.edge_positions)?;
-    encode_usizes(output, &node.separator)?;
-    encode_usizes(output, &node.protected_vertices)?;
-    encode_digests(output, &node.children);
-    encode_graded_columns(output, &node.graded_columns)?;
-    encode_diagram(output, &node.diagram)?;
-    output.extend_from_slice(&node.relative_artifact);
-    Ok(())
-}
-
-fn encode_node_header(output: &mut Vec<u8>, node: &ProofNode) -> Result<(), IndexProofError> {
-    output.extend_from_slice(&node.digest);
-    output.push(interface_mode_tag(node.mode));
-    encode_node_counts(output, node)?;
-    for columns in &node.graded_columns {
-        put_usize(output, columns.len())?;
-    }
-    put_usize(output, node.diagram.len())?;
-    put_usize(output, node.relative_artifact.len())?;
-    Ok(())
-}
-
-fn interface_mode_tag(mode: InterfaceMode) -> u8 {
-    match mode {
-        InterfaceMode::Relative => 4,
-        InterfaceMode::Materialized => 0,
-        InterfaceMode::Disjoint => 1,
-        InterfaceMode::ZeroSimplex => 2,
-        InterfaceMode::ZeroCone => 3,
-    }
-}
-
-fn encode_node_counts(output: &mut Vec<u8>, node: &ProofNode) -> Result<(), IndexProofError> {
-    put_usize(output, node.vertices.len())?;
-    put_usize(output, node.edge_positions.len())?;
-    put_usize(output, node.separator.len())?;
-    put_usize(output, node.protected_vertices.len())?;
-    put_usize(output, node.children.len())?;
-    put_usize(output, node.graded_columns.len())?;
-    Ok(())
-}
-
-fn encode_usizes(output: &mut Vec<u8>, values: &[usize]) -> Result<(), IndexProofError> {
-    for &value in values {
-        put_usize(output, value)?;
-    }
-    Ok(())
-}
-
-fn encode_digests(output: &mut Vec<u8>, digests: &[[u8; 32]]) {
-    for digest in digests {
-        output.extend_from_slice(digest);
-    }
-}
-
-fn encode_graded_columns(
-    output: &mut Vec<u8>,
-    dimensions: &[Vec<ChangeColumn>],
-) -> Result<(), IndexProofError> {
-    for columns in dimensions {
-        encode_columns(output, columns)?;
-    }
-    Ok(())
-}
-
-fn encode_columns(output: &mut Vec<u8>, columns: &[ChangeColumn]) -> Result<(), IndexProofError> {
-    for column in columns {
-        put_usize(output, column.terms.len())?;
-        for term in &column.terms {
-            put_usize(output, term.index)?;
-            put_u32(output, term.coefficient);
-        }
-    }
-    Ok(())
-}
-
-fn encode_diagram(output: &mut Vec<u8>, diagram: &[Bar]) -> Result<(), IndexProofError> {
-    for bar in diagram {
-        put_usize(output, bar.dim)?;
-        put_u64(output, bar.birth.to_bits());
-        put_u64(output, bar.death.to_bits());
-    }
-    Ok(())
-}
-
-fn put_u16(output: &mut Vec<u8>, value: u16) {
-    output.extend_from_slice(&value.to_be_bytes());
-}
-
-fn put_u32(output: &mut Vec<u8>, value: u32) {
-    output.extend_from_slice(&value.to_be_bytes());
-}
-
-fn put_u64(output: &mut Vec<u8>, value: u64) {
-    output.extend_from_slice(&value.to_be_bytes());
-}
-
-fn put_usize(output: &mut Vec<u8>, value: usize) -> Result<(), IndexProofError> {
-    let value = u64::try_from(value)
-        .map_err(|_| IndexProofError::new("integer does not fit the proof format"))?;
-    put_u64(output, value);
-    Ok(())
-}
-
-fn put_optional_f64(output: &mut Vec<u8>, value: Option<f64>) {
-    match value {
-        None => output.push(0),
-        Some(value) => {
-            output.push(1);
-            put_u64(output, value.to_bits());
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{CertificateLimits, IndexParams, RipsParams, SparseDistanceMatrix};
-
-    fn graph(changed: bool) -> SparseDistanceMatrix {
-        SparseDistanceMatrix::from_triplets(
-            6,
-            &[
-                (0, 1, 0.25),
-                (0, 2, if changed { 1.01 } else { 1.0 }),
-                (1, 2, 1.5),
-                (0, 3, 1.2),
-                (1, 3, 1.7),
-                (0, 4, 1.1),
-                (1, 4, 1.6),
-                (0, 5, 1.3),
-                (1, 5, 1.8),
-            ],
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn warm_delta_contains_only_changed_tree_nodes() {
-        let initial = graph(false);
-        let params = RipsParams::new(1).with_modulus(3);
-        let first = PersistenceIndex::compile(
-            &initial,
-            &params,
-            IndexParams::default(),
-            CertificateLimits::default(),
-        )
-        .unwrap();
-        let second = first.transition(&graph(true)).unwrap().index;
-        let snapshot = IndexSnapshotProof::from_index(&first).unwrap();
-        let delta = IndexDeltaProof::between(&first, &second).unwrap();
-        assert_eq!(delta.summary().edge_changes, 1);
-        assert!(delta.summary().nodes < snapshot.summary().nodes);
-        assert!(snapshot.encode().unwrap().starts_with(SNAPSHOT_MAGIC));
-        assert!(delta.encode().unwrap().starts_with(DELTA_MAGIC));
-    }
-
-    #[test]
-    fn delta_rejects_a_different_envelope() {
-        let initial = graph(false);
-        let params = RipsParams::new(1);
-        let first = PersistenceIndex::compile(
-            &initial,
-            &params,
-            IndexParams::default(),
-            CertificateLimits::default(),
-        )
-        .unwrap();
-        let other_graph = SparseDistanceMatrix::from_triplets(2, &[(0, 1, 1.0)]).unwrap();
-        let second = PersistenceIndex::compile(
-            &other_graph,
-            &params,
-            IndexParams::default(),
-            CertificateLimits::default(),
-        )
-        .unwrap();
-        assert!(IndexDeltaProof::between(&first, &second).is_err());
-    }
 }

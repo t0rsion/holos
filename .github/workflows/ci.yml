@@ -38,11 +38,28 @@ jobs:
 
   complexity:
     runs-on: ubuntu-latest
+    env:
+      SOURCE_REVIEW_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo install rust-code-analysis-cli --version 0.0.25 --locked
       - run: tools/check-complexity.sh
+      - run: tools/report-source-loc.sh "$SOURCE_REVIEW_BASE"
+
+  formal-models:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y z3
+      - name: Check Z3 identity and bounded models
+        run: |
+          z3 --version
+          for model in formal/v07/check.sh formal/v09/check.sh formal/v10/check.sh; do
+            timeout --foreground --signal=TERM --kill-after=30s 10m "$model"
+          done
 
   doc:
     runs-on: ubuntu-latest
@@ -50,6 +67,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: RUSTDOCFLAGS="-D warnings" cargo doc -p holos-tda --no-deps --locked
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc -p holos-tda-check --no-deps --locked
 
   package:
     runs-on: ubuntu-latest
@@ -57,6 +75,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo package -p holos-tda --locked
+      - run: cargo package -p holos-tda-check --locked
 
   build:
     runs-on: ubuntu-latest
@@ -89,7 +108,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --release --locked -- --ignored
+      - run: cargo test --release --locked -- --ignored --test-threads=1
 
   ripser-differential:
     runs-on: ubuntu-latest
@@ -103,6 +122,8 @@ jobs:
           # build); bump deliberately, never track a branch.
           git -C "$RUNNER_TEMP/ripser" checkout 01add51ff64aaf40889483260cc5c3b7d0f2a1e7
           make -C "$RUNNER_TEMP/ripser" ripser ripser-coeff
+          test -x "$RUNNER_TEMP/ripser/ripser"
+          test -x "$RUNNER_TEMP/ripser/ripser-coeff"
       - run: >-
           RIPSER_BIN="$RUNNER_TEMP/ripser/ripser"
           RIPSER_COEFF_BIN="$RUNNER_TEMP/ripser/ripser-coeff"

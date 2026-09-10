@@ -19,19 +19,7 @@ pub(crate) fn compute_in<D: Distances + Sync>(
     params: &RipsParams,
     pool: Option<rayon::ThreadPool>,
 ) -> Result<Diagram> {
-    if let Some(t) = params.threshold {
-        if t.is_nan() || t < 0.0 {
-            return Err(Error::InvalidInput(format!(
-                "threshold must be non-negative, got {t}"
-            )));
-        }
-    }
-    let p = params.modulus as u64;
-    if !is_prime(p) || p >= MODULUS_LIMIT {
-        return Err(Error::InvalidInput(format!(
-            "modulus must be a prime below {MODULUS_LIMIT}, got {p}"
-        )));
-    }
+    let p = validate_params(params)?;
     if p == 2 {
         compute_impl(dist, Z2, params, pool)
     } else {
@@ -66,6 +54,15 @@ pub(crate) fn compute_with_h1_classes<D: Distances + Sync>(
     dist: &D,
     params: &RipsParams,
 ) -> Result<(Diagram, Vec<RawH1Class>)> {
+    let p = validate_params(params)?;
+    if p == 2 {
+        compute_with_h1_impl(dist, Z2, params)
+    } else {
+        compute_with_h1_impl(dist, Fp::new(p), params)
+    }
+}
+
+fn validate_params(params: &RipsParams) -> Result<u64> {
     if let Some(t) = params.threshold {
         if t.is_nan() || t < 0.0 {
             return Err(Error::InvalidInput(format!(
@@ -79,11 +76,7 @@ pub(crate) fn compute_with_h1_classes<D: Distances + Sync>(
             "modulus must be a prime below {MODULUS_LIMIT}, got {p}"
         )));
     }
-    if p == 2 {
-        compute_with_h1_impl(dist, Z2, params)
-    } else {
-        compute_with_h1_impl(dist, Fp::new(p), params)
-    }
+    Ok(p)
 }
 
 fn compute_with_h1_impl<C, D>(

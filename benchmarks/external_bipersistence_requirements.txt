@@ -1,0 +1,21 @@
+# Frozen external validation environment.
+# Create it with Python 3.12.12 and install this file with uv.
+contourpy==1.3.3
+cycler==0.12.1
+filtration-domination==0.1.0
+fonttools==4.63.0
+gudhi==3.10.1
+joblib==1.5.3
+kiwisolver==1.5.1
+matplotlib==3.10.8
+multipers==2.6.1
+numpy==2.5.2
+packaging==25.0
+pillow==12.0.0
+pot==0.9.6.post1
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+scikit-learn==1.8.0
+scipy==1.18.1
+six==1.17.0
+tqdm==4.70.0

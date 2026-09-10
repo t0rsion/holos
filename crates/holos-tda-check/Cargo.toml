@@ -1,9 +1,9 @@
 [package]
 name = "holos-tda-check"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Independent checker for proof-carrying holos persistence"
+description = "Independent checker for Holos proof and coordinate artifacts"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/t0rsion/holos"
 homepage = "https://github.com/t0rsion/holos"

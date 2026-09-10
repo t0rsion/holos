@@ -1,0 +1,57 @@
+[meta]
+version = 2
+date = "2026-08-31"
+
+# The decision rule uses the confirmation set only. The 2.5x threshold and
+# trajectory-length rule were fixed from the disclosed v0.10p development
+# records before this implementation ran. Repair and correspondence timings
+# are descriptive. Every entry must contain at least one result-sensitive
+# acceptance that the complete-order atlas rejects.
+
+[[screen]]
+id = "s-many-small-z2"
+atoms = 64
+atom_vertices = 5
+seed = 51001
+steps = 100
+modulus = 2
+
+[[screen]]
+id = "s-many-small-z3"
+atoms = 96
+atom_vertices = 5
+seed = 51002
+steps = 100
+modulus = 3
+
+[[screen]]
+id = "s-small-z5"
+atoms = 64
+atom_vertices = 6
+seed = 51003
+steps = 100
+modulus = 5
+
+[[confirm]]
+id = "c-many-small-z3"
+atoms = 128
+atom_vertices = 5
+seed = 61001
+steps = 140
+modulus = 3
+
+[[confirm]]
+id = "c-many-small-z5"
+atoms = 160
+atom_vertices = 5
+seed = 61002
+steps = 140
+modulus = 5
+
+[[confirm]]
+id = "c-small-z2"
+atoms = 96
+atom_vertices = 6
+seed = 61003
+steps = 140
+modulus = 2

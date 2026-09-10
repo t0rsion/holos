@@ -9,7 +9,7 @@
 # one process and times each phase on its own clock. For thread counts
 # {c1, ..., cT} and P = cT:
 #   v2-cN   version 2 collapse, N collapse workers, one per thread count
-#   v1-c1   version 1 serial collapse, the v0.4 pipeline baseline
+#   v1-c1   version 1 serial collapse, the frozen pipeline baseline
 #   none    no collapse
 # That is T + 2 configurations: four on the headline grid, six on the
 # strong-scaling probes. Their diagrams must all be identical before any
@@ -327,7 +327,7 @@ if [[ "$CORPUS_VERSION" == "0" ]]; then
         echo "         That corpus is not frozen, so this run is void and says so." >&2
     else
         echo "error: $(basename "$CORPUS") is version 0 and not frozen" >&2
-        echo "       Freeze it at version 1 after the v0.4 study's results are consumed," >&2
+        echo "       Freeze it at version 1 after the baseline study's results are consumed," >&2
         echo "       or set ALLOW_DRAFT=1 to make a void exploratory run." >&2
         exit 1
     fi

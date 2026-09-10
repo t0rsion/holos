@@ -12,16 +12,99 @@ diagrams do not match is void.
 
 ## Study scope
 
-The tracked harness covers the public engine and collapse studies. The v0.7
+The tracked harness covers the public engine and collapse studies. The
 research harness covers the integrated proof, synthesis, and coverage paths.
 Historical one-release drivers and records remain in the local archive. They
-do not define a public v0.7 claim.
+do not define a public claim for those paths.
 
-`research_bench.sh` is the v0.7 certified-workflow study. It measures exact
+`research_bench.sh` is the certified-workflow study. It measures exact
 portfolio production and linked checking, explicit-complex production and
 independent checking, and geometry-bound coverage production and independent
 checking. Set `REPS` and `OUTPUT` to control repetitions and the generated
 record. The three constructed cases are fixed in the `research-bench` crate.
+
+## Preregistration: result-sensitive program study
+
+`v10_program_bench.py` measures one contract. A checked reduction supplies a
+set of filtration comparisons. If those comparisons still hold, the program
+evaluates the exact H0 and H1 diagram without reducing another boundary
+column. The study asks whether this predicate accepts weight changes that a
+complete-order atlas rejects, and what the accepted evaluation costs.
+
+Earlier local measurements informed the corpus sizes and the 2.5 times
+confirmation threshold. Those measurements came from a different
+implementation and are not evidence for the registered program study. The
+version 2 corpus, seeds, trajectory lengths, fields, and decision rule were
+fixed before the current implementation ran its screen or confirmation set.
+
+The constructed graph joins complete weighted atoms at one articulation
+vertex. One trajectory adds a different offset to each atom. It preserves
+every local order while changing the complete graph order. A second trajectory
+crosses one reduction guard in one atom at each step. The latter arm measures
+state maintenance with exact class correspondence enabled and omitted. It is
+descriptive and carries no speed threshold.
+
+Each timing pair alternates arm order after one warm-up. The Rust driver
+retains five raw samples by default and requires bit-for-bit diagram equality
+at every step. Graph construction, trajectory search, compilation, and
+artifact construction stay outside the update clocks. Compilation and replay
+have their own clocks. The runner also invokes `holos-check` in a fresh process
+for the program and trace. Those clocks include process start, artifact read,
+and graph read. A Linux `/proc` sampler records the target process's `VmHWM`.
+It ignores the parent image before `taskset` replaces itself with the checker.
+The record reports distinct guards before and after transitive removal.
+
+The screen writes a manifest that binds its complete entry set, corpus,
+commit, producer binary, and checker binary. Confirmation requires that exact
+manifest. A confirmation entry passes the accepted-evaluation rule only when
+the program is at least 2.5 times faster than fresh exact diagram computation.
+It must also recover compilation within its declared trajectory. Every entry
+must contain an update that
+the complete-order atlas rejects and the result-sensitive program accepts.
+The decision reads the confirmation set only.
+
+The constructed corpus isolates the mechanism. It does not support a claim
+about natural trajectories. The public-data and maintained-reduction studies
+use separate frozen corpora and must pass their own rules before public text
+describes either result.
+
+## Preregistration: public temporal-graph control
+
+`v10_public_program_bench.py` applies the same program update to the public
+SNAP email-Eu-core department 3 temporal network. This is a natural-data
+control. Its result cannot change the constructed-study decision.
+
+The source archive, its SHA-256 digest, the coefficient field, and every
+preprocessing constant are fixed in `v10_public_program_corpus.toml`. The
+runner checks the source counts and timestamp range. It maps the observed
+vertex labels to consecutive integers and treats each directed email as one
+event on an undirected edge.
+
+The filtration uses one-week bins. For edge `e`, the integer activity score
+after bin `t` is `floor(15 s[e,t-1] / 16) + 4096 c[e,t]`, where `c[e,t]` is
+the event count. The first snapshot follows 12 warm-up bins. A lower
+filtration value means more recent activity. Edge order breaks equal scores
+by the fixed endpoint order. The prepared weights are integers below `2^53`,
+so their `f64` representation is exact. Every observed edge remains listed
+at every snapshot. The study therefore tests weight updates, not changing
+graph topology.
+
+The program and fresh reduction arms process the complete prepared
+trajectory. Each pair alternates arm order after one warm-up. Every diagram
+must agree bit for bit at every snapshot. The record retains five raw timing
+samples by default. Compilation, artifact construction, and replay have
+separate clocks. Producer replay runs in the study process. Independent
+program and trace checks run in fresh `holos-check` processes and record peak
+resident memory.
+
+The outcome has three fixed descriptive classifications. Guard reuse is
+frequent when at least half of transitions reuse every touched certificate,
+intermittent from 10 percent through less than half, and rare below 10
+percent. Program maintenance is faster when its median trajectory time does
+not exceed fresh exact diagram computation. Strictness is observed when a
+step accepted by the result-sensitive program is rejected by the
+complete-order atlas at that step. No category is a release gate. An
+unfavorable result remains part of the record.
 
 ## Usage
 
@@ -349,10 +432,9 @@ rules; run 1's records are archived beside the release as the revealed run.
 
 The corpus carries the decision rule, the noise rule, the pinning rule, the
 validity rule, the arms, the competitors, the timing protocol, and the sampling
-rule, quoted from PLAN.md, so a result cannot pick its criterion afterwards. It
-is frozen: the entries, sizes, seeds, thresholds, thread counts, and rules do
-not change in response to a result, and every later change adds a numbered
-amendment.
+rule, so a result cannot pick its criterion afterwards. It is frozen: the
+entries, sizes, seeds, thresholds, thread counts, and rules do not change in
+response to a result, and every later change adds a numbered amendment.
 
 Amendment 1, dated 2026-08-18, came before any registered timing. It puts a
 floor under every graded ratio, moves the measurement controller off the timed
@@ -499,9 +581,9 @@ overall median is never read alone.
 
 `engine_bench.sh` measures holos against ripser on identical inputs. It is an
 engineering instrument, not a study: it has no decision rule, no manifest, and
-no protocol gate, and no public claim may cite its numbers. It exists because
-PLAN.md requires a change to be tuned on disclosed data and then landed on a
-disjoint set that was never looked at.
+no protocol gate, and no public claim may cite its numbers. A change is tuned
+on disclosed data, then evaluated on a disjoint set that was not used for
+tuning.
 
 The corpus is `engineering_corpus.toml`. It holds two sets. The tuning set is
 disclosed: rerun it after every change and pick constants from it. The landing

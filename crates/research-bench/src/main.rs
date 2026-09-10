@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod bipersistence;
 mod explicit;
 mod geometry;
 mod portfolio;
@@ -62,6 +63,7 @@ fn run(repetitions: usize) -> Result<(), String> {
         holos_tda::BUILD_PROFILE,
     );
     for measurement in [
+        bipersistence::measure(repetitions)?,
         portfolio::measure(repetitions)?,
         explicit::measure(repetitions)?,
         geometry::measure(repetitions)?,

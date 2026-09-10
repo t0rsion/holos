@@ -124,7 +124,7 @@ fn deterministic_graph_sweep_matches_exact_persistence() {
     let pairs: Vec<_> = (0..5)
         .flat_map(|u| (u + 1..5).map(move |v| (u, v)))
         .collect();
-    for mask in 0u16..128 {
+    for mask in 0u16..(1u16 << pairs.len()) {
         let edges: Vec<_> = pairs
             .iter()
             .enumerate()

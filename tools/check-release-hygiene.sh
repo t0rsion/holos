@@ -34,6 +34,23 @@ if [[ -n "$secret_hits" ]]; then
     failed=1
 fi
 
+# Check the prose surfaces for high-confidence release identity references.
+# Manifests, workflows, benchmark provenance, generated records, and the
+# changelog carry technical identities by design, so this report does not fail
+# the release on its own.
+identity_hits="$(
+    git grep -n -I -E \
+        '(^|[^[:alnum:]])(commit|branch)[[:space:]]+([0-9a-f]{7,40}|main|master|develop|v[0-9][^[:space:]]*)|(^|[^[:alnum:]])version[[:space:]]+v?[0-9]+\.[0-9]+\.[0-9]+([^[:alnum:]]|$)' \
+        -- README.md crates/holos-tda-py/README.md '*.rs' '*.py' '*.sh' \
+        ':(exclude)benchmarks/**' ':(exclude).github/**' \
+        ':(exclude)CHANGELOG.md' ':(exclude)Cargo.lock' \
+        ':(exclude)*Cargo.toml' ':(exclude)*pyproject.toml' || true
+)"
+if [[ -n "$identity_hits" ]]; then
+    echo "release hygiene: review these public identity references (report only)" >&2
+    printf '%s\n' "$identity_hits" >&2
+fi
+
 for document in README.md CHANGELOG.md benchmarks/README.md \
     crates/holos-tda-py/README.md
 do
@@ -55,4 +72,4 @@ if ((failed)); then
     exit 1
 fi
 
-echo "release hygiene: checked tracked paths, emails, secret patterns, and prose wrapping"
+echo "release hygiene: checked tracked paths, emails, secrets, identity references, and prose wrapping"
