@@ -3,7 +3,7 @@ use crate::{
     CohomologyClassAtlas, Result,
 };
 
-use super::super::model::{ArtifactCircularFamily, BipersistenceArtifact};
+use super::super::model::{ArtifactCircularFamily, ArtifactCircularStatus, BipersistenceArtifact};
 use super::super::{BipersistenceRectangleClaim, BipersistenceRegionClaim};
 use super::super::{F64_BITS_CODEC, MAGIC, VERSION};
 
@@ -182,10 +182,12 @@ fn encode_circular_entry(
 ) -> Result<()> {
     encode_grade(output, entry.grade)?;
     output.push(encode_kind(entry.extension));
-    match &entry.coordinate {
-        None => output.push(0),
-        Some(bytes) => {
-            output.push(1);
+    match &entry.status {
+        ArtifactCircularStatus::NotAttempted => output.push(0),
+        ArtifactCircularStatus::LiftFailed => output.push(1),
+        ArtifactCircularStatus::SolveFailed => output.push(2),
+        ArtifactCircularStatus::Success(bytes) => {
+            output.push(3);
             put_usize(output, bytes.len())?;
             output.extend_from_slice(bytes);
         }

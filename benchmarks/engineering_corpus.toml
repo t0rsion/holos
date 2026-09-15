@@ -5,12 +5,8 @@
 # unlock. Nothing here may be cited as evidence for a public performance
 # claim; the registered studies do that, against their own frozen corpora.
 #
-# PLAN.md section 17 requires the work this corpus serves: "Tune on
-# disclosed engineering data and decide landing on a disjoint untouched
-# engineering set before the registered corpus freezes." The two sets below
-# are that pair. PLAN.md section 19 requires the strata: the corpus covers
-# the input regimes the engine has to meet, and every result is reported by
-# stratum, never by an overall median alone.
+# Tune on the disclosed engineering set, then use the disjoint landing
+# set after constants are frozen. Report each input stratum separately.
 
 [meta]
 version = 2
@@ -18,7 +14,7 @@ date = "2026-08-18"
 study = "engineering, not registered"
 runner = "benchmarks/engine_bench.sh"
 driver = "crates/engine-bench"
-plan = "PLAN.md sections 17 and 19, the streaming, routing, and strata MUSTs"
+plan = "disclosed tuning and disjoint landing across input strata"
 sets = """
 tuning   Disclosed. Look at it as often as you like, rerun it after every
          change, and choose constants from it. Its numbers are development

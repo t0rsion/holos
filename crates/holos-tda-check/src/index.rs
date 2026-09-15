@@ -9,6 +9,9 @@ mod state;
 mod wire;
 mod wire_reader;
 
+#[cfg(test)]
+mod tests;
+
 pub use model::{IndexProofState, VerifiedIndexDelta, VerifiedIndexSnapshot};
 
 /// Return true when bytes start with the versioned-index snapshot magic.

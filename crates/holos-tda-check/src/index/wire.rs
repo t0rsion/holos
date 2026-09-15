@@ -12,6 +12,14 @@ const DELTA_MAGIC: &[u8; 8] = b"HOLOSDP\0";
 pub(super) const VERSION: u16 = 4;
 pub(super) const F64_BITS_CODEC: u8 = 1;
 
+const USIZE_BYTES: usize = 8;
+const EDGE_BYTES: usize = 24;
+const EDGE_CHANGE_BYTES: usize = 16;
+const DIGEST_BYTES: usize = 32;
+const DIAGRAM_BAR_BYTES: usize = 24;
+const TERM_BYTES: usize = 12;
+const NODE_HEADER_FIXED_BYTES: usize = DIGEST_BYTES + 1 + 6 * USIZE_BYTES;
+
 pub(super) fn decode_snapshot(bytes: &[u8], limits: ProofLimits) -> Result<Snapshot, ProofError> {
     let mut reader = Reader::new(bytes, limits, SNAPSHOT_MAGIC)?;
     let (max_dim, modulus, threshold, vertex_count) = reader.header(limits)?;
@@ -112,6 +120,7 @@ fn decode_edge_changes(
             "an empty index cannot contain delta edge changes",
         ));
     }
+    reader.require_records(change_count, EDGE_CHANGE_BYTES, "delta edge changes")?;
     let mut edge_changes = Vec::with_capacity(change_count);
     for _ in 0..change_count {
         let position = reader.bounded_usize("delta edge position", edge_count.saturating_sub(1))?;
@@ -134,32 +143,46 @@ fn decode_edges(
     vertex_count: usize,
     count: usize,
 ) -> Result<Vec<ProofEdge>, ProofError> {
+    reader.require_records(count, EDGE_BYTES, "snapshot edges")?;
     let mut edges = Vec::with_capacity(count);
     for _ in 0..count {
-        let edge = ProofEdge {
-            u: reader.usize()?,
-            v: reader.usize()?,
-            value: f64::from_bits(reader.u64()?),
-        };
-        if edge.u >= edge.v || edge.v >= vertex_count || !edge.value.is_finite() || edge.value < 0.0
-        {
-            return Err(ProofError::new("snapshot edge is not canonical"));
-        }
-        edges.push(edge);
+        edges.push(decode_edge(reader, vertex_count)?);
     }
-    if !edges
+    check_edge_order(&edges)?;
+    Ok(edges)
+}
+
+fn decode_edge(reader: &mut Reader<'_>, vertex_count: usize) -> Result<ProofEdge, ProofError> {
+    let edge = ProofEdge {
+        u: reader.usize()?,
+        v: reader.usize()?,
+        value: f64::from_bits(reader.u64()?),
+    };
+    if edge_is_invalid(edge, vertex_count) {
+        return Err(ProofError::new("snapshot edge is not canonical"));
+    }
+    Ok(edge)
+}
+
+fn edge_is_invalid(edge: ProofEdge, vertex_count: usize) -> bool {
+    edge.u >= edge.v || edge.v >= vertex_count || !edge.value.is_finite() || edge.value < 0.0
+}
+
+fn check_edge_order(edges: &[ProofEdge]) -> Result<(), ProofError> {
+    if edges
         .windows(2)
-        .all(|pair| (pair[0].u, pair[0].v) < (pair[1].u, pair[1].v))
+        .any(|pair| (pair[0].u, pair[0].v) >= (pair[1].u, pair[1].v))
     {
         return Err(ProofError::new("snapshot edges are not in canonical order"));
     }
-    Ok(edges)
+    Ok(())
 }
 
 #[derive(Default)]
 struct Totals {
     vertices: usize,
     edge_positions: usize,
+    child_references: usize,
     simplex_columns: usize,
     terms: usize,
 }
@@ -194,6 +217,7 @@ fn decode_nodes(
     limits: ProofLimits,
     totals: &mut Totals,
 ) -> Result<Vec<InterfaceProof>, ProofError> {
+    reader.require_records(count, minimum_node_header_bytes(max_dim)?, "index nodes")?;
     let mut nodes = Vec::with_capacity(count);
     for _ in 0..count {
         nodes.push(decode_node(reader, max_dim, modulus, limits, totals)?);
@@ -229,6 +253,7 @@ fn decode_node_payload(
     let graded_columns =
         decode_graded_columns(reader, &header.column_counts, modulus, limits, totals)?;
     let diagram = decode_diagram(reader, header.bars, max_dim)?;
+    reader.require_remaining(header.relative_bytes, "relative interface artifact")?;
     let relative_artifact = reader.take(header.relative_bytes)?.to_vec();
     Ok(InterfaceProof {
         digest: header.digest,
@@ -251,8 +276,11 @@ fn decode_node_header(
 ) -> Result<NodeWireHeader, ProofError> {
     let digest = reader.array32()?;
     let mode = decode_interface_mode(reader.u8()?)?;
-    let raw = decode_raw_node_counts(reader, limits)?;
-    if raw.boundaries != max_dim + 1 {
+    let boundary_count = max_dim
+        .checked_add(1)
+        .ok_or_else(|| ProofError::new("index homology dimension overflows"))?;
+    let raw = decode_raw_node_counts(reader, limits, boundary_count)?;
+    if raw.boundaries != boundary_count {
         return Err(ProofError::new(
             "interface boundary count differs from the proof dimension",
         ));
@@ -265,7 +293,7 @@ fn decode_node_header(
         separator: raw.separator,
         protected: raw.protected,
         children: raw.children,
-        column_counts: decode_column_counts(reader, raw.boundaries, limits)?,
+        column_counts: decode_column_counts(reader, boundary_count, limits)?,
         bars: reader.bounded_usize("interface bar count", limits.max_bars)?,
         relative_bytes: reader.bounded_usize("relative interface byte count", limits.max_bytes)?,
     })
@@ -285,14 +313,21 @@ fn decode_interface_mode(tag: u8) -> Result<InterfaceMode, ProofError> {
 fn decode_raw_node_counts(
     reader: &mut Reader<'_>,
     limits: ProofLimits,
+    boundary_limit: usize,
 ) -> Result<RawNodeCounts, ProofError> {
     Ok(RawNodeCounts {
-        vertices: reader.usize()?,
-        edges: reader.usize()?,
-        separator: reader.usize()?,
+        vertices: reader.bounded_usize("interface vertex count", limits.max_vertices)?,
+        edges: reader.bounded_usize(
+            "interface edge-reference count",
+            limits.max_edges.min(limits.max_references),
+        )?,
+        separator: reader.bounded_usize("interface separator count", limits.max_vertices)?,
         protected: reader.bounded_usize("protected vertex count", limits.max_vertices)?,
-        children: reader.usize()?,
-        boundaries: reader.usize()?,
+        children: reader.bounded_usize(
+            "interface child count",
+            limits.max_nodes.min(limits.max_references),
+        )?,
+        boundaries: reader.bounded_usize("interface boundary count", boundary_limit)?,
     })
 }
 
@@ -301,6 +336,7 @@ fn decode_column_counts(
     count: usize,
     limits: ProofLimits,
 ) -> Result<Vec<usize>, ProofError> {
+    reader.require_records(count, USIZE_BYTES, "interface simplex-column counts")?;
     (1..=count)
         .map(|dimension| {
             reader.bounded_usize(
@@ -336,6 +372,12 @@ fn record_node_totals(
         limits.max_references,
         "interface edge positions",
     )?;
+    totals.child_references = bounded_sum(
+        totals.child_references,
+        header.children,
+        limits.max_references,
+        "interface child references",
+    )?;
     for &count in &header.column_counts {
         totals.simplex_columns = bounded_sum(
             totals.simplex_columns,
@@ -348,6 +390,7 @@ fn record_node_totals(
 }
 
 fn decode_ids(reader: &mut Reader<'_>, count: usize) -> Result<Vec<[u8; 32]>, ProofError> {
+    reader.require_records(count, DIGEST_BYTES, "interface child references")?;
     (0..count).map(|_| reader.array32()).collect()
 }
 
@@ -365,6 +408,7 @@ fn decode_graded_columns(
 }
 
 fn decode_usizes(reader: &mut Reader<'_>, count: usize) -> Result<Vec<usize>, ProofError> {
+    reader.require_records(count, USIZE_BYTES, "interface index list")?;
     let mut output = Vec::with_capacity(count);
     for _ in 0..count {
         output.push(reader.usize()?);
@@ -379,10 +423,12 @@ fn decode_columns(
     term_limit: usize,
     total_terms: &mut usize,
 ) -> Result<Vec<ProofColumn>, ProofError> {
+    reader.require_records(count, USIZE_BYTES, "index proof columns")?;
     let mut columns = Vec::with_capacity(count);
     for target in 0..count {
         let term_count = reader.usize()?;
         *total_terms = bounded_sum(*total_terms, term_count, term_limit, "index proof terms")?;
+        reader.require_records(term_count, TERM_BYTES, "index proof terms")?;
         let mut terms = Vec::with_capacity(term_count);
         for _ in 0..term_count {
             terms.push(ProofTerm {
@@ -401,6 +447,7 @@ fn decode_diagram(
     count: usize,
     max_dim: usize,
 ) -> Result<Vec<ProofBar>, ProofError> {
+    reader.require_records(count, DIAGRAM_BAR_BYTES, "index proof bars")?;
     let mut diagram = Vec::with_capacity(count);
     for _ in 0..count {
         diagram.push(ProofBar {
@@ -412,6 +459,20 @@ fn decode_diagram(
     check_graded_diagram(&diagram, max_dim)?;
     canonicalize_diagram(&mut diagram);
     Ok(diagram)
+}
+
+fn minimum_node_header_bytes(max_dim: usize) -> Result<usize, ProofError> {
+    let boundaries = max_dim
+        .checked_add(1)
+        .ok_or_else(|| ProofError::new("index homology dimension overflows"))?;
+    NODE_HEADER_FIXED_BYTES
+        .checked_add(
+            boundaries
+                .checked_mul(USIZE_BYTES)
+                .ok_or_else(|| ProofError::new("index node header byte count overflows usize"))?,
+        )
+        .and_then(|bytes| bytes.checked_add(2 * USIZE_BYTES))
+        .ok_or_else(|| ProofError::new("index node header byte count overflows usize"))
 }
 
 fn bounded_sum(

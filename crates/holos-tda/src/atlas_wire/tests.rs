@@ -1,3 +1,4 @@
+use super::codec::{put_optional_f64, put_u16, put_u32, put_u64, put_usize};
 use super::*;
 use crate::{CertificateLimits, RipsParams, SparseDistanceMatrix};
 use proptest::prelude::*;
@@ -182,5 +183,47 @@ proptest! {
             AtlasDecodeLimits::default(),
             CertificateLimits::default(),
         );
+    }
+}
+
+fn atlas_with_space_counts(basis: usize, critical_pairs: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(MAGIC);
+    put_u16(&mut bytes, WIRE_VERSION);
+    bytes.push(F64_BITS_CODEC);
+    put_u32(&mut bytes, 3);
+    put_usize(&mut bytes, 1, "vertex count").unwrap();
+    put_optional_f64(&mut bytes, None);
+    put_usize(&mut bytes, 0, "bar count").unwrap();
+    put_usize(&mut bytes, 1, "space count").unwrap();
+    put_usize(&mut bytes, 0, "certificate byte count").unwrap();
+    bytes.extend_from_slice(&[0; 32]);
+    bytes.extend_from_slice(&[0; 32]);
+    put_u64(&mut bytes, 0.0f64.to_bits());
+    put_u64(&mut bytes, f64::INFINITY.to_bits());
+    put_usize(&mut bytes, basis, "basis count").unwrap();
+    put_usize(&mut bytes, critical_pairs, "critical-pair count").unwrap();
+    bytes
+}
+
+fn wire_max_usize() -> usize {
+    usize::try_from(u64::MAX).unwrap_or(usize::MAX)
+}
+
+#[test]
+fn atlas_rejects_space_counts_before_reserving_records() {
+    let limits = AtlasDecodeLimits {
+        max_basis: usize::MAX,
+        max_critical_pairs: usize::MAX,
+        ..AtlasDecodeLimits::default()
+    };
+    let maximum = wire_max_usize();
+    for (basis, critical_pairs) in [(1, 0), (0, 1), (maximum, 0), (0, maximum)] {
+        let bytes = atlas_with_space_counts(basis, critical_pairs);
+        let result = std::panic::catch_unwind(|| {
+            AtlasArtifact::decode(&bytes, limits, CertificateLimits::default())
+        });
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_err());
     }
 }

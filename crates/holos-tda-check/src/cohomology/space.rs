@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use sha2::{Digest, Sha256};
 
@@ -36,28 +36,25 @@ impl Space {
         modulus: u32,
         limits: ProofLimits,
     ) -> Result<Self, ProofError> {
-        let adjacency = adjacency(vertex_count, edges);
-        let dimensions = flag_dimensions(vertex_count, dimension, &adjacency, limits)?;
-        validate_incidence_count(&dimensions, dimension, limits)?;
-        let q_simplices = &dimensions[dimension];
-        let positions: BTreeMap<_, _> = q_simplices
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(position, simplex)| (simplex, position))
-            .collect();
-        let equations = dimensions[dimension + 1]
-            .iter()
-            .map(|simplex| boundary_row(simplex, &positions, modulus as u64))
-            .collect::<Result<Vec<_>, _>>()?;
-        let cocycles = nullspace(equations, q_simplices.len(), modulus as u64);
-        let coboundaries = coboundary_space(&dimensions, dimension, q_simplices, modulus)?;
-        let quotient = quotient_basis(cocycles, &coboundaries, modulus);
-        Ok(Self {
-            simplices: q_simplices.clone(),
-            coboundaries,
-            basis: rref(quotient, modulus as u64),
-        })
+        build_space(
+            vertex_count,
+            dimension,
+            edges,
+            modulus,
+            limits,
+            dimension == 1,
+        )
+    }
+
+    #[cfg(test)]
+    fn build_unrestricted(
+        vertex_count: usize,
+        dimension: usize,
+        edges: &[Edge],
+        modulus: u32,
+        limits: ProofLimits,
+    ) -> Result<Self, ProofError> {
+        build_space(vertex_count, dimension, edges, modulus, limits, false)
     }
 
     pub(crate) fn rank(&self) -> usize {
@@ -279,6 +276,123 @@ impl Space {
     }
 }
 
+fn build_space(
+    vertex_count: usize,
+    dimension: usize,
+    edges: &[Edge],
+    modulus: u32,
+    limits: ProofLimits,
+    gauge_h1: bool,
+) -> Result<Space, ProofError> {
+    let adjacency = adjacency(vertex_count, edges);
+    let dimensions = flag_dimensions(vertex_count, dimension, &adjacency, limits)?;
+    validate_incidence_count(&dimensions, dimension, limits)?;
+    let q_simplices = &dimensions[dimension];
+    let positions: BTreeMap<_, _> = q_simplices
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(position, simplex)| (simplex, position))
+        .collect();
+    let cocycles = if gauge_h1 {
+        gauged_h1_cocycles(
+            vertex_count,
+            q_simplices,
+            &dimensions[dimension + 1],
+            &positions,
+            &adjacency,
+            modulus as u64,
+        )?
+    } else {
+        let equations = dimensions[dimension + 1]
+            .iter()
+            .map(|simplex| boundary_row(simplex, &positions, modulus as u64))
+            .collect::<Result<Vec<_>, _>>()?;
+        nullspace(equations, q_simplices.len(), modulus as u64)
+    };
+    let coboundaries = coboundary_space(&dimensions, dimension, q_simplices, modulus)?;
+    let quotient = quotient_basis(cocycles, &coboundaries, modulus);
+    Ok(Space {
+        simplices: q_simplices.clone(),
+        coboundaries,
+        basis: rref(quotient, modulus as u64),
+    })
+}
+
+fn gauged_h1_cocycles(
+    vertex_count: usize,
+    edges: &[Vec<usize>],
+    triangles: &[Vec<usize>],
+    positions: &BTreeMap<Vec<usize>, usize>,
+    adjacency: &[BTreeSet<usize>],
+    modulus: u64,
+) -> Result<Vec<Vector>, ProofError> {
+    let forest = spanning_forest(vertex_count, adjacency);
+    // Every cocycle class has one representative with zero forest-edge values.
+    let mut cotree_positions = vec![None; edges.len()];
+    let mut cotree = Vec::new();
+    for (position, simplex) in edges.iter().enumerate() {
+        let edge = Edge {
+            u: simplex[0],
+            v: simplex[1],
+        };
+        if !forest.contains(&edge) {
+            cotree_positions[position] = Some(cotree.len());
+            cotree.push(position);
+        }
+    }
+    let equations = triangles
+        .iter()
+        .map(|simplex| {
+            let full = boundary_row(simplex, positions, modulus)?;
+            let mut restricted = Vector::default();
+            for (&position, &coefficient) in &full.0 {
+                if let Some(cotree_position) = cotree_positions[position] {
+                    restricted.insert(cotree_position, coefficient);
+                }
+            }
+            Ok(restricted)
+        })
+        .collect::<Result<Vec<_>, ProofError>>()?;
+    Ok(nullspace(equations, cotree.len(), modulus)
+        .into_iter()
+        .map(|row| {
+            let mut expanded = Vector::default();
+            for (&cotree_position, &coefficient) in &row.0 {
+                expanded.insert(cotree[cotree_position], coefficient);
+            }
+            expanded
+        })
+        .collect())
+}
+
+fn spanning_forest(vertex_count: usize, adjacency: &[BTreeSet<usize>]) -> BTreeSet<Edge> {
+    let mut forest = BTreeSet::new();
+    let mut seen = vec![false; vertex_count];
+    let mut queue = VecDeque::new();
+    for root in 0..vertex_count {
+        if seen[root] {
+            continue;
+        }
+        seen[root] = true;
+        queue.push_back(root);
+        while let Some(u) = queue.pop_front() {
+            for &v in &adjacency[u] {
+                if seen[v] {
+                    continue;
+                }
+                seen[v] = true;
+                queue.push_back(v);
+                forest.insert(Edge {
+                    u: u.min(v),
+                    v: u.max(v),
+                });
+            }
+        }
+    }
+    forest
+}
+
 fn coordinates(vector: &Vector, basis: &[Vector], modulus: u64) -> Result<Vector, ProofError> {
     let mut residual = vector.clone();
     let mut output = Vector::default();
@@ -295,4 +409,154 @@ fn coordinates(vector: &Vector, basis: &[Vector], modulus: u64) -> Result<Vector
         ));
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn graph_edges(vertex_count: usize, mask: usize) -> Vec<Edge> {
+        let mut edges = Vec::new();
+        let mut bit = 0;
+        for u in 0..vertex_count {
+            for v in u + 1..vertex_count {
+                if mask & (1 << bit) != 0 {
+                    edges.push(Edge { u, v });
+                }
+                bit += 1;
+            }
+        }
+        edges
+    }
+
+    fn rows(vectors: &[Vector]) -> Vec<BTreeMap<usize, u32>> {
+        vectors.iter().map(|vector| vector.0.clone()).collect()
+    }
+
+    fn basis_terms(space: &Space, vector: &Vector) -> Vec<(Edge, u32)> {
+        vector
+            .0
+            .iter()
+            .map(|(&position, &coefficient)| {
+                (
+                    Edge {
+                        u: space.simplices[position][0],
+                        v: space.simplices[position][1],
+                    },
+                    coefficient,
+                )
+            })
+            .collect()
+    }
+
+    fn shifted_terms(
+        space: &Space,
+        vector: &Vector,
+        vertex_values: &[u32],
+        modulus: u32,
+    ) -> Vec<(Edge, u32)> {
+        let modulus = u64::from(modulus);
+        space
+            .simplices
+            .iter()
+            .enumerate()
+            .filter_map(|(position, simplex)| {
+                let coefficient = u64::from(vector.0.get(&position).copied().unwrap_or(0));
+                let source = u64::from(vertex_values[simplex[0]]) % modulus;
+                let target = u64::from(vertex_values[simplex[1]]) % modulus;
+                let coboundary = (target + modulus - source) % modulus;
+                let coefficient = ((coefficient + coboundary) % modulus) as u32;
+                (coefficient != 0).then_some((
+                    Edge {
+                        u: simplex[0],
+                        v: simplex[1],
+                    },
+                    coefficient,
+                ))
+            })
+            .collect()
+    }
+
+    fn assert_space_matches_unrestricted(
+        vertex_count: usize,
+        edges: &[Edge],
+        modulus: u32,
+        limits: ProofLimits,
+    ) -> (Space, Space) {
+        let gauged = Space::build(vertex_count, 1, edges, modulus, limits).unwrap();
+        let unrestricted =
+            Space::build_unrestricted(vertex_count, 1, edges, modulus, limits).unwrap();
+        assert_eq!(
+            gauged.simplices, unrestricted.simplices,
+            "simplex order differs for n={vertex_count}, p={modulus}"
+        );
+        assert_eq!(
+            rows(&gauged.coboundaries),
+            rows(&unrestricted.coboundaries),
+            "coboundaries differ for n={vertex_count}, p={modulus}"
+        );
+        assert_eq!(
+            rows(&gauged.basis),
+            rows(&unrestricted.basis),
+            "basis differs for n={vertex_count}, p={modulus}"
+        );
+        assert_eq!(
+            gauged.id(vertex_count, 1, 1.0, modulus, edges),
+            unrestricted.id(vertex_count, 1, 1.0, modulus, edges),
+            "space id differs for n={vertex_count}, p={modulus}"
+        );
+        for vector in &gauged.basis {
+            let terms = basis_terms(&gauged, vector);
+            assert_eq!(
+                gauged.coordinates_of_edge_cocycle(&terms, modulus),
+                unrestricted.coordinates_of_edge_cocycle(&terms, modulus),
+                "class coordinates differ for n={vertex_count}, p={modulus}"
+            );
+        }
+        (gauged, unrestricted)
+    }
+
+    #[test]
+    fn h1_forest_gauge_matches_the_unrestricted_nullspace() {
+        let limits = ProofLimits::default();
+        for vertex_count in 0usize..=5 {
+            let edge_bits = vertex_count * vertex_count.saturating_sub(1) / 2;
+            for mask in 0..(1usize << edge_bits) {
+                let edges = graph_edges(vertex_count, mask);
+                for modulus in [2, 3, 5, 47] {
+                    assert_space_matches_unrestricted(vertex_count, &edges, modulus, limits);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn h1_forest_gauge_preserves_disconnected_cycle_coboundary_coordinates() {
+        let edges = vec![
+            Edge { u: 0, v: 1 },
+            Edge { u: 0, v: 3 },
+            Edge { u: 1, v: 2 },
+            Edge { u: 2, v: 3 },
+            Edge { u: 4, v: 5 },
+            Edge { u: 4, v: 7 },
+            Edge { u: 5, v: 6 },
+            Edge { u: 6, v: 7 },
+        ];
+        let (gauged, unrestricted) =
+            assert_space_matches_unrestricted(8, &edges, 47, ProofLimits::default());
+        assert_eq!(gauged.rank(), 2);
+        let base = &gauged.basis[0];
+        let base_terms = basis_terms(&gauged, base);
+        let shifted = shifted_terms(&gauged, base, &[1, 0, 0, 0, 2, 0, 0, 0], 47);
+        assert_ne!(base_terms, shifted);
+        let gauged_base = gauged.coordinates_of_edge_cocycle(&base_terms, 47);
+        assert_eq!(
+            gauged_base,
+            gauged.coordinates_of_edge_cocycle(&shifted, 47)
+        );
+        assert_eq!(
+            gauged.coordinates_of_edge_cocycle(&shifted, 47),
+            unrestricted.coordinates_of_edge_cocycle(&shifted, 47)
+        );
+    }
 }

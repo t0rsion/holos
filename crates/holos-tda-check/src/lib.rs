@@ -22,6 +22,8 @@ mod explicit;
 mod finite_field;
 mod index;
 mod kinetic_zigzag;
+mod persistent_class;
+mod persistent_coordinate;
 mod program;
 mod proof;
 mod relative;
@@ -53,6 +55,14 @@ pub use explicit::{
 };
 pub use index::{IndexProofState, VerifiedIndexDelta, VerifiedIndexSnapshot, is_index_snapshot};
 pub use kinetic_zigzag::{VerifiedKineticZigzag, is_kinetic_zigzag, verify_kinetic_zigzag};
+pub use persistent_class::{
+    PersistenceCycleTerm, PersistenceTriangleTerm, PersistentCocycleTerm, PersistentCriticalPair,
+    PersistentSourceEdge, VerifiedPersistentClass, is_persistent_class, verify_persistent_class,
+};
+pub use persistent_coordinate::{
+    VerifiedIntegralTerm, VerifiedPersistentCoordinate, is_persistent_coordinate,
+    verify_persistent_coordinate,
+};
 pub use program::{
     ProgramEdge, ProgramGraph, ProgramProofLimits, ProgramTraceProofLimits, VerifiedProgram,
     VerifiedProgramTrace, is_program, is_program_trace, verify_program, verify_program_trace,

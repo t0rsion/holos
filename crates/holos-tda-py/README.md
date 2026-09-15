@@ -22,7 +22,8 @@ weights. It returns a `HOLOSZZ` artifact for the separate checker.
 return source-bound H1 class records. Their `_class` circular functions check
 the active graph, interval, field, representative scale, and class identity.
 `circular_coordinates_class` accepts the same records with a square distance
-matrix. These bindings require an odd prime, such as 47.
+matrix. Automatic lifting requires an odd prime, such as 47. A supplied lift
+supports modulus two when continuation is not requested.
 
 `intervene_cohomology` finds one minimum-cost set of candidate edges across
 declared graph scenarios. It returns an exact plan or a checked bound. The

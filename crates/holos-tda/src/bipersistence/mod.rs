@@ -11,7 +11,9 @@ mod module;
 mod queries;
 
 pub use atlas::{ClassExtension, ClassExtensionKind, ClassExtensionRegion, CohomologyClassAtlas};
-pub use circular::{CircularCoordinateFamily, CircularCoordinateFamilyEntry};
+pub use circular::{
+    CircularCoordinateFamily, CircularCoordinateFamilyEntry, CircularCoordinateFamilyStatus,
+};
 pub use module::BipersistenceModule;
 
 use crate::bifiltration::Bigrade;
@@ -184,6 +186,24 @@ mod tests {
             .unwrap()
     }
 
+    fn repeated_cycle_grid() -> DegreeRipsBifiltration {
+        let cycle = SparseDistanceMatrix::from_triplets(
+            4,
+            &[(0, 1, 1.0), (1, 2, 1.0), (2, 3, 1.0), (0, 3, 1.0)],
+        )
+        .unwrap();
+        DegreeRipsBifiltration::from_graph_on_grid(
+            &cycle,
+            vec![1.0, 2.0, 3.0],
+            vec![3, 0],
+            DegreeRipsParams {
+                threshold: Some(3.0),
+                ..DegreeRipsParams::default()
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
     fn builds_commuting_degree_rips_module() {
         let module = module(&square_with_diagonals(), 47);
@@ -198,6 +218,169 @@ mod tests {
                 .map_rank(Bigrade::new(1, 1), Bigrade::new(2, 1))
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn repeated_graph_states_keep_exact_node_and_map_content() {
+        let degree_rips = repeated_cycle_grid();
+        let module =
+            BipersistenceModule::from_degree_rips(&degree_rips, 47, BipersistenceLimits::default())
+                .unwrap();
+        let expected_edges: Vec<(usize, usize, u64)> =
+            vec![(0, 1, 0), (0, 3, 0), (1, 2, 0), (2, 3, 0)];
+        let empty_space = module.cohomology_space(Bigrade::new(0, 0)).unwrap().id();
+        let cycle_space = module.cohomology_space(Bigrade::new(0, 1)).unwrap().id();
+        for scale in 0..3 {
+            assert_eq!(
+                module
+                    .cohomology_space(Bigrade::new(scale, 0))
+                    .unwrap()
+                    .id(),
+                empty_space
+            );
+            let graph = module.h1_graph(Bigrade::new(scale, 1)).unwrap();
+            assert_eq!(graph.len(), 4);
+            assert_eq!(
+                graph
+                    .edges()
+                    .map(|(u, v, value)| (u, v, value.to_bits()))
+                    .collect::<Vec<_>>(),
+                expected_edges
+            );
+            assert_eq!(
+                module
+                    .cohomology_space(Bigrade::new(scale, 1))
+                    .unwrap()
+                    .id(),
+                cycle_space
+            );
+        }
+        assert_eq!(module.nodes().len(), 6);
+        assert_eq!(module.cover_maps().len(), 7);
+        assert_eq!(module.node(Bigrade::new(0, 1)).unwrap().rank, 1);
+        for scale in 0..2 {
+            let map = module
+                .cover_map(Bigrade::new(scale, 1), Bigrade::new(scale + 1, 1))
+                .unwrap();
+            assert_eq!(map.rank, 1);
+            assert_eq!(map.source_space, cycle_space);
+            assert_eq!(map.target_space, cycle_space);
+            assert_eq!(
+                map.columns,
+                vec![BipersistenceMapColumn {
+                    source_basis_index: 0,
+                    image: vec![BipersistenceTerm {
+                        basis_index: 0,
+                        coefficient: 1,
+                    }],
+                }]
+            );
+        }
+        for scale in 0..3 {
+            let map = module
+                .cover_map(Bigrade::new(scale, 0), Bigrade::new(scale, 1))
+                .unwrap();
+            assert_eq!(map.rank, 0);
+            assert_eq!(map.source_space, cycle_space);
+            assert_eq!(map.target_space, empty_space);
+            assert_eq!(map.columns.len(), 1);
+            assert!(map.columns[0].image.is_empty());
+        }
+    }
+
+    #[test]
+    fn repeated_states_still_count_every_node_and_map_term() {
+        let degree_rips = repeated_cycle_grid();
+        let mut limits = BipersistenceLimits {
+            max_total_rank: 2,
+            ..BipersistenceLimits::default()
+        };
+        assert!(BipersistenceModule::from_degree_rips(&degree_rips, 47, limits).is_err());
+
+        limits = BipersistenceLimits {
+            max_map_terms: 1,
+            ..BipersistenceLimits::default()
+        };
+        assert!(BipersistenceModule::from_degree_rips(&degree_rips, 47, limits).is_err());
+    }
+
+    #[test]
+    fn isolated_vertices_remain_in_empty_h1_graphs() {
+        let graph =
+            SparseDistanceMatrix::from_triplets(4, &[(0, 1, 1.0), (0, 2, 1.0), (0, 3, 1.0)])
+                .unwrap();
+        let degree_rips = DegreeRipsBifiltration::from_graph_on_grid(
+            &graph,
+            vec![1.0],
+            vec![2, 0],
+            DegreeRipsParams {
+                threshold: Some(1.0),
+                ..DegreeRipsParams::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            degree_rips
+                .bifiltration()
+                .slice(Bigrade::new(0, 0))
+                .unwrap()
+                .active_vertices(),
+            &[0]
+        );
+        let module =
+            BipersistenceModule::from_degree_rips(&degree_rips, 47, BipersistenceLimits::default())
+                .unwrap();
+        let empty = module.h1_graph(Bigrade::new(0, 0)).unwrap();
+        assert_eq!(empty.len(), 4);
+        assert_eq!(empty.num_edges(), 0);
+        assert_eq!(
+            module
+                .h1_graph(Bigrade::new(0, 1))
+                .unwrap()
+                .edges()
+                .collect::<Vec<_>>(),
+            vec![(0, 1, 0.0), (0, 2, 0.0), (0, 3, 0.0)]
+        );
+    }
+
+    #[test]
+    fn equal_ranks_with_different_graphs_keep_distinct_spaces() {
+        let graph = SparseDistanceMatrix::from_triplets(
+            4,
+            &[(0, 1, 1.0), (1, 2, 1.0), (2, 3, 1.0), (0, 2, 2.0)],
+        )
+        .unwrap();
+        let degree_rips = DegreeRipsBifiltration::from_graph_on_grid(
+            &graph,
+            vec![1.0, 2.0],
+            vec![0],
+            DegreeRipsParams {
+                threshold: Some(2.0),
+                ..DegreeRipsParams::default()
+            },
+        )
+        .unwrap();
+        let module =
+            BipersistenceModule::from_degree_rips(&degree_rips, 47, BipersistenceLimits::default())
+                .unwrap();
+        assert_eq!(module.node(Bigrade::new(0, 0)).unwrap().rank, 0);
+        assert_eq!(module.node(Bigrade::new(1, 0)).unwrap().rank, 0);
+        assert_ne!(
+            module.cohomology_space(Bigrade::new(0, 0)).unwrap().id(),
+            module.cohomology_space(Bigrade::new(1, 0)).unwrap().id()
+        );
+        assert_ne!(
+            module
+                .h1_graph(Bigrade::new(0, 0))
+                .unwrap()
+                .edges()
+                .collect::<Vec<_>>(),
+            module
+                .h1_graph(Bigrade::new(1, 0))
+                .unwrap()
+                .edges()
+                .collect::<Vec<_>>()
         );
     }
 
@@ -329,7 +512,16 @@ mod tests {
             .circular_coordinate_family(&atlas, CircularCoordinateParams::default())
             .unwrap();
         assert!(family.entries.iter().all(|entry| {
-            (entry.extension == ClassExtensionKind::Unique) == entry.coordinate.is_some()
+            matches!(
+                (entry.extension, &entry.status),
+                (
+                    ClassExtensionKind::Unique,
+                    CircularCoordinateFamilyStatus::Success(_)
+                ) | (
+                    ClassExtensionKind::Ambiguous | ClassExtensionKind::NoExtension,
+                    CircularCoordinateFamilyStatus::NotAttempted,
+                )
+            )
         }));
 
         let scaled = module
@@ -348,7 +540,7 @@ mod tests {
             scaled_family
                 .entries
                 .iter()
-                .any(|entry| entry.coordinate.is_some())
+                .any(|entry| matches!(&entry.status, CircularCoordinateFamilyStatus::Success(_)))
         );
     }
 

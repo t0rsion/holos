@@ -266,7 +266,11 @@ fn max_abs(values: &[f64]) -> f64 {
 
 pub(super) fn canonical_phase(value: f64) -> f64 {
     let phase = value.rem_euclid(1.0);
-    if phase == 0.0 { 0.0 } else { phase }
+    if phase >= 1.0 || phase == 0.0 {
+        0.0
+    } else {
+        phase
+    }
 }
 
 fn gcd(mut a: u64, mut b: u64) -> u64 {
@@ -276,4 +280,17 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
         b = remainder;
     }
     a
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_phase;
+
+    #[test]
+    fn canonical_phase_normalizes_wrap_boundaries() {
+        assert_eq!(canonical_phase(-1e-17).to_bits(), 0.0f64.to_bits());
+        assert_eq!(canonical_phase(-0.0).to_bits(), 0.0f64.to_bits());
+        assert_eq!(canonical_phase(2.25), 0.25);
+        assert_eq!(canonical_phase(-0.25), 0.75);
+    }
 }

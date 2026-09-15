@@ -6,6 +6,80 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-15
+
+### Added
+
+- `PersistentClassArtifact` writes version 1 `HOLOSPC` bytes for one selected
+  canonical persistent H1 class. The artifact binds the complete labeled
+  weighted source, threshold, field, interval, class identity, critical pair,
+  birth cycle, and finite-death bounding chain.
+- `PersistentCoordinateArtifact` writes version 1 `HOLOSPH` bytes that nest a
+  persistent-class artifact. The coordinate carries its integer lift, field
+  multiplier, divisibility, gauge-fixed potential, and residual tolerance.
+- `holos persistent-class` and `holos persistent-circular` build the new
+  artifacts. The circular command accepts `--integral-lift` and can write a
+  phase sidecar.
+- Existing fixed-scale Python circular functions and `holos circular` accept
+  checked supplied integral lifts. This supports modulus two when continuation
+  is not requested.
+- Python exposes `persistent_class_sparse`, `persistent_class_condensed`,
+  `persistent_class_points`, and `persistent_class_square`, with matching
+  `persistent_circular_*` functions for the same input forms.
+- Circular-coordinate families retain every extension entry and report
+  `not_attempted`, `lift_failed`, `solve_failed`, or `success` outcomes. A
+  failure at one grade does not discard a successful coordinate at another.
+  Automatic family construction requires an odd prime because the family API
+  has no supplied-lift parameter for modulus two.
+- Rust exposes `ProgramDiagramState` for exact diagram updates that defer
+  refreshed class spaces until `materialize`. Finite bipersistence construction
+  reuses equal active graphs, cohomology spaces, and cover maps while retaining
+  explicit node and map records.
+
+### Changed
+
+- `HOLOSBP` is now version 2. Circular-family entries preserve their extension
+  kind and carry a computation status. Version 1 bytes are rejected by the
+  decoder.
+- `CohomologyRestriction::image_contains` now takes a matching
+  `&CohomologySpace` and returns `Result<bool>`. Callers must handle validation
+  errors.
+- `CohomologyRelation::contains_old_class` now takes a matching
+  `&CohomologySpace` and returns `Result<bool>`. Callers must handle
+  validation errors.
+- Circular phase normalization maps wrap-boundary and negative-zero results to
+  positive zero before output.
+
+### Correctness and limits
+
+- The persistent-class checker replays the bounded H1 profile and checks the
+  selected class, its interval group, critical pair, birth-cycle closure and
+  pairing, and its finite-death chain. The cycle pairs to the selected class
+  with value one in the declared field. The critical pair supplies endpoint
+  evidence and does not define the class basis vector.
+- Essentiality means that the selected class has no death in the complex
+  bounded by the declared threshold.
+- Source binding includes vertex labels and all listed source weights. A
+  representative-scale active graph does not replace that source binding. The
+  checker certifies the embedded graph. Compare it with an expected source
+  graph, or compare the payload digest, to associate an artifact with an
+  external dataset. That association does not authenticate the producer.
+- A circular field multiplier relates the integer lift modulo the field to the
+  selected cocycle. Divisibility is the positive gcd of integer periods and can
+  exceed one. A caller that requires a primitive integer class must check
+  `divisibility == 1`. The checker recomputes the relative harmonic residual
+  and checks it against the declared tolerance. The tolerance describes the
+  harmonic solve; it does not state angular phase precision. For `HOLOSCC`
+  and `HOLOSPH`, the default maximum tolerance is `1e-8`;
+  `holos-check ARTIFACT --max-tolerance R` overrides it for these runners.
+- Automatic integral lifting remains a bounded centered search for odd primes.
+  A lift failure is a computational result. It does not prove that no lift
+  exists. A supplied integral lift supports modulus two.
+- `HOLOSCC` remains a fixed-scale artifact. Its checker does not verify
+  persistence endpoints, and its payload records active edge endpoints rather
+  than weights on inactive source edges. Use `HOLOSPC` and `HOLOSPH` for the
+  source-bound interval and witness contract.
+
 ## [0.8.0] - 2026-09-10
 
 ### Workflow validation and maintenance
@@ -719,7 +793,8 @@ First public release.
 - Reproducible benchmark harness (`benchmarks/run.sh`) that refuses dirty
   trees, records full provenance, and fails on any diagram mismatch.
 
-[Unreleased]: https://github.com/t0rsion/holos/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/t0rsion/holos/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/t0rsion/holos/releases/tag/v0.9.0
 [0.8.0]: https://github.com/t0rsion/holos/releases/tag/v0.8.0
 [0.7.0]: https://github.com/t0rsion/holos/releases/tag/v0.7.0
 [0.6.0]: https://github.com/t0rsion/holos/releases/tag/v0.6.0

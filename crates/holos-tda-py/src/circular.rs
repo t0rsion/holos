@@ -56,12 +56,11 @@ pub(crate) fn circular_result(
     terms: Vec<(usize, usize, i64)>,
     scale: f64,
     modulus: u32,
-    tolerance: f64,
-    max_iterations: usize,
+    params: CircularCoordinateParams,
+    integral: Option<Vec<(usize, usize, i64)>>,
 ) -> holos_tda::Result<CircularResult> {
-    let params = circular_params(tolerance, max_iterations);
     let cocycle = normalized_cocycle(graph, terms, modulus, scale)?;
-    circular_result_from_cocycle(graph, other, cocycle, params)
+    circular_result_from_cocycle(graph, other, cocycle, params, integral.map(integral_terms))
 }
 
 pub(crate) fn circular_result_for_class(
@@ -70,6 +69,7 @@ pub(crate) fn circular_result_for_class(
     persistent_class: PersistentClassInput,
     tolerance: f64,
     max_iterations: usize,
+    integral: Option<Vec<(usize, usize, i64)>>,
 ) -> holos_tda::Result<CircularResult> {
     let (
         birth,
@@ -112,7 +112,13 @@ pub(crate) fn circular_result_for_class(
     };
     class.validate_provenance(graph)?;
     let params = circular_params(tolerance, max_iterations);
-    circular_result_from_cocycle(graph, other, class.cocycle, params)
+    circular_result_from_cocycle(
+        graph,
+        other,
+        class.cocycle,
+        params,
+        integral.map(integral_terms),
+    )
 }
 
 fn circular_result_from_cocycle(
@@ -120,14 +126,40 @@ fn circular_result_from_cocycle(
     other: Option<&SparseDistanceMatrix>,
     cocycle: holos_tda::Cocycle,
     params: CircularCoordinateParams,
+    integral: Option<Vec<holos_tda::IntegralCocycleTerm>>,
 ) -> holos_tda::Result<CircularResult> {
-    let coordinate = circular_coordinate(graph, &cocycle, params)?;
+    let coordinate = match integral.as_deref() {
+        Some(integral) => {
+            holos_tda::circular_coordinate_with_integral_lift(graph, &cocycle, integral, params)?
+        }
+        None => circular_coordinate(graph, &cocycle, params)?,
+    };
     let first = circular_coordinate_record(&coordinate);
     if let Some(other) = other {
         continued_result(graph, other, &coordinate, first, params)
     } else {
         single_result(graph, &coordinate, first)
     }
+}
+
+fn integral_terms(terms: Vec<(usize, usize, i64)>) -> Vec<holos_tda::IntegralCocycleTerm> {
+    terms
+        .into_iter()
+        .map(|(u, v, coefficient)| holos_tda::IntegralCocycleTerm { u, v, coefficient })
+        .collect()
+}
+
+fn reject_modulus_two_continuation(
+    modulus: u32,
+    has_other: bool,
+    has_integral: bool,
+) -> holos_tda::Result<()> {
+    if modulus == 2 && has_other && has_integral {
+        return Err(holos_tda::Error::InvalidInput(
+            "modulus 2 continuation is unsupported with a supplied lift; continuation uses automatic lifting on the other graph, which requires an odd prime".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_digest(value: &str, label: &str) -> holos_tda::Result<[u8; 32]> {
@@ -215,7 +247,7 @@ pub(crate) fn dense_graph(data: Vec<f64>, scale: f64) -> holos_tda::Result<Spars
 }
 
 #[pyfunction]
-#[pyo3(signature = (n, triplets, cocycle, scale, modulus=47, tolerance=1e-10, max_iterations=10_000, other_triplets=None))]
+#[pyo3(signature = (n, triplets, cocycle, scale, modulus=47, tolerance=1e-10, max_iterations=10_000, other_triplets=None, integral_lift=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn circular_sparse(
     py: Python<'_>,
@@ -227,8 +259,11 @@ pub(crate) fn circular_sparse(
     tolerance: f64,
     max_iterations: usize,
     other_triplets: Option<Vec<(usize, usize, f64)>>,
+    integral_lift: Option<Vec<(usize, usize, i64)>>,
 ) -> PyResult<CircularResult> {
     py.detach(|| {
+        reject_modulus_two_continuation(modulus, other_triplets.is_some(), integral_lift.is_some())
+            .map_err(to_err)?;
         let graph = SparseDistanceMatrix::from_triplets(n, &triplets).map_err(to_err)?;
         let other = other_triplets
             .map(|terms| SparseDistanceMatrix::from_triplets(n, &terms))
@@ -240,15 +275,15 @@ pub(crate) fn circular_sparse(
             cocycle,
             scale,
             modulus,
-            tolerance,
-            max_iterations,
+            circular_params(tolerance, max_iterations),
+            integral_lift,
         )
         .map_err(to_err)
     })
 }
 
 #[pyfunction]
-#[pyo3(signature = (n, triplets, persistent_class, tolerance=1e-10, max_iterations=10_000, other_triplets=None))]
+#[pyo3(signature = (n, triplets, persistent_class, tolerance=1e-10, max_iterations=10_000, other_triplets=None, integral_lift=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn circular_sparse_class(
     py: Python<'_>,
@@ -258,8 +293,15 @@ pub(crate) fn circular_sparse_class(
     tolerance: f64,
     max_iterations: usize,
     other_triplets: Option<Vec<(usize, usize, f64)>>,
+    integral_lift: Option<Vec<(usize, usize, i64)>>,
 ) -> PyResult<CircularResult> {
     py.detach(|| {
+        reject_modulus_two_continuation(
+            persistent_class.2,
+            other_triplets.is_some(),
+            integral_lift.is_some(),
+        )
+        .map_err(to_err)?;
         let graph = SparseDistanceMatrix::from_triplets(n, &triplets).map_err(to_err)?;
         let other = other_triplets
             .map(|terms| SparseDistanceMatrix::from_triplets(n, &terms))
@@ -271,13 +313,14 @@ pub(crate) fn circular_sparse_class(
             persistent_class,
             tolerance,
             max_iterations,
+            integral_lift,
         )
         .map_err(to_err)
     })
 }
 
 #[pyfunction]
-#[pyo3(signature = (data, cocycle, scale, modulus=47, tolerance=1e-10, max_iterations=10_000, other=None))]
+#[pyo3(signature = (data, cocycle, scale, modulus=47, tolerance=1e-10, max_iterations=10_000, other=None, integral_lift=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn circular_condensed(
     py: Python<'_>,
@@ -288,8 +331,11 @@ pub(crate) fn circular_condensed(
     tolerance: f64,
     max_iterations: usize,
     other: Option<Vec<f64>>,
+    integral_lift: Option<Vec<(usize, usize, i64)>>,
 ) -> PyResult<CircularResult> {
     py.detach(|| {
+        reject_modulus_two_continuation(modulus, other.is_some(), integral_lift.is_some())
+            .map_err(to_err)?;
         let graph = dense_graph(data, scale).map_err(to_err)?;
         let other = other
             .map(|values| dense_graph(values, scale))
@@ -301,15 +347,15 @@ pub(crate) fn circular_condensed(
             cocycle,
             scale,
             modulus,
-            tolerance,
-            max_iterations,
+            circular_params(tolerance, max_iterations),
+            integral_lift,
         )
         .map_err(to_err)
     })
 }
 
 #[pyfunction]
-#[pyo3(signature = (data, persistent_class, tolerance=1e-10, max_iterations=10_000, other=None))]
+#[pyo3(signature = (data, persistent_class, tolerance=1e-10, max_iterations=10_000, other=None, integral_lift=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn circular_condensed_class(
     py: Python<'_>,
@@ -318,8 +364,15 @@ pub(crate) fn circular_condensed_class(
     tolerance: f64,
     max_iterations: usize,
     other: Option<Vec<f64>>,
+    integral_lift: Option<Vec<(usize, usize, i64)>>,
 ) -> PyResult<CircularResult> {
     py.detach(|| {
+        reject_modulus_two_continuation(
+            persistent_class.2,
+            other.is_some(),
+            integral_lift.is_some(),
+        )
+        .map_err(to_err)?;
         let scale = persistent_class.3;
         let graph = dense_graph(data, scale).map_err(to_err)?;
         let other = other
@@ -332,13 +385,14 @@ pub(crate) fn circular_condensed_class(
             persistent_class,
             tolerance,
             max_iterations,
+            integral_lift,
         )
         .map_err(to_err)
     })
 }
 
 #[pyfunction]
-#[pyo3(signature = (points, cocycle, scale, modulus=47, tolerance=1e-10, max_iterations=10_000, threads=1, other=None))]
+#[pyo3(signature = (points, cocycle, scale, modulus=47, tolerance=1e-10, max_iterations=10_000, threads=1, other=None, integral_lift=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn circular_points(
     py: Python<'_>,
@@ -350,8 +404,11 @@ pub(crate) fn circular_points(
     max_iterations: usize,
     threads: usize,
     other: Option<Vec<Vec<f64>>>,
+    integral_lift: Option<Vec<(usize, usize, i64)>>,
 ) -> PyResult<CircularResult> {
     py.detach(|| {
+        reject_modulus_two_continuation(modulus, other.is_some(), integral_lift.is_some())
+            .map_err(to_err)?;
         let graph =
             PointCloudGraph::build(&points, PointCloudParams::new(scale).with_threads(threads))
                 .map_err(to_err)?;
@@ -367,15 +424,15 @@ pub(crate) fn circular_points(
             cocycle,
             scale,
             modulus,
-            tolerance,
-            max_iterations,
+            circular_params(tolerance, max_iterations),
+            integral_lift,
         )
         .map_err(to_err)
     })
 }
 
 #[pyfunction]
-#[pyo3(signature = (points, persistent_class, tolerance=1e-10, max_iterations=10_000, threads=1, other=None))]
+#[pyo3(signature = (points, persistent_class, tolerance=1e-10, max_iterations=10_000, threads=1, other=None, integral_lift=None))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn circular_points_class(
     py: Python<'_>,
@@ -385,8 +442,15 @@ pub(crate) fn circular_points_class(
     max_iterations: usize,
     threads: usize,
     other: Option<Vec<Vec<f64>>>,
+    integral_lift: Option<Vec<(usize, usize, i64)>>,
 ) -> PyResult<CircularResult> {
     py.detach(|| {
+        reject_modulus_two_continuation(
+            persistent_class.2,
+            other.is_some(),
+            integral_lift.is_some(),
+        )
+        .map_err(to_err)?;
         let scale = persistent_class.3;
         let graph =
             PointCloudGraph::build(&points, PointCloudParams::new(scale).with_threads(threads))
@@ -403,6 +467,7 @@ pub(crate) fn circular_points_class(
             persistent_class,
             tolerance,
             max_iterations,
+            integral_lift,
         )
         .map_err(to_err)
     })

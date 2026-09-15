@@ -302,19 +302,6 @@ pub(crate) fn relation_terms(
         .collect()
 }
 
-pub(crate) fn relation_row(
-    terms: &[CohomologyRelationTerm],
-    positions: &BTreeMap<CohomologyClassId, usize>,
-) -> SparseVector {
-    let mut row = SparseVector::default();
-    for term in terms {
-        if let Some(&position) = positions.get(&term.class) {
-            row.insert(position, term.coefficient);
-        }
-    }
-    row
-}
-
 pub(crate) fn inverse_mod(value: u64, modulus: u64) -> u64 {
     let mut result = 1u64;
     let mut base = value;

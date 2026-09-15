@@ -1,6 +1,7 @@
 use holos_tda::{
     Bigrade, BipersistenceArtifact, BipersistenceMap, BipersistenceTerm, CircularCoordinate,
-    ClassExtension, ClassExtensionKind, CohomologyClassAtlas,
+    CircularCoordinateFamily, CircularCoordinateFamilyStatus, ClassExtension, ClassExtensionKind,
+    CohomologyClassAtlas,
 };
 
 pub(super) type Grade = (usize, usize);
@@ -28,7 +29,7 @@ type CircularCoordinateRecord = (
     Vec<f64>,
     (f64, f64, f64, usize, f64),
 );
-type CircularEntryRecord = (Grade, String, Option<CircularCoordinateRecord>);
+type CircularEntryRecord = (Grade, String, String, Option<CircularCoordinateRecord>);
 pub(super) type CircularFamilyRecord = (Grade, Vec<Term>, Vec<CircularEntryRecord>);
 pub(super) type ArtifactSummary = (usize, usize, usize, usize, usize, usize, usize, usize);
 
@@ -138,6 +139,33 @@ pub(super) fn coordinate_record(value: &CircularCoordinate) -> CircularCoordinat
             value.iterations,
             value.tolerance,
         ),
+    )
+}
+
+pub(super) fn family_record(value: &CircularCoordinateFamily) -> CircularFamilyRecord {
+    (
+        from_grade(value.base_grade),
+        terms(&value.base_class),
+        value
+            .entries
+            .iter()
+            .map(|entry| {
+                let (status, coordinate) = match &entry.status {
+                    CircularCoordinateFamilyStatus::NotAttempted => ("not_attempted", None),
+                    CircularCoordinateFamilyStatus::LiftFailed => ("lift_failed", None),
+                    CircularCoordinateFamilyStatus::SolveFailed => ("solve_failed", None),
+                    CircularCoordinateFamilyStatus::Success(coordinate) => {
+                        ("success", Some(coordinate_record(coordinate)))
+                    }
+                };
+                (
+                    from_grade(entry.grade),
+                    extension_kind(entry.extension).into(),
+                    status.into(),
+                    coordinate,
+                )
+            })
+            .collect(),
     )
 }
 

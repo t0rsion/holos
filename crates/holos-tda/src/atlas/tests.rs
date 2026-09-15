@@ -100,6 +100,44 @@ fn point_radius_reuses_small_changes_and_rejects_its_boundary() {
 }
 
 #[test]
+fn point_radius_forces_rebuild_after_pairwise_distance_overflow() {
+    let points = vec![vec![1e308, 0.0], vec![-1e308, 0.0]];
+    let params = RipsParams::new(1).with_threshold(1.0);
+    let atlas = PointPersistenceAtlas::build(&points, &params).unwrap();
+    assert_eq!(atlas.coordinate_radius(), 0.0);
+
+    let moved = vec![vec![0.0, 0.0], vec![0.0, 0.0]];
+    assert!(atlas.evaluate(&moved).is_err());
+    let update = atlas.update(&moved).unwrap();
+    assert_eq!(update.mode, UpdateMode::Recomputed);
+
+    let exact_graph = PointCloudGraph::build(&moved, PointCloudParams::new(1.0)).unwrap();
+    let exact = rips_persistence_sparse(exact_graph.matrix(), &params).unwrap();
+    assert!(diagram_bits_equal(&update.evaluation.diagram, &exact));
+}
+
+#[test]
+fn point_atlas_rejects_nonfinite_thresholds_and_overflowed_displacement() {
+    let points = vec![vec![1e308, 0.0], vec![1e308, 1.0]];
+    for threshold in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(
+            PointPersistenceAtlas::build(&points, &RipsParams::new(1).with_threshold(threshold))
+                .is_err()
+        );
+    }
+
+    let params = RipsParams::new(1).with_threshold(2.0);
+    let atlas = PointPersistenceAtlas::build(&points, &params).unwrap();
+    assert!(atlas.coordinate_radius().is_finite());
+    assert!(atlas.coordinate_radius() > 0.0);
+    let moved = vec![vec![-1e308, 0.0], vec![1e308, 1.0]];
+    assert!(atlas.evaluate(&moved).is_err());
+    let update = atlas.update(&moved).unwrap();
+    assert_eq!(update.mode, UpdateMode::Recomputed);
+    assert_eq!(update.atlas.coordinate_radius(), 0.0);
+}
+
+#[test]
 fn random_order_preserving_weights_match_exact_reduction() {
     let mut state = 0xd038_72ab_54f1_c967u64;
     let mut next = || {

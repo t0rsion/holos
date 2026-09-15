@@ -34,6 +34,16 @@ def run():
         _write(root / "coordinate.hcc", circular["artifact"])
         _check(checker, root / "coordinate.hcc")
 
+        _, mod_two_classes = holos_tda.rips_sparse_classes(4, cycle, modulus=2)
+        supplied = holos_tda.circular_sparse_class(
+            4,
+            cycle,
+            mod_two_classes[0],
+            integral_lift=mod_two_classes[0]["terms"],
+        )
+        _write(root / "coordinate-supplied.hcc", supplied["artifact"])
+        _check(checker, root / "coordinate-supplied.hcc")
+
         module = degree_rips_bipersistence(
             4,
             cycle,

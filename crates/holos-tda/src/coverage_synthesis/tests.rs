@@ -45,6 +45,31 @@ fn specification(failures: usize) -> CoverageSpecification {
     .unwrap()
 }
 
+fn affine_specification() -> CoverageSpecification {
+    let edges = graph()
+        .edges()
+        .map(|(u, v, _)| KineticEdge {
+            u,
+            v,
+            intercept: if (u, v) == (0, 4) { 0.5 } else { 1.0 },
+            velocity: if (u, v) == (0, 4) { 1.0 } else { 0.0 },
+        })
+        .collect();
+    let kinetic = KineticFiltration::new(6, edges, 0.0, 1.0, KineticLimits::default()).unwrap();
+    CoverageSpecification::from_kinetic(
+        &kinetic,
+        7,
+        model(),
+        2,
+        CoverageFence::new(vec![0, 1, 2, 3]).unwrap(),
+        vec![4, 5],
+        0,
+        vec![0, 1, 2, 3],
+        CoverageLimits::default(),
+    )
+    .unwrap()
+}
+
 #[test]
 fn one_candidate_covers_without_failures() {
     let specification = specification(0);
@@ -192,28 +217,7 @@ fn maximal_failure_sets_cover_every_smaller_failure() {
 
 #[test]
 fn affine_compilation_includes_every_threshold_cell() {
-    let edges = graph()
-        .edges()
-        .map(|(u, v, _)| KineticEdge {
-            u,
-            v,
-            intercept: if (u, v) == (0, 4) { 0.5 } else { 1.0 },
-            velocity: if (u, v) == (0, 4) { 1.0 } else { 0.0 },
-        })
-        .collect();
-    let kinetic = KineticFiltration::new(6, edges, 0.0, 1.0, KineticLimits::default()).unwrap();
-    let specification = CoverageSpecification::from_kinetic(
-        &kinetic,
-        7,
-        model(),
-        2,
-        CoverageFence::new(vec![0, 1, 2, 3]).unwrap(),
-        vec![4, 5],
-        0,
-        vec![0, 1, 2, 3],
-        CoverageLimits::default(),
-    )
-    .unwrap();
+    let specification = affine_specification();
     assert_eq!(specification.states.len(), 5);
     assert!(matches!(
         specification.source,
@@ -233,6 +237,26 @@ fn affine_compilation_includes_every_threshold_cell() {
     assert_eq!(
         independent.source,
         holos_tda_check::VerifiedCoverageSource::Affine
+    );
+}
+
+#[test]
+fn affine_source_rejects_noncanonical_edge_order() {
+    let mut specification = affine_specification();
+    let action = CoverageAction::throughout(5, 1, &specification);
+    let CoverageSource::Affine { edges, .. } = &mut specification.source else {
+        panic!("affine helper must produce an affine source");
+    };
+    edges.swap(0, 1);
+
+    assert!(
+        CoverageSynthesisArtifact::build(
+            specification,
+            vec![action],
+            1,
+            CoverageSynthesisLimits::default(),
+        )
+        .is_err()
     );
 }
 

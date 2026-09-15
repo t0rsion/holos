@@ -406,3 +406,212 @@ fn random_program_updates_match_monolithic_reduction() {
         }
     }
 }
+
+#[test]
+fn diagram_state_reuses_regions_and_materializes_factorized_classes() {
+    let initial = two_squares();
+    let updated = SparseDistanceMatrix::from_triplets(
+        7,
+        &[
+            (0, 1, 1.01),
+            (1, 2, 2.01),
+            (2, 3, 3.01),
+            (0, 3, 4.01),
+            (3, 4, 1.51),
+            (4, 5, 2.51),
+            (5, 6, 3.51),
+            (3, 6, 4.51),
+        ],
+    )
+    .unwrap();
+    let params = RipsParams::new(1).with_modulus(5);
+    let program =
+        PersistenceProgram::compile(&initial, &params, CertificateLimits::default()).unwrap();
+    let mut state = program.into_diagram_state();
+
+    let step = state.advance(&updated).unwrap();
+    assert_eq!(step.mode, ProgramDiagramUpdateMode::Reused);
+    let expected = rips_persistence_sparse(&updated, &params).unwrap();
+    assert!(diagram_bits_equal(&step.diagram, &expected));
+
+    let materialized = state.materialize().unwrap().clone();
+    let direct =
+        PersistenceProgram::compile(&updated, &params, CertificateLimits::default()).unwrap();
+    assert_eq!(materialized.spaces, direct.result().spaces);
+    assert!(diagram_bits_equal(
+        &materialized.diagram,
+        &direct.result().diagram
+    ));
+    assert!(diagram_bits_equal(state.diagram(), &materialized.diagram));
+}
+
+#[test]
+fn diagram_state_noop_keeps_the_rich_program_clean() {
+    let initial = two_squares();
+    let params = RipsParams::new(1);
+    let program =
+        PersistenceProgram::compile(&initial, &params, CertificateLimits::default()).unwrap();
+    let mut state = program.into_diagram_state();
+
+    let step = state.advance(&initial).unwrap();
+    assert_eq!(step.mode, ProgramDiagramUpdateMode::Reused);
+    assert_eq!(step.work.atoms_touched, 0);
+    assert!(!state.dirty);
+    assert!(diagram_bits_equal(&step.diagram, state.diagram()));
+}
+
+#[test]
+fn diagram_state_topology_fallback_is_exact() {
+    let initial = two_squares();
+    let updated = SparseDistanceMatrix::from_triplets(
+        7,
+        &[
+            (0, 1, 1.0),
+            (1, 2, 2.0),
+            (2, 3, 3.0),
+            (0, 3, 4.0),
+            (3, 4, 1.5),
+            (4, 5, 2.5),
+            (5, 6, 3.5),
+        ],
+    )
+    .unwrap();
+    let params = RipsParams::new(1).with_modulus(3);
+    let program =
+        PersistenceProgram::compile(&initial, &params, CertificateLimits::default()).unwrap();
+    let mut state = program.into_diagram_state();
+
+    let step = state.advance(&updated).unwrap();
+    assert_eq!(step.mode, ProgramDiagramUpdateMode::Recompiled);
+    assert!(
+        step.events
+            .iter()
+            .any(|event| event.kind == ProgramEventKind::EdgeSetChanged)
+    );
+    let expected = rips_persistence_sparse(&updated, &params).unwrap();
+    assert!(diagram_bits_equal(&step.diagram, &expected));
+    let materialized = state.materialize().unwrap().clone();
+    let direct =
+        PersistenceProgram::compile(&updated, &params, CertificateLimits::default()).unwrap();
+    assert_eq!(materialized.spaces, direct.result().spaces);
+}
+
+#[test]
+fn diagram_state_guard_failure_uses_the_exact_fallback() {
+    let initial = two_squares();
+    let params = RipsParams::new(1).with_modulus(3);
+    let program =
+        PersistenceProgram::compile(&initial, &params, CertificateLimits::default()).unwrap();
+    let mut state = program.into_diagram_state();
+    let make_update = |weight| {
+        SparseDistanceMatrix::from_triplets(
+            7,
+            &[
+                (0, 1, weight),
+                (1, 2, 2.0),
+                (2, 3, 3.0),
+                (0, 3, 4.0),
+                (3, 4, 1.5),
+                (4, 5, 2.5),
+                (5, 6, 3.5),
+                (3, 6, 4.5),
+            ],
+        )
+        .unwrap()
+    };
+    let updated = [5.0, 7.0, 9.0, 12.0]
+        .into_iter()
+        .map(make_update)
+        .find(|candidate| {
+            state.program.states().iter().any(|atom| {
+                let local =
+                    super::composition::local_matrix(&atom.vertices, &atom.edges, candidate)
+                        .unwrap();
+                atom.region
+                    .violations(&local)
+                    .iter()
+                    .any(|violation| violation.kind() == crate::RegionViolationKind::GuardFailed)
+            })
+        })
+        .expect("the guard-failure candidates must leave the initial region");
+
+    let step = state.advance(&updated).unwrap();
+    assert_eq!(step.mode, ProgramDiagramUpdateMode::Recompiled);
+    assert!(
+        step.events
+            .iter()
+            .any(|event| event.kind == ProgramEventKind::GuardFailed)
+    );
+    let expected = rips_persistence_sparse(&updated, &params).unwrap();
+    assert!(diagram_bits_equal(&step.diagram, &expected));
+}
+
+#[test]
+fn diagram_state_failed_fallback_preserves_current_snapshot() {
+    let initial = two_squares();
+    let updated = SparseDistanceMatrix::from_triplets(
+        7,
+        &[
+            (0, 1, 1.0),
+            (1, 2, 2.0),
+            (2, 3, 3.0),
+            (0, 3, 4.0),
+            (3, 4, 1.5),
+            (4, 5, 2.5),
+            (5, 6, 3.5),
+        ],
+    )
+    .unwrap();
+    let program =
+        PersistenceProgram::compile(&initial, &RipsParams::new(1), CertificateLimits::default())
+            .unwrap();
+    let mut state = program.into_diagram_state();
+    let before = state.diagram().clone();
+    let before_graph: Vec<_> = state.graph.edges().collect();
+    state.program.params.max_dim = 2;
+
+    assert!(state.advance(&updated).is_err());
+    assert!(diagram_bits_equal(state.diagram(), &before));
+    assert_eq!(state.graph.edges().collect::<Vec<_>>(), before_graph);
+}
+
+#[test]
+fn diagram_state_rejects_a_mismatching_materialization_fallback() {
+    let initial = two_squares();
+    let updated = SparseDistanceMatrix::from_triplets(
+        7,
+        &[
+            (0, 1, 1.01),
+            (1, 2, 2.01),
+            (2, 3, 3.01),
+            (0, 3, 4.01),
+            (3, 4, 1.51),
+            (4, 5, 2.51),
+            (5, 6, 3.51),
+            (3, 6, 4.51),
+        ],
+    )
+    .unwrap();
+    let params = RipsParams::new(1).with_modulus(5);
+    let program =
+        PersistenceProgram::compile(&initial, &params, CertificateLimits::default()).unwrap();
+    let mut state = program.into_diagram_state();
+    state.advance(&updated).unwrap();
+    let before_program = state.program.clone();
+    let before_graph: Vec<_> = state.graph.edges().collect();
+    state.diagram.bars[0].death += 1.0;
+    let before_diagram = state.diagram.clone();
+
+    assert!(state.materialize().is_err());
+    assert!(diagram_bits_equal(state.diagram(), &before_diagram));
+    assert_eq!(state.graph.edges().collect::<Vec<_>>(), before_graph);
+    assert!(diagram_bits_equal(
+        &state.program.result().diagram,
+        &before_program.result().diagram
+    ));
+    assert_eq!(
+        state.program.result().spaces,
+        before_program.result().spaces
+    );
+    assert!(state.dirty);
+}

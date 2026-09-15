@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{CertificateLimits, EdgeKey, Result, RipsParams, SparseDistanceMatrix};
+use crate::{CertificateLimits, EdgeKey, Error, Result, RipsParams, SparseDistanceMatrix};
 
 use super::model::{IndexParams, IndexSummary, InterfaceMode, PersistenceIndex};
 use super::summary::summarize;
@@ -19,6 +19,13 @@ impl PersistenceIndex {
         limits: CertificateLimits,
     ) -> Result<Self> {
         decompose::validate_params(params, index_params)?;
+        if input.len() > limits.max_vertices {
+            return Err(Error::InvalidInput(format!(
+                "{} vertices exceed the limit {}",
+                input.len(),
+                limits.max_vertices
+            )));
+        }
         let topology: Vec<_> = input.edges().map(|(u, v, _)| EdgeKey::new(u, v)).collect();
         let scope = Scope {
             vertices: (0..input.len()).collect(),

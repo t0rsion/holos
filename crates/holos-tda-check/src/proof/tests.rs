@@ -137,6 +137,68 @@ fn proof_round_trips_and_checks() {
     );
 }
 
+fn node_columns_start(proof: &ProofBundle) -> usize {
+    8 + 2
+        + 1
+        + 4
+        + 1
+        + 8
+        + 8
+        + 32
+        + 4 * 8
+        + proof.nodes[0].vertices.len() * 8
+        + proof.nodes[0].edges.len() * 2 * 8
+}
+
+fn write_wire_usize(bytes: &mut [u8], offset: usize, value: usize) {
+    bytes[offset..offset + 8].copy_from_slice(&u64::try_from(value).unwrap().to_be_bytes());
+}
+
+fn wire_max_usize() -> usize {
+    usize::try_from(u64::MAX).unwrap_or(usize::MAX)
+}
+
+fn write_node_count(bytes: &mut [u8], field: usize, value: usize) {
+    let node_start = 8 + 2 + 1 + 4 + 1 + 8 + 8;
+    let offset = node_start + 32 + field * 8;
+    write_wire_usize(bytes, offset, value);
+}
+
+#[test]
+fn proof_rejects_truncation_before_column_reserve() {
+    let proof = square_proof();
+    let bytes = proof.encode().unwrap();
+    let columns_start = node_columns_start(&proof);
+    assert!(ProofBundle::decode(&bytes[..columns_start], ProofLimits::default()).is_err());
+}
+
+#[test]
+fn proof_rejects_huge_raw_edge_column_count_without_panicking() {
+    let mut bytes = square_proof().encode().unwrap();
+    write_node_count(&mut bytes, 2, wire_max_usize());
+    let limits = ProofLimits {
+        max_edges: usize::MAX,
+        ..ProofLimits::default()
+    };
+    let result = std::panic::catch_unwind(|| ProofBundle::decode(&bytes, limits));
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_err());
+}
+
+#[test]
+fn proof_rejects_huge_term_count_without_panicking() {
+    let proof = square_proof();
+    let mut bytes = proof.encode().unwrap();
+    write_wire_usize(&mut bytes, node_columns_start(&proof), wire_max_usize());
+    let limits = ProofLimits {
+        max_terms: usize::MAX,
+        ..ProofLimits::default()
+    };
+    let result = std::panic::catch_unwind(|| ProofBundle::decode(&bytes, limits));
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_err());
+}
+
 #[test]
 fn mutation_and_arbitrary_bytes_are_rejected_without_panics() {
     let proof = square_proof();

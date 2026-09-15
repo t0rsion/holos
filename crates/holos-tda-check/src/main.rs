@@ -9,17 +9,20 @@ use holos_tda_check::{
     ProgramTraceProofLimits, ProofBundle, ProofLimits, VerifiedCoverageSource,
     VerifiedSynthesisSource, is_bipersistence, is_circular_coordinate, is_cohomology_intervention,
     is_coverage, is_distributed_interface, is_explicit_persistence, is_geometry_bound_coverage,
-    is_index_snapshot, is_kinetic_zigzag, is_program, is_program_trace, is_relative_interface,
-    is_synthesis, verify_bipersistence, verify_circular_coordinate, verify_cohomology_intervention,
-    verify_coverage, verify_explicit_persistence, verify_geometry_bound_coverage,
-    verify_kinetic_zigzag, verify_program, verify_program_trace, verify_relative_interface,
-    verify_synthesis,
+    is_index_snapshot, is_kinetic_zigzag, is_persistent_class, is_persistent_coordinate,
+    is_program, is_program_trace, is_relative_interface, is_synthesis, verify_bipersistence,
+    verify_circular_coordinate, verify_cohomology_intervention, verify_coverage,
+    verify_explicit_persistence, verify_geometry_bound_coverage, verify_kinetic_zigzag,
+    verify_persistent_class, verify_persistent_coordinate, verify_program, verify_program_trace,
+    verify_relative_interface, verify_synthesis,
 };
 
 #[path = "main/records.rs"]
 mod records;
 
 use records::{run_distributed, run_index};
+
+const MAX_TOLERANCE_OPTION: &str = "--max-tolerance";
 
 fn run() -> Result<(), String> {
     let mut arguments = env::args_os();
@@ -41,6 +44,8 @@ enum ArtifactKind {
     ProgramTrace,
     Bipersistence,
     Circular,
+    PersistentClass,
+    PersistentCoordinate,
     GeometryBoundCoverage,
     Coverage,
     Synthesis,
@@ -63,11 +68,13 @@ fn artifact_kind(bytes: &[u8]) -> ArtifactKind {
 type ArtifactProbe = fn(&[u8]) -> bool;
 type ArtifactRunner = fn(&str, &[u8], &[std::ffi::OsString]) -> Result<(), String>;
 
-fn artifact_probes() -> [(ArtifactProbe, ArtifactKind); 13] {
+fn artifact_probes() -> [(ArtifactProbe, ArtifactKind); 15] {
     [
         (is_program_trace, ArtifactKind::ProgramTrace),
         (is_program, ArtifactKind::Program),
         (is_bipersistence, ArtifactKind::Bipersistence),
+        (is_persistent_coordinate, ArtifactKind::PersistentCoordinate),
+        (is_persistent_class, ArtifactKind::PersistentClass),
         (is_circular_coordinate, ArtifactKind::Circular),
         (
             is_geometry_bound_coverage,
@@ -97,11 +104,16 @@ fn run_artifact(
     runner(program, bytes, rest)
 }
 
-fn artifact_runners() -> [(ArtifactKind, ArtifactRunner); 14] {
+fn artifact_runners() -> [(ArtifactKind, ArtifactRunner); 16] {
     [
         (ArtifactKind::ProgramTrace, run_program_trace),
         (ArtifactKind::Program, run_program),
         (ArtifactKind::Bipersistence, run_bipersistence),
+        (
+            ArtifactKind::PersistentCoordinate,
+            run_persistent_coordinate,
+        ),
+        (ArtifactKind::PersistentClass, run_persistent_class),
         (ArtifactKind::Circular, run_circular),
         (
             ArtifactKind::GeometryBoundCoverage,
@@ -170,7 +182,7 @@ fn run_bipersistence(
     let checked = verify_bipersistence(bytes, BipersistenceProofLimits::default())
         .map_err(|error| error.to_string())?;
     println!(
-        "verified degree-Rips H1 bipersistence over Z/{} on {} vertices, {} edges, a {} by {} grid, {} cover maps, {} rectangle claims, {} connected-region claims, {} class atlases, and {} circular families",
+        "verified degree-Rips H1 bipersistence over Z/{} on {} vertices, {} edges, a {} by {} grid, {} cover maps, {} rectangle claims, {} connected-region claims, {} class atlases, and {} circular families ({} successful, {} lift failures, {} solve failures, {} not attempted)",
         checked.modulus,
         checked.vertices,
         checked.edges,
@@ -181,17 +193,19 @@ fn run_bipersistence(
         checked.regions,
         checked.class_atlases,
         checked.circular_families,
+        checked.circular_family_successes,
+        checked.circular_family_lift_failures,
+        checked.circular_family_solve_failures,
+        checked.circular_family_not_attempted,
     );
     Ok(())
 }
 
 fn run_circular(program: &str, bytes: &[u8], rest: &[std::ffi::OsString]) -> Result<(), String> {
-    require_single_artifact(
-        rest,
-        format!("usage for a circular coordinate: {program} ARTIFACT"),
-    )?;
-    let checked = verify_circular_coordinate(bytes, CircularProofLimits::default())
-        .map_err(|error| error.to_string())?;
+    let max_tolerance = parse_max_tolerance(program, "a circular coordinate", rest)?;
+    let mut limits = CircularProofLimits::default();
+    limits.max_tolerance = max_tolerance;
+    let checked = verify_circular_coordinate(bytes, limits).map_err(|error| error.to_string())?;
     println!(
         "verified {} circular coordinates over Z/{} on {} states and {} active edges at scale {} with maximum relative residual {}, divisibilities {:?}, and continuation {:?}",
         checked.coordinates,
@@ -202,6 +216,59 @@ fn run_circular(program: &str, bytes: &[u8], rest: &[std::ffi::OsString]) -> Res
         checked.max_relative_residual,
         checked.divisibilities,
         checked.continuation,
+    );
+    Ok(())
+}
+
+fn run_persistent_class(
+    program: &str,
+    bytes: &[u8],
+    rest: &[std::ffi::OsString],
+) -> Result<(), String> {
+    require_single_artifact(
+        rest,
+        format!("usage for a persistent H1 class: {program} ARTIFACT"),
+    )?;
+    let checked = verify_persistent_class(bytes, ProofLimits::default())
+        .map_err(|error| error.to_string())?;
+    let interval = checked.interval();
+    let death = if interval.death.is_finite() {
+        interval.death.to_string()
+    } else {
+        "infinity".to_string()
+    };
+    println!(
+        "verified persistent H1 class over Z/{} on {} vertices and {} source edges at scale {} with interval [{}, {}], {} cycle terms, and {} chain terms",
+        checked.modulus(),
+        checked.vertex_count(),
+        checked.source().len(),
+        checked.scale(),
+        interval.birth,
+        death,
+        checked.cycle().len(),
+        checked.bounding_chain().len(),
+    );
+    Ok(())
+}
+
+fn run_persistent_coordinate(
+    program: &str,
+    bytes: &[u8],
+    rest: &[std::ffi::OsString],
+) -> Result<(), String> {
+    let max_tolerance = parse_max_tolerance(program, "a persistent circular coordinate", rest)?;
+    let mut limits = CircularProofLimits::default();
+    limits.max_tolerance = max_tolerance;
+    let checked = verify_persistent_coordinate(bytes, limits).map_err(|error| error.to_string())?;
+    println!(
+        "verified persistent circular coordinate over Z/{} on {} vertices with {} active edges at scale {} using multiplier {}, divisibility {}, and relative residual {}",
+        checked.modulus(),
+        checked.vertex_count(),
+        checked.active_edges(),
+        checked.scale(),
+        checked.field_multiplier(),
+        checked.divisibility(),
+        checked.relative_residual(),
     );
     Ok(())
 }
@@ -249,6 +316,36 @@ fn run_index_adapter(
 
 fn require_single_artifact(rest: &[std::ffi::OsString], usage: String) -> Result<(), String> {
     if rest.is_empty() { Ok(()) } else { Err(usage) }
+}
+
+fn parse_max_tolerance(
+    program: &str,
+    artifact: &str,
+    rest: &[std::ffi::OsString],
+) -> Result<f64, String> {
+    let usage = format!("usage for {artifact}: {program} ARTIFACT [{MAX_TOLERANCE_OPTION} VALUE]");
+    let [option, value] = rest else {
+        return if rest.is_empty() {
+            Ok(CircularProofLimits::default().max_tolerance)
+        } else {
+            Err(usage)
+        };
+    };
+    if option.as_os_str() != std::ffi::OsStr::new(MAX_TOLERANCE_OPTION) {
+        return Err(usage);
+    }
+    let value = value.as_os_str().to_str().ok_or_else(|| {
+        format!("{MAX_TOLERANCE_OPTION} must be a finite number greater than zero")
+    })?;
+    let tolerance = value
+        .parse::<f64>()
+        .map_err(|_| format!("{MAX_TOLERANCE_OPTION} must be a finite number greater than zero"))?;
+    if !tolerance.is_finite() || tolerance <= 0.0 {
+        return Err(format!(
+            "{MAX_TOLERANCE_OPTION} must be a finite number greater than zero"
+        ));
+    }
+    Ok(tolerance)
 }
 
 fn run_coverage(program: &str, bytes: &[u8], rest: &[std::ffi::OsString]) -> Result<(), String> {
@@ -417,3 +514,7 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "main/tests.rs"]
+mod tests;

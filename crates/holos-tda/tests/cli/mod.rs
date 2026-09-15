@@ -11,9 +11,10 @@ use holos_tda::{
 use holos_tda_check::{
     BipersistenceProofLimits, CircularProofLimits, IndexProofState, ProofLimits, is_bipersistence,
     is_circular_coordinate, is_cohomology_intervention, is_coverage, is_geometry_bound_coverage,
-    is_kinetic_zigzag, is_relative_interface, is_synthesis, verify_bipersistence,
-    verify_circular_coordinate, verify_cohomology_intervention, verify_coverage,
-    verify_distributed_interface, verify_geometry_bound_coverage, verify_kinetic_zigzag,
+    is_kinetic_zigzag, is_persistent_class, is_persistent_coordinate, is_relative_interface,
+    is_synthesis, verify_bipersistence, verify_circular_coordinate, verify_cohomology_intervention,
+    verify_coverage, verify_distributed_interface, verify_geometry_bound_coverage,
+    verify_kinetic_zigzag, verify_persistent_class, verify_persistent_coordinate,
     verify_relative_interface, verify_synthesis,
 };
 
@@ -108,9 +109,11 @@ fn octahedral_sphere_file(name: &str) -> TempFile {
 
 mod artifacts;
 mod basic;
+mod circular;
 mod cohomology;
 mod collapse;
 mod coverage;
 mod engine;
 mod errors;
 mod index;
+mod persistent;

@@ -15,6 +15,21 @@ fn graph(n: usize, pairs: &[(usize, usize)]) -> SparseDistanceMatrix {
     SparseDistanceMatrix::from_triplets(n, &edges).unwrap()
 }
 
+fn nested_zero_separator_graph(depth: usize) -> SparseDistanceMatrix {
+    let last = depth + 2;
+    let mut edges = Vec::with_capacity(2 * depth + 3);
+    edges.push((0, 1, 0.0));
+    for index in 0..depth {
+        let vertex = index + 2;
+        let previous = if index == 0 { 1 } else { vertex - 1 };
+        edges.push((0, vertex, 0.0));
+        edges.push((previous, vertex, 1.0));
+    }
+    edges.push((0, last, 0.0));
+    edges.push((1, last, 1.0));
+    SparseDistanceMatrix::from_triplets(last + 1, &edges).unwrap()
+}
+
 #[test]
 fn blocks_partition_edges_and_classify_bridges() {
     let matrix = graph(
@@ -67,6 +82,46 @@ fn forced_factorization_matches_whole_graph_over_fields_and_threads() {
             );
         }
     }
+}
+
+#[test]
+fn nested_separator_refinement_matches_exact_blocks() {
+    let (summary, blocks) = program_blocks(&nested_zero_separator_graph(3), None).unwrap();
+    assert_eq!(summary.separator_candidates_checked, 5);
+    assert!(summary.separator_search_complete);
+    assert_eq!(summary.zero_simplex_separators, 3);
+    assert_eq!(summary.widest_separator, 2);
+
+    let blocks: Vec<_> = blocks
+        .into_iter()
+        .map(|block| (block.vertices, block.edges))
+        .collect();
+    assert_eq!(
+        blocks,
+        vec![
+            (vec![0, 1, 2], vec![[0, 1], [0, 2], [1, 2]],),
+            (vec![0, 1, 5], vec![[0, 1], [0, 5], [1, 5]],),
+            (vec![0, 2, 3], vec![[0, 2], [0, 3], [2, 3]],),
+            (vec![0, 3, 4], vec![[0, 3], [0, 4], [3, 4]],),
+        ]
+    );
+}
+
+#[test]
+fn deeply_nested_separator_refinement_uses_heap_stack() {
+    const DEPTH: usize = 4096;
+    let (summary, blocks) = program_blocks(&nested_zero_separator_graph(DEPTH), None).unwrap();
+
+    assert_eq!(summary.separator_candidates_checked, 2 * DEPTH - 1);
+    assert!(summary.separator_search_complete);
+    assert_eq!(summary.zero_simplex_separators, DEPTH);
+    assert_eq!(summary.widest_separator, 2);
+    assert_eq!(blocks.len(), DEPTH + 1);
+    assert!(
+        blocks
+            .iter()
+            .all(|block| block.vertices.len() == 3 && block.edges.len() == 3)
+    );
 }
 
 #[test]

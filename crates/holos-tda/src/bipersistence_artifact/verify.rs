@@ -4,8 +4,10 @@ use crate::{
 };
 
 use super::BipersistenceArtifactLimits;
-use super::build::circular_family_claim;
-use super::model::{ArtifactEdge, BipersistenceArtifact};
+use super::build::{circular_family_claim, validate_circular_iteration_limit};
+use super::model::{
+    ArtifactCircularEntry, ArtifactCircularStatus, ArtifactEdge, BipersistenceArtifact,
+};
 
 impl BipersistenceArtifact {
     /// Reconstruct the module and compare every stored claim.
@@ -42,7 +44,14 @@ impl BipersistenceArtifact {
             |left, right| {
                 (left.base_grade, &left.base_class) < (right.base_grade, &right.base_class)
             },
-        )
+        )?;
+        for family in &self.circular_families {
+            validate_circular_iteration_limit(family.max_iterations, limits)?;
+            for entry in &family.entries {
+                validate_circular_entry_shape(entry)?;
+            }
+        }
+        Ok(())
     }
 
     fn replay_module(&self, limits: BipersistenceArtifactLimits) -> Result<BipersistenceModule> {
@@ -190,6 +199,29 @@ impl BipersistenceArtifact {
             ));
         }
         Ok(())
+    }
+}
+
+pub(super) fn validate_circular_entry_shape(entry: &ArtifactCircularEntry) -> Result<()> {
+    match (entry.extension, &entry.status) {
+        (crate::ClassExtensionKind::Unique, ArtifactCircularStatus::NotAttempted) => Err(
+            Error::InvalidInput("a unique circular extension has no computation status".into()),
+        ),
+        (crate::ClassExtensionKind::Unique, ArtifactCircularStatus::Success(bytes))
+            if bytes.is_empty() =>
+        {
+            Err(Error::InvalidInput(
+                "a successful circular status has no coordinate".into(),
+            ))
+        }
+        (
+            crate::ClassExtensionKind::Ambiguous | crate::ClassExtensionKind::NoExtension,
+            ArtifactCircularStatus::NotAttempted,
+        ) => Ok(()),
+        (crate::ClassExtensionKind::Ambiguous | crate::ClassExtensionKind::NoExtension, _) => Err(
+            Error::InvalidInput("a non-unique circular extension has a computation status".into()),
+        ),
+        (crate::ClassExtensionKind::Unique, _) => Ok(()),
     }
 }
 

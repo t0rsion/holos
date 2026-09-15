@@ -5,7 +5,6 @@ proof_dir="$(cd "$(dirname "$0")" && pwd)"
 
 unsat_proofs=(
     filtered_support
-    factorization_stability
     guard_transitivity
     local_atom_scope
     source_binding

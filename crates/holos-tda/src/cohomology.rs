@@ -9,9 +9,12 @@ mod algebra;
 mod api;
 mod complex;
 mod digest;
+mod forest;
 mod methods;
 mod model;
 
+#[cfg(test)]
+mod forest_tests;
 #[cfg(test)]
 mod tests;
 

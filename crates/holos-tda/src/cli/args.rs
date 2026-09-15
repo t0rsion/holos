@@ -3,6 +3,7 @@
 mod cohomology;
 mod coverage;
 mod intervention;
+mod persistent;
 mod proof;
 mod synthesis;
 mod verify;
@@ -10,6 +11,7 @@ mod verify;
 pub(crate) use cohomology::*;
 pub(crate) use coverage::*;
 pub(crate) use intervention::*;
+pub(crate) use persistent::*;
 pub(crate) use proof::*;
 pub(crate) use synthesis::*;
 pub(crate) use verify::*;

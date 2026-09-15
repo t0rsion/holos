@@ -439,7 +439,7 @@ fn update_correspondence(
     crate::class_correspondences(old_graph, old_spaces, updated, new_spaces, modulus)
 }
 
-fn recompile_work(old_edges: usize, replacement: &PersistenceProgram) -> ProgramWork {
+pub(super) fn recompile_work(old_edges: usize, replacement: &PersistenceProgram) -> ProgramWork {
     let threshold = replacement.params.threshold.unwrap_or(f64::INFINITY);
     ProgramWork {
         edges_checked: old_edges.max(replacement.topology.len()),

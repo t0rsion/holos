@@ -70,6 +70,20 @@ pub struct VerifiedBipersistence {
     pub class_atlases: usize,
     /// Checked circular-family count.
     pub circular_families: usize,
+    /// Successful circular-family entries with independently checked coordinates.
+    pub circular_family_successes: usize,
+    /// Circular-family entries whose bounded lift computation failed.
+    ///
+    /// This is a computational annotation. It does not prove that an
+    /// integral lift is impossible.
+    pub circular_family_lift_failures: usize,
+    /// Circular-family entries whose bounded harmonic solve failed.
+    ///
+    /// This is a computational annotation, not a mathematical obstruction.
+    pub circular_family_solve_failures: usize,
+    /// Circular-family entries where computation was not attempted because
+    /// the topology was ambiguous or absent.
+    pub circular_family_not_attempted: usize,
     /// Prime coefficient modulus.
     pub modulus: u32,
 }
@@ -170,7 +184,26 @@ pub(crate) struct AtlasClaim {
 pub(crate) struct CircularEntryClaim {
     pub(crate) grade: Grade,
     pub(crate) extension: ExtensionKind,
-    pub(crate) coordinate: Option<Vec<u8>>,
+    pub(crate) status: CircularFamilyStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Computation status recorded for one topology extension.
+pub(crate) enum CircularFamilyStatus {
+    /// No computation was attempted for an ambiguous or absent extension.
+    NotAttempted,
+    /// The bounded producer lift did not produce a checked lift.
+    ///
+    /// This status does not prove that an integral lift is impossible.
+    LiftFailed,
+    /// The bounded producer harmonic solve did not finish with a checked
+    /// coordinate.
+    ///
+    /// This status is a computational annotation, not a mathematical
+    /// obstruction.
+    SolveFailed,
+    /// A nested coordinate proof is present and checked independently.
+    Success(Vec<u8>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +211,9 @@ pub(crate) struct CircularFamilyClaim {
     pub(crate) base_grade: Grade,
     pub(crate) base_class: Vec<Term>,
     pub(crate) tolerance_bits: u64,
+    /// Bounded producer solver parameter. `HOLOSCC` version 1 does not carry
+    /// the producer's iteration count, so the checker does not bind this
+    /// parameter to nested coordinate work.
     pub(crate) max_iterations: usize,
     pub(crate) entries: Vec<CircularEntryClaim>,
 }

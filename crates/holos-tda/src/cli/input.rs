@@ -148,6 +148,26 @@ pub(crate) fn read_proof_input(
     }
 }
 
+pub(crate) fn read_persistent_input(
+    input: &Path,
+    format: Option<InputFormat>,
+    threads: usize,
+) -> crate::Result<SparseDistanceMatrix> {
+    let format = format.unwrap_or_else(|| infer_format(input));
+    match format {
+        InputFormat::Sparse => io::read_sparse_matrix(input, threads.max(1)),
+        InputFormat::PointCloud => {
+            let points = io::read_point_cloud(input, threads.max(1))?;
+            let dense = DistanceMatrix::from_points(&points)?;
+            dense.to_sparse_at(f64::INFINITY)
+        }
+        InputFormat::LowerDistance => {
+            let dense = io::read_lower_distance_matrix(input, threads.max(1))?;
+            dense.to_sparse_at(f64::INFINITY)
+        }
+    }
+}
+
 pub(crate) fn read_circular_cocycle(
     path: &Path,
     modulus: u32,

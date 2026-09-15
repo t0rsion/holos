@@ -45,7 +45,7 @@ pub(crate) struct CohomologyCli {
     name = "holos circular",
     version = version_string(),
     about = "Build and certify a class-aware circular coordinate",
-    after_help = "COCYCLE contains `u v coefficient` rows in Ripser orientation. With --class, it is the JSON written by --representatives. Automatic lifting needs an odd prime. Check OUTPUT with: holos-check OUTPUT"
+    after_help = "COCYCLE contains `u v coefficient` rows in Ripser orientation. With --class, it is the JSON written by --representatives. --integral-lift accepts signed `u v coefficient` rows. Automatic lifting needs an odd prime; a supplied lift also supports modulus 2 without --continue-to. Check OUTPUT with: holos-check OUTPUT"
 )]
 pub(crate) struct CircularCli {
     /// Input graph
@@ -66,6 +66,11 @@ pub(crate) struct CircularCli {
     /// class record carries its own field
     #[arg(long, value_name = "P")]
     pub(crate) modulus: Option<u32>,
+
+    /// Checked integer cocycle rows for a supplied lift. Modulus 2 cannot use
+    /// --continue-to.
+    #[arg(long = "integral-lift", value_name = "FILE")]
+    pub(crate) integral_lift: Option<PathBuf>,
 
     /// Zero-based class-space and basis positions in class-spaces JSON
     #[arg(long, value_names = ["SPACE", "BASIS"], num_args = 2)]
@@ -99,7 +104,7 @@ pub(crate) struct CircularCli {
     #[arg(long, value_name = "N", default_value_t = 1)]
     pub(crate) threads: usize,
 
-    /// Largest accepted cocycle or class-record file
+    /// Largest accepted cocycle, class-record, or integral-lift file
     #[arg(long, value_name = "BYTES", default_value_t = 1usize << 30)]
     pub(crate) max_record_bytes: usize,
 }

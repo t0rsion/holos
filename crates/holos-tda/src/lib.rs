@@ -80,6 +80,10 @@ mod monotone_search;
 /// Brute-force reference implementation used by the test gates.
 pub mod oracle;
 pub(crate) mod parallel;
+/// Source-bound persistent H1 class and cycle artifacts.
+pub mod persistent_class_artifact;
+/// Harmonic coordinates bound to persistent H1 class artifacts.
+pub mod persistent_coordinate_artifact;
 /// Compositional H0 and H1 persistence programs.
 pub mod program;
 /// Update traces for persistence programs.
@@ -115,8 +119,8 @@ pub use bifiltration::{
 pub use bipersistence::{
     BipersistenceLimits, BipersistenceMap, BipersistenceMapColumn, BipersistenceModule,
     BipersistenceNode, BipersistenceRectangle, BipersistenceRegion, BipersistenceTerm,
-    CircularCoordinateFamily, CircularCoordinateFamilyEntry, ClassExtension, ClassExtensionKind,
-    ClassExtensionRegion, CohomologyClassAtlas,
+    CircularCoordinateFamily, CircularCoordinateFamilyEntry, CircularCoordinateFamilyStatus,
+    ClassExtension, ClassExtensionKind, ClassExtensionRegion, CohomologyClassAtlas,
 };
 pub use bipersistence_artifact::{
     BipersistenceArtifact, BipersistenceArtifactLimits, BipersistenceArtifactSummary,
@@ -212,10 +216,18 @@ pub use kinetic_zigzag_artifact::{
     KineticZigzagArtifact, KineticZigzagArtifactLimits, KineticZigzagArtifactSummary,
     KineticZigzagIntervalClaim,
 };
+pub use persistent_class_artifact::{
+    PersistenceCycleTerm, PersistenceTriangleTerm, PersistentClassArtifact,
+};
+pub use persistent_coordinate_artifact::{
+    PersistentCoordinateArtifact, PersistentCoordinateArtifactError,
+    PersistentCoordinateArtifactSummary,
+};
 pub use program::{
     BasisTransport, ClassContinuation, ContinuationKind, CorrespondenceMode, PersistenceProgram,
-    ProgramAtomInfo, ProgramBranch, ProgramCheckpoint, ProgramEvaluation, ProgramEvent,
-    ProgramEventKind, ProgramSummary, ProgramUpdate, ProgramUpdateMode, ProgramWork,
+    ProgramAtomInfo, ProgramBranch, ProgramCheckpoint, ProgramDiagramState, ProgramDiagramUpdate,
+    ProgramDiagramUpdateMode, ProgramEvaluation, ProgramEvent, ProgramEventKind, ProgramSummary,
+    ProgramUpdate, ProgramUpdateMode, ProgramWork,
 };
 pub use program_trace::{
     ProgramTraceArtifact, ProgramTraceDecodeLimits, ProgramTraceError, ProgramTraceStep,

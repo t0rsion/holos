@@ -65,6 +65,16 @@ from .program import (
     verify_intervention,
     verify_program_trace,
 )
+from .persistent import (
+    persistent_circular_condensed,
+    persistent_circular_points,
+    persistent_circular_square,
+    persistent_circular_sparse,
+    persistent_class_condensed,
+    persistent_class_points,
+    persistent_class_square,
+    persistent_class_sparse,
+)
 from .records import (
     _atlas_result,
     _class_record,
@@ -129,6 +139,14 @@ __all__ = [
     "load_sparse_program",
     "main",
     "merge_relative_interfaces",
+    "persistent_circular_condensed",
+    "persistent_circular_points",
+    "persistent_circular_square",
+    "persistent_circular_sparse",
+    "persistent_class_condensed",
+    "persistent_class_points",
+    "persistent_class_square",
+    "persistent_class_sparse",
     "relative_coverage",
     "rips_condensed",
     "rips_condensed_classes",

@@ -7,8 +7,8 @@ use super::{InputFormat, read_proof_input, version_string, write_via_temporary};
 use crate::{
     BipersistenceArtifact, BipersistenceArtifactLimits, BipersistenceModule,
     BipersistenceRectangleClaim, BipersistenceRegionClaim, BipersistenceTerm,
-    CircularCoordinateFamily, CircularCoordinateParams, ClassExtensionKind, CohomologyClassAtlas,
-    CohomologyLimits, Result,
+    CircularCoordinateFamily, CircularCoordinateFamilyStatus, CircularCoordinateParams,
+    ClassExtensionKind, CohomologyClassAtlas, CohomologyLimits, Result,
 };
 
 mod input;
@@ -75,7 +75,7 @@ pub(super) struct BipersistenceCli {
     #[arg(long, value_name = "N", default_value_t = 10_000)]
     max_iterations: usize,
 
-    /// Write a JSON report with axes, ranks, fibers, and optional phases
+    /// Write a JSON report with axes, ranks, fibers, family statuses, and optional phases
     #[arg(long, value_name = "FILE")]
     report: Option<PathBuf>,
 
@@ -307,13 +307,14 @@ fn write_family_json(json: &mut String, family: &CircularCoordinateFamily) {
         }
         write!(
             json,
-            "{{\"grade\":[{},{}],\"kind\":\"{}\",\"phase\":",
+            "{{\"grade\":[{},{}],\"kind\":\"{}\",\"status\":\"{}\",\"phase\":",
             entry.grade.scale(),
             entry.grade.density(),
             extension_kind(entry.extension),
+            circular_status(&entry.status),
         )
         .expect("writing to a string cannot fail");
-        match &entry.coordinate {
+        match entry.status.coordinate() {
             None => json.push_str("null"),
             Some(coordinate) => {
                 json.push('[');
@@ -329,6 +330,15 @@ fn write_family_json(json: &mut String, family: &CircularCoordinateFamily) {
         json.push('}');
     }
     json.push_str("]}");
+}
+
+fn circular_status(status: &CircularCoordinateFamilyStatus) -> &'static str {
+    match status {
+        CircularCoordinateFamilyStatus::NotAttempted => "not_attempted",
+        CircularCoordinateFamilyStatus::LiftFailed => "lift_failed",
+        CircularCoordinateFamilyStatus::SolveFailed => "solve_failed",
+        CircularCoordinateFamilyStatus::Success(_) => "success",
+    }
 }
 
 fn write_terms_json(json: &mut String, terms: &[BipersistenceTerm]) {

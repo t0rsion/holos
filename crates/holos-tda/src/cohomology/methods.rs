@@ -4,10 +4,84 @@ use std::fmt;
 use crate::{Error, Result, SparseDistanceMatrix};
 
 use super::algebra::{
-    checked_coordinate_vector, coordinates_in_basis, reduce_by_basis, relation_row, rref,
+    basis_positions, checked_coordinate_vector, coordinates_in_basis, reduce_by_basis, rref,
 };
 use super::digest::{active_graph_digest, write_hex};
 use super::model::*;
+
+fn checked_class_terms<T, Class, Coefficient>(
+    terms: &[T],
+    positions: &BTreeMap<CohomologyClassId, usize>,
+    modulus: u32,
+    message: &str,
+    class: Class,
+    coefficient: Coefficient,
+) -> Result<SparseVector>
+where
+    Class: Fn(&T) -> CohomologyClassId,
+    Coefficient: Fn(&T) -> u32,
+{
+    let mut row = SparseVector::default();
+    let mut prior = None;
+    for term in terms {
+        let value = coefficient(term);
+        if value == 0 || value >= modulus {
+            return Err(Error::InvalidInput(message.into()));
+        }
+        let position = positions
+            .get(&class(term))
+            .copied()
+            .ok_or_else(|| Error::InvalidInput(message.into()))?;
+        if prior.is_some_and(|prior| prior >= position) {
+            return Err(Error::InvalidInput(message.into()));
+        }
+        row.insert(position, value);
+        prior = Some(position);
+    }
+    Ok(row)
+}
+
+pub(crate) fn checked_relation_row(
+    terms: &[CohomologyRelationTerm],
+    positions: &BTreeMap<CohomologyClassId, usize>,
+    modulus: u32,
+    message: &str,
+) -> Result<SparseVector> {
+    checked_class_terms(
+        terms,
+        positions,
+        modulus,
+        message,
+        |term| term.class,
+        |term| term.coefficient,
+    )
+}
+
+fn checked_restriction_rows(
+    columns: &[CohomologyMapColumn],
+    positions: &BTreeMap<CohomologyClassId, usize>,
+    modulus: u32,
+) -> Result<Vec<SparseVector>> {
+    let mut sources = BTreeSet::new();
+    columns
+        .iter()
+        .map(|column| {
+            if !sources.insert(column.source) {
+                return Err(Error::InvalidInput(
+                    "cohomology restriction repeats a source class".into(),
+                ));
+            }
+            checked_class_terms(
+                &column.image,
+                positions,
+                modulus,
+                "cohomology restriction image terms are not canonical",
+                |term| term.class,
+                |term| term.coefficient,
+            )
+        })
+        .collect()
+}
 
 impl CohomologySpaceId {
     pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
@@ -241,12 +315,7 @@ impl CohomologySpace {
                 "cohomology subspace belongs to a different ambient space".into(),
             ));
         }
-        let positions = self
-            .basis
-            .iter()
-            .enumerate()
-            .map(|(position, class)| (class.id, position))
-            .collect::<BTreeMap<_, _>>();
+        let positions = basis_positions(self);
         subspace
             .generators
             .iter()
@@ -284,30 +353,19 @@ impl CohomologySpace {
 
 impl CohomologyRestriction {
     /// Whether the restriction image contains one target basis class.
-    pub fn image_contains(&self, class: CohomologyClassId) -> bool {
-        let classes = self
-            .columns
-            .iter()
-            .flat_map(|column| column.image.iter().map(|term| term.class))
-            .chain(std::iter::once(class))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let positions = classes
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(position, id)| (id, position))
-            .collect::<BTreeMap<_, _>>();
-        let rows = image_rows(&self.columns, &positions);
+    pub fn image_contains(
+        &self,
+        target: &CohomologySpace,
+        class: CohomologyClassId,
+    ) -> Result<bool> {
+        let (positions, rows) = self.checked_target_rows(target)?;
+        let position = positions.get(&class).copied().ok_or_else(|| {
+            Error::InvalidInput("cohomology restriction names an unknown target class".into())
+        })?;
         let mut target = SparseVector::default();
-        target.insert(positions[&class], 1);
-        reduce_by_basis(
-            &mut target,
-            &rref(rows, self.modulus as u64),
-            self.modulus as u64,
-        );
-        target.is_zero()
+        target.insert(position, 1);
+        reduce_by_basis(&mut target, &rows, self.modulus as u64);
+        Ok(target.is_zero())
     }
 
     /// Dimension of the intersection between the image and a target subspace.
@@ -326,13 +384,7 @@ impl CohomologyRestriction {
                 "cohomology subspace belongs to a different restriction target".into(),
             ));
         }
-        let positions = target
-            .basis
-            .iter()
-            .enumerate()
-            .map(|(position, class)| (class.id, position))
-            .collect::<BTreeMap<_, _>>();
-        let image = image_rows(&self.columns, &positions);
+        let (positions, image) = self.checked_target_rows(target)?;
         let subspace_rows = subspace
             .generators
             .iter()
@@ -345,7 +397,7 @@ impl CohomologyRestriction {
             })
             .collect::<Vec<_>>();
         let modulus = self.modulus as u64;
-        let image_rank = rref(image.clone(), modulus).len();
+        let image_rank = image.len();
         let subspace_rank = subspace_rows.len();
         let union_rank = rref(image.into_iter().chain(subspace_rows).collect(), modulus).len();
         image_rank
@@ -353,22 +405,33 @@ impl CohomologyRestriction {
             .and_then(|sum| sum.checked_sub(union_rank))
             .ok_or_else(|| Error::InvalidInput("cohomology intersection rank is invalid".into()))
     }
-}
 
-fn image_rows(
-    columns: &[CohomologyMapColumn],
-    positions: &BTreeMap<CohomologyClassId, usize>,
-) -> Vec<SparseVector> {
-    columns
-        .iter()
-        .map(|column| {
-            let mut row = SparseVector::default();
-            for term in &column.image {
-                row.insert(positions[&term.class], term.coefficient);
-            }
-            row
-        })
-        .collect()
+    fn checked_target_rows(
+        &self,
+        target: &CohomologySpace,
+    ) -> Result<(BTreeMap<CohomologyClassId, usize>, Vec<SparseVector>)> {
+        if self.target_space != target.id
+            || self.dimension != target.dimension
+            || self.scale.to_bits() != target.scale.to_bits()
+            || self.modulus != target.modulus
+        {
+            return Err(Error::InvalidInput(
+                "cohomology restriction does not match its target space".into(),
+            ));
+        }
+        let positions = basis_positions(target);
+        let rows = rref(
+            checked_restriction_rows(&self.columns, &positions, self.modulus)?,
+            self.modulus as u64,
+        );
+        let rank = rows.len();
+        if self.rank != rank || self.rank > target.rank() {
+            return Err(Error::InvalidInput(
+                "cohomology restriction rank is not canonical".into(),
+            ));
+        }
+        Ok((positions, rows))
+    }
 }
 
 impl CohomologyRelation {
@@ -380,36 +443,113 @@ impl CohomologyRelation {
             && self.new_image_rank == self.new_rank
     }
 
-    /// Whether the old basis class occurs in the relation projection.
-    pub fn contains_old_class(&self, class: CohomologyClassId) -> bool {
-        let classes: Vec<_> = self
+    /// Whether an old basis class occurs in the old projection.
+    ///
+    /// The check validates the old-space header, old-side rank metadata,
+    /// canonical old terms, and the implied old projection rank. It does not
+    /// validate new-side terms.
+    pub fn contains_old_class(
+        &self,
+        old: &CohomologySpace,
+        class: CohomologyClassId,
+    ) -> Result<bool> {
+        self.validate_old_projection(old)?;
+        let positions = basis_positions(old);
+        let rows = self
             .basis
             .iter()
-            .flat_map(|vector| vector.old.iter().map(|term| term.class))
-            .chain(std::iter::once(class))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let positions: BTreeMap<_, _> = classes
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(position, id)| (id, position))
-            .collect();
-        let rows: Vec<_> = self
-            .basis
-            .iter()
-            .map(|vector| relation_row(&vector.old, &positions))
-            .collect();
+            .map(|vector| {
+                if vector.old.is_empty() && vector.new.is_empty() {
+                    return Err(Error::InvalidInput(
+                        "cohomology relation contains a zero vector".into(),
+                    ));
+                }
+                checked_relation_row(
+                    &vector.old,
+                    &positions,
+                    old.modulus,
+                    "cohomology relation old terms are not canonical",
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let rows = self.checked_old_projection_rows(rows, old.modulus as u64)?;
+        let class_position = positions.get(&class).copied().ok_or_else(|| {
+            Error::InvalidInput("cohomology relation names an unknown old class".into())
+        })?;
         let mut target = SparseVector::default();
-        if let Some(&position) = positions.get(&class) {
-            target.insert(position, 1);
+        target.insert(class_position, 1);
+        reduce_by_basis(&mut target, &rows, old.modulus as u64);
+        Ok(target.is_zero())
+    }
+
+    fn validate_old_projection(&self, old: &CohomologySpace) -> Result<()> {
+        self.validate_old_header(old)?;
+        self.validate_old_ranks()
+    }
+
+    fn validate_old_header(&self, old: &CohomologySpace) -> Result<()> {
+        if self.old_space != old.id
+            || self.dimension != old.dimension
+            || self.scale.to_bits() != old.scale.to_bits()
+            || self.modulus != old.modulus
+            || self.old_rank != old.rank()
+        {
+            return Err(Error::InvalidInput(
+                "cohomology relation does not match its old space".into(),
+            ));
         }
-        reduce_by_basis(
-            &mut target,
-            &rref(rows, self.modulus as u64),
-            self.modulus as u64,
-        );
-        target.is_zero()
+        Ok(())
+    }
+
+    fn validate_old_ranks(&self) -> Result<()> {
+        if self.relation_rank != self.basis.len()
+            || self.old_image_rank > self.old_rank
+            || self.old_kernel_rank > self.old_rank
+            || self.old_image_rank.checked_add(self.old_kernel_rank) != Some(self.old_rank)
+            || self.new_kernel_rank > self.new_rank
+        {
+            return Err(Error::InvalidInput(
+                "cohomology relation old projection ranks are inconsistent".into(),
+            ));
+        }
+        let minimum = self
+            .old_kernel_rank
+            .checked_add(self.new_kernel_rank)
+            .ok_or_else(|| Error::InvalidInput("cohomology relation rank overflows".into()))?;
+        if self.relation_rank < minimum {
+            return Err(Error::InvalidInput(
+                "cohomology relation old projection ranks are inconsistent".into(),
+            ));
+        }
+        let maximum = self
+            .old_rank
+            .checked_add(self.new_rank)
+            .ok_or_else(|| Error::InvalidInput("cohomology relation rank overflows".into()))?;
+        if self.relation_rank > maximum {
+            return Err(Error::InvalidInput(
+                "cohomology relation rank is out of range".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn checked_old_projection_rows(
+        &self,
+        rows: Vec<SparseVector>,
+        modulus: u64,
+    ) -> Result<Vec<SparseVector>> {
+        let rows = rref(rows, modulus);
+        let expected = self
+            .relation_rank
+            .checked_sub(self.new_kernel_rank)
+            .ok_or_else(|| {
+                Error::InvalidInput("cohomology relation rank is inconsistent".into())
+            })?;
+        if rows.len() != expected {
+            return Err(Error::InvalidInput(
+                "cohomology relation old projection rank is inconsistent".into(),
+            ));
+        }
+        Ok(rows)
     }
 }

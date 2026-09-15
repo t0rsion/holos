@@ -7,6 +7,7 @@
 //! and derives the diagram from the checked columns.
 
 mod build;
+mod cycles;
 mod model;
 mod reduction;
 mod region;

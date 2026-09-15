@@ -3,7 +3,7 @@ version = 2
 date = "2026-08-31"
 
 # The decision rule uses the confirmation set only. The 2.5x threshold and
-# trajectory-length rule were fixed from the disclosed v0.10p development
+# trajectory-length rule were fixed from the disclosed development
 # records before this implementation ran. Repair and correspondence timings
 # are descriptive. Every entry must contain at least one result-sensitive
 # acceptance that the complete-order atlas rejects.

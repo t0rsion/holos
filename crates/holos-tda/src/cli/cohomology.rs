@@ -4,14 +4,15 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::{
-    CircularCoordinate, CircularCoordinateArtifact, CircularCoordinateParams, CohomologyLimits,
-    KineticEventKind, KineticFiltration, KineticLimits, KineticZigzagArtifact,
+    CircularCoordinate, CircularCoordinateArtifact, CircularCoordinateParams, Cocycle,
+    CohomologyLimits, KineticEventKind, KineticFiltration, KineticLimits, KineticZigzagArtifact,
     KineticZigzagArtifactLimits, PersistentClass, SparseDistanceMatrix, circular_coordinate,
-    circular_coordinate_for_class, cocycle_from_ripser_terms, cohomology_relation,
-    cohomology_space, continue_circular_coordinate,
+    circular_coordinate_for_class, circular_coordinate_with_integral_lift,
+    cocycle_from_ripser_terms, cohomology_relation, cohomology_space, continue_circular_coordinate,
 };
 
 use super::args::{CircularCli, CohomologyCli, KineticCli};
+use super::circular_input::read_integral_lift;
 use super::class_record::read_persistent_class;
 use super::input::{
     invalid_input, read_circular_cocycle_bounded, read_kinetic_edges, read_proof_input,
@@ -67,12 +68,33 @@ pub(super) fn run_circular(cli: CircularCli) -> crate::Result<()> {
     };
     let selected = selected_class(&cli)?;
     let scale = circular_scale(selected.as_ref(), cli.scale)?;
+    validate_circular_continuation(&cli, selected.as_ref())?;
+    let (graph, coordinate) = prepare_circular_input(&cli, selected.as_ref(), params, scale)?;
+    write_circular_outputs(&cli, &graph, &coordinate, params, scale)
+}
+
+fn prepare_circular_input(
+    cli: &CircularCli,
+    selected: Option<&PersistentClass>,
+    params: CircularCoordinateParams,
+    scale: f64,
+) -> crate::Result<(SparseDistanceMatrix, CircularCoordinate)> {
     let graph = read_proof_input(&cli.input, cli.format, cli.threads, Some(scale))?;
-    let coordinate = circular_coordinate_input(&cli, selected.as_ref(), &graph, params, scale)?;
+    let coordinate = circular_coordinate_input(cli, selected, &graph, params, scale)?;
+    Ok((graph, coordinate))
+}
+
+fn write_circular_outputs(
+    cli: &CircularCli,
+    graph: &SparseDistanceMatrix,
+    coordinate: &CircularCoordinate,
+    params: CircularCoordinateParams,
+    scale: f64,
+) -> crate::Result<()> {
     if let Some(path) = &cli.phases {
         write_phases(path, &coordinate.phase)?;
     }
-    let artifact = circular_artifact(&cli, &graph, &coordinate, params, scale)?;
+    let artifact = circular_artifact(cli, graph, coordinate, params, scale)?;
     let bytes = artifact.encode().map_err(invalid_input)?;
     write_via_temporary(&cli.output, &bytes)?;
     println!(
@@ -92,6 +114,25 @@ fn circular_scale(selected: Option<&PersistentClass>, declared: Option<f64>) -> 
         .ok_or_else(|| crate::Error::InvalidInput("raw circular cocycle rows require --at".into()))
 }
 
+fn validate_circular_continuation(
+    cli: &CircularCli,
+    selected: Option<&PersistentClass>,
+) -> crate::Result<()> {
+    if cli.integral_lift.is_none() || cli.other.is_none() {
+        return Ok(());
+    }
+    let modulus = selected
+        .map(|class| class.cocycle.modulus)
+        .or(cli.modulus)
+        .unwrap_or(47);
+    if modulus == 2 {
+        return Err(crate::Error::InvalidInput(
+            "modulus 2 supplied lifts cannot be used with --continue-to; continuation computes the new coordinate automatically".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn circular_coordinate_input(
     cli: &CircularCli,
     selected: Option<&PersistentClass>,
@@ -99,12 +140,31 @@ fn circular_coordinate_input(
     params: CircularCoordinateParams,
     scale: f64,
 ) -> crate::Result<CircularCoordinate> {
+    if let Some(path) = &cli.integral_lift {
+        let cocycle = circular_cocycle_input(cli, selected, graph, scale)?;
+        let integral = read_integral_lift(path, cli.max_record_bytes, graph.len())?;
+        return circular_coordinate_with_integral_lift(graph, &cocycle, &integral, params);
+    }
     if let Some(class) = selected {
         validate_selected_class(cli, class, scale)?;
         circular_coordinate_for_class(graph, class, params)
     } else {
         raw_circular_coordinate(cli, graph, params, scale)
     }
+}
+
+fn circular_cocycle_input(
+    cli: &CircularCli,
+    selected: Option<&PersistentClass>,
+    graph: &SparseDistanceMatrix,
+    scale: f64,
+) -> crate::Result<Cocycle> {
+    if let Some(class) = selected {
+        validate_selected_class(cli, class, scale)?;
+        class.validate_provenance(graph)?;
+        return Ok(class.cocycle.clone());
+    }
+    raw_circular_cocycle(cli, graph, scale)
 }
 
 fn validate_selected_class(
@@ -131,15 +191,23 @@ fn validate_selected_class(
     Ok(())
 }
 
+fn raw_circular_cocycle(
+    cli: &CircularCli,
+    graph: &SparseDistanceMatrix,
+    scale: f64,
+) -> crate::Result<Cocycle> {
+    let modulus = cli.modulus.unwrap_or(47);
+    let rows = read_circular_cocycle_bounded(&cli.cocycle, modulus, cli.max_record_bytes)?;
+    cocycle_from_ripser_terms(graph, modulus, scale, &rows)
+}
+
 fn raw_circular_coordinate(
     cli: &CircularCli,
     graph: &SparseDistanceMatrix,
     params: CircularCoordinateParams,
     scale: f64,
 ) -> crate::Result<CircularCoordinate> {
-    let modulus = cli.modulus.unwrap_or(47);
-    let rows = read_circular_cocycle_bounded(&cli.cocycle, modulus, cli.max_record_bytes)?;
-    let cocycle = cocycle_from_ripser_terms(graph, modulus, scale, &rows)?;
+    let cocycle = raw_circular_cocycle(cli, graph, scale)?;
     circular_coordinate(graph, &cocycle, params)
 }
 

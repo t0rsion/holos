@@ -226,11 +226,9 @@ fn reduce_thresholded(
 /// engine reads as an edge that never enters the filtration. The time and
 /// memory of this call are the memory-stratum measurement.
 fn widen_to_dense(n: usize, triplets: &[(usize, usize, f64)]) -> Result<DistanceMatrix, String> {
+    SparseDistanceMatrix::from_triplets(n, triplets).map_err(|error| error.to_string())?;
     let mut data = vec![f64::INFINITY; n * n.saturating_sub(1) / 2];
     for &(i, j, d) in triplets {
-        if i >= n || j >= n || i == j {
-            return Err(format!("triplet ({i}, {j}) is out of range for n = {n}"));
-        }
         let (hi, lo) = if i > j { (i, j) } else { (j, i) };
         data[hi * (hi - 1) / 2 + lo] = d;
     }
@@ -254,4 +252,18 @@ fn diagrams_equal(a: &Diagram, b: &Diagram) -> bool {
                 && x.birth.to_bits() == y.birth.to_bits()
                 && x.death.to_bits() == y.death.to_bits()
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::widen_to_dense;
+
+    #[test]
+    fn dense_widening_rejects_conflicting_triplets() {
+        let triplets = [(0, 1, 1.0), (1, 0, 2.0)];
+        assert!(matches!(
+            widen_to_dense(2, &triplets),
+            Err(error) if error.contains("conflicting distances")
+        ));
+    }
 }

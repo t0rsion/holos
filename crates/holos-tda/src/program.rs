@@ -8,6 +8,7 @@
 
 mod composition;
 mod continuation;
+mod diagram;
 mod model;
 mod topology;
 mod update;
@@ -17,8 +18,9 @@ mod tests;
 
 pub use model::{
     BasisTransport, ClassContinuation, ContinuationKind, CorrespondenceMode, PersistenceProgram,
-    ProgramAtomInfo, ProgramBranch, ProgramCheckpoint, ProgramEvaluation, ProgramEvent,
-    ProgramEventKind, ProgramSummary, ProgramUpdate, ProgramUpdateMode, ProgramWork,
+    ProgramAtomInfo, ProgramBranch, ProgramCheckpoint, ProgramDiagramState, ProgramDiagramUpdate,
+    ProgramDiagramUpdateMode, ProgramEvaluation, ProgramEvent, ProgramEventKind, ProgramSummary,
+    ProgramUpdate, ProgramUpdateMode, ProgramWork,
 };
 
 pub(crate) use composition::{atom_infos, compose_result, local_matrix};

@@ -109,3 +109,20 @@ pub struct CircularCoordinateContinuation {
     /// New coordinate when the continuation is unique and nonzero.
     pub coordinate: Option<CircularCoordinate>,
 }
+
+/// One harmonic coordinate computed from a checked source without a basis.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SelectedCircularCoordinate {
+    pub(crate) modulus: u32,
+    pub(crate) scale: f64,
+    pub(crate) field_multiplier: u32,
+    pub(crate) integral: Vec<IntegralCocycleTerm>,
+    pub(crate) divisibility: u64,
+    pub(crate) potential: Vec<f64>,
+    pub(crate) phase: Vec<f64>,
+    pub(crate) energy: f64,
+    pub(crate) max_residual: f64,
+    pub(crate) relative_residual: f64,
+    pub(crate) iterations: usize,
+    pub(crate) tolerance: f64,
+}

@@ -36,7 +36,14 @@ def _assert_cycle_atlas(module):
 
     family = module.circular_family((1, 1), [(0, 1)])
     assert family["base"] == (1, 1)
-    assert any(entry["coordinate"] is not None for entry in family["entries"])
+    assert any(
+        entry["status"] == "success" and entry["coordinate"] is not None
+        for entry in family["entries"]
+    )
+    assert all(
+        entry["coordinate"] is None or entry["status"] == "success"
+        for entry in family["entries"]
+    )
 
 
 def _assert_cycle_artifact(module):

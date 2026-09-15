@@ -225,6 +225,11 @@ pub(super) fn validate_source(
         *end,
         limits.kinetic,
     )?;
+    if filtration.edges() != edges {
+        return Err(Error::InvalidInput(
+            "coverage affine trajectories are not canonical".into(),
+        ));
+    }
     let rebuilt = CoverageSpecification::from_kinetic(
         &filtration,
         *scenario,

@@ -139,11 +139,7 @@ impl CheckedModule {
         vertex_count: usize,
         limits: BipersistenceProofLimits,
     ) -> Result<(), ProofError> {
-        let has_coordinate = check_circular_entry_shape(entry, extension)?;
-        if !has_coordinate {
-            return Ok(());
-        }
-        let Some(bytes) = &entry.coordinate else {
+        let Some(bytes) = check_circular_entry_shape(entry, extension)? else {
             return Ok(());
         };
         self.verify_circular_binding(bytes, extension, family, vertex_count, entry.grade, limits)
@@ -444,22 +440,37 @@ impl CheckedModule {
     }
 }
 
-fn check_circular_entry_shape(
-    entry: &CircularEntryClaim,
+fn check_circular_entry_shape<'a>(
+    entry: &'a CircularEntryClaim,
     extension: &Extension,
-) -> Result<bool, ProofError> {
+) -> Result<Option<&'a [u8]>, ProofError> {
     if entry.grade != extension.grade || entry.extension != extension.kind {
         return Err(ProofError::new(
             "a circular-family entry differs from its class extension",
         ));
     }
-    let needs_coordinate = extension.kind == ExtensionKind::Unique;
-    if entry.coordinate.is_some() != needs_coordinate {
-        return Err(ProofError::new(
-            "a circular-family coordinate differs from its extension kind",
-        ));
+    match (extension.kind, &entry.status) {
+        (ExtensionKind::Unique, CircularFamilyStatus::Success(bytes)) => {
+            if bytes.is_empty() {
+                return Err(ProofError::new(
+                    "a successful circular status has no coordinate",
+                ));
+            }
+            Ok(Some(bytes))
+        }
+        (ExtensionKind::Unique, CircularFamilyStatus::LiftFailed)
+        | (ExtensionKind::Unique, CircularFamilyStatus::SolveFailed) => Ok(None),
+        (ExtensionKind::Unique, CircularFamilyStatus::NotAttempted) => Err(ProofError::new(
+            "a unique circular extension has no computation status",
+        )),
+        (
+            ExtensionKind::Ambiguous | ExtensionKind::NoExtension,
+            CircularFamilyStatus::NotAttempted,
+        ) => Ok(None),
+        (ExtensionKind::Ambiguous | ExtensionKind::NoExtension, _) => Err(ProofError::new(
+            "a non-unique circular extension has a computation status",
+        )),
     }
-    Ok(entry.coordinate.is_some())
 }
 
 fn projectively_equal(left: &[MapTerm], right: &[MapTerm], modulus: u32) -> bool {
@@ -478,4 +489,100 @@ fn projectively_equal(left: &[MapTerm], right: &[MapTerm], modulus: u32) -> bool
         )
     }
     normalized(left, modulus) == normalized(right, modulus)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extension(kind: ExtensionKind) -> Extension {
+        Extension {
+            grade: Grade {
+                scale: 0,
+                density: 0,
+            },
+            kind,
+            class: Vec::new(),
+            ambiguity: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn circular_status_shape_keeps_topology_and_computation_separate() {
+        let unique = extension(ExtensionKind::Unique);
+        let ambiguous = extension(ExtensionKind::Ambiguous);
+        let no_extension = extension(ExtensionKind::NoExtension);
+
+        assert!(
+            check_circular_entry_shape(
+                &CircularEntryClaim {
+                    grade: unique.grade,
+                    extension: unique.kind,
+                    status: CircularFamilyStatus::Success(vec![1]),
+                },
+                &unique,
+            )
+            .is_ok()
+        );
+        assert!(
+            check_circular_entry_shape(
+                &CircularEntryClaim {
+                    grade: unique.grade,
+                    extension: unique.kind,
+                    status: CircularFamilyStatus::LiftFailed,
+                },
+                &unique,
+            )
+            .is_ok()
+        );
+        assert!(
+            check_circular_entry_shape(
+                &CircularEntryClaim {
+                    grade: unique.grade,
+                    extension: unique.kind,
+                    status: CircularFamilyStatus::NotAttempted,
+                },
+                &unique,
+            )
+            .is_err()
+        );
+        assert!(
+            check_circular_entry_shape(
+                &CircularEntryClaim {
+                    grade: ambiguous.grade,
+                    extension: ambiguous.kind,
+                    status: CircularFamilyStatus::NotAttempted,
+                },
+                &ambiguous,
+            )
+            .is_ok()
+        );
+        assert!(
+            check_circular_entry_shape(
+                &CircularEntryClaim {
+                    grade: no_extension.grade,
+                    extension: no_extension.kind,
+                    status: CircularFamilyStatus::Success(vec![1]),
+                },
+                &no_extension,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn circular_success_status_requires_coordinate_bytes() {
+        let unique = extension(ExtensionKind::Unique);
+        assert!(
+            check_circular_entry_shape(
+                &CircularEntryClaim {
+                    grade: unique.grade,
+                    extension: unique.kind,
+                    status: CircularFamilyStatus::Success(Vec::new()),
+                },
+                &unique,
+            )
+            .is_err()
+        );
+    }
 }
