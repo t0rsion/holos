@@ -7,6 +7,7 @@ use super::algebra::{
 };
 use super::complex::{ActiveComplex, space_from_complex, validate};
 use super::digest::{active_graph_digest, common_graph_digest};
+use super::methods::checked_relation_row;
 use super::model::*;
 
 /// Continue one exact old class through a checked common-subcomplex relation.
@@ -16,9 +17,8 @@ pub fn cohomology_continuation(
     relation: &CohomologyRelation,
     old_coordinates: &[(usize, u32)],
 ) -> Result<CohomologyContinuation> {
-    validate_continuation_relation(old, new, relation)?;
+    let relation_rows = validate_continuation_relation(old, new, relation)?;
     let selected = selected_class(old, old_coordinates)?;
-    let relation_rows = continuation_rows(old, new, relation);
     let equations = continuation_equations(&relation_rows, old.rank());
     let right = continuation_right(&selected, old.rank());
     let Some((particular, kernel)) =
@@ -45,19 +45,98 @@ fn validate_continuation_relation(
     old: &CohomologySpace,
     new: &CohomologySpace,
     relation: &CohomologyRelation,
+) -> Result<Vec<SparseVector>> {
+    validate_continuation_space_compatibility(old, new)?;
+    validate_continuation_header(old, new, relation)?;
+    validate_continuation_ranks(relation)?;
+    validate_continuation_basis(old, new, relation)
+}
+
+fn validate_continuation_space_compatibility(
+    old: &CohomologySpace,
+    new: &CohomologySpace,
+) -> Result<()> {
+    if old.vertex_count != new.vertex_count
+        || old.dimension != new.dimension
+        || old.scale.to_bits() != new.scale.to_bits()
+        || old.modulus != new.modulus
+    {
+        return Err(Error::InvalidInput(
+            "cohomology continuation spaces are incompatible".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_continuation_header(
+    old: &CohomologySpace,
+    new: &CohomologySpace,
+    relation: &CohomologyRelation,
 ) -> Result<()> {
     if relation.old_space != old.id
         || relation.new_space != new.id
+        || relation.dimension != old.dimension
+        || relation.scale.to_bits() != old.scale.to_bits()
         || relation.old_rank != old.rank()
         || relation.new_rank != new.rank()
         || relation.modulus != old.modulus
-        || old.modulus != new.modulus
     {
         return Err(Error::InvalidInput(
             "cohomology continuation relation belongs to different spaces".into(),
         ));
     }
     Ok(())
+}
+
+fn validate_continuation_ranks(relation: &CohomologyRelation) -> Result<()> {
+    if relation.relation_rank != relation.basis.len()
+        || !rank_parts_match(
+            relation.old_rank,
+            relation.old_image_rank,
+            relation.old_kernel_rank,
+        )
+        || !rank_parts_match(
+            relation.new_rank,
+            relation.new_image_rank,
+            relation.new_kernel_rank,
+        )
+    {
+        return Err(Error::InvalidInput(
+            "cohomology continuation relation ranks are inconsistent".into(),
+        ));
+    }
+    let minimum = relation
+        .old_kernel_rank
+        .checked_add(relation.new_kernel_rank)
+        .ok_or_else(|| Error::InvalidInput("cohomology continuation rank overflows".into()))?;
+    let maximum = relation
+        .old_rank
+        .checked_add(relation.new_rank)
+        .ok_or_else(|| Error::InvalidInput("cohomology continuation rank overflows".into()))?;
+    if relation.relation_rank < minimum || relation.relation_rank > maximum {
+        return Err(Error::InvalidInput(
+            "cohomology continuation relation rank is out of range".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_continuation_basis(
+    old: &CohomologySpace,
+    new: &CohomologySpace,
+    relation: &CohomologyRelation,
+) -> Result<Vec<SparseVector>> {
+    let rows = continuation_rows(old, new, relation)?;
+    if rref(rows.clone(), old.modulus as u64).len() != relation.relation_rank {
+        return Err(Error::InvalidInput(
+            "cohomology continuation relation basis is not independent".into(),
+        ));
+    }
+    Ok(rows)
+}
+
+fn rank_parts_match(rank: usize, image_rank: usize, kernel_rank: usize) -> bool {
+    image_rank <= rank && kernel_rank <= rank && image_rank.checked_add(kernel_rank) == Some(rank)
 }
 
 fn selected_class(old: &CohomologySpace, old_coordinates: &[(usize, u32)]) -> Result<SparseVector> {
@@ -79,21 +158,37 @@ fn continuation_rows(
     old: &CohomologySpace,
     new: &CohomologySpace,
     relation: &CohomologyRelation,
-) -> Vec<SparseVector> {
+) -> Result<Vec<SparseVector>> {
     let old_positions = basis_positions(old);
     let new_positions = basis_positions(new);
     relation
         .basis
         .iter()
         .map(|vector| {
-            let mut row = SparseVector::default();
-            for term in &vector.old {
-                row.insert(old_positions[&term.class], term.coefficient);
+            if vector.old.is_empty() && vector.new.is_empty() {
+                return Err(Error::InvalidInput(
+                    "cohomology relation contains a zero vector".into(),
+                ));
             }
-            for term in &vector.new {
-                row.insert(old.rank() + new_positions[&term.class], term.coefficient);
+            let mut row = checked_relation_row(
+                &vector.old,
+                &old_positions,
+                old.modulus,
+                "cohomology relation old terms are not canonical",
+            )?;
+            let new_row = checked_relation_row(
+                &vector.new,
+                &new_positions,
+                old.modulus,
+                "cohomology relation new terms are not canonical",
+            )?;
+            for (position, coefficient) in new_row.0 {
+                let position = old.rank().checked_add(position).ok_or_else(|| {
+                    Error::InvalidInput("cohomology relation coordinate overflows".into())
+                })?;
+                row.insert(position, coefficient);
             }
-            row
+            Ok(row)
         })
         .collect()
 }

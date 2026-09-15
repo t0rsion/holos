@@ -1,6 +1,7 @@
 //! Construction and accessors for finite bipersistence modules.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::bifiltration::DegreeRipsBifiltration;
 use crate::cohomology::{CohomologySpace, cohomology_restriction, cohomology_space};
@@ -24,8 +25,8 @@ pub struct BipersistenceModule {
     pub(super) nodes: Vec<BipersistenceNode>,
     pub(super) cover_maps: Vec<BipersistenceMap>,
     pub(super) cover_positions: BTreeMap<(Bigrade, Bigrade), usize>,
-    pub(super) graphs: Vec<SparseDistanceMatrix>,
-    pub(super) spaces: Vec<CohomologySpace>,
+    pub(super) graphs: Vec<Arc<SparseDistanceMatrix>>,
+    pub(super) spaces: Vec<Arc<CohomologySpace>>,
     pub(super) limits: BipersistenceLimits,
 }
 
@@ -44,7 +45,12 @@ impl BipersistenceModule {
         let scales = bifiltration.scales().collect::<Vec<_>>();
         let minimum_degrees = bifiltration.minimum_degrees().to_vec();
         let (node_count, cover_count) = grid_sizes(&scales, &minimum_degrees, limits)?;
-        let (nodes, graphs, spaces) = build_nodes(
+        let BuiltNodes {
+            nodes,
+            graphs,
+            spaces,
+            space_positions,
+        } = build_nodes(
             bifiltration,
             &scales,
             &minimum_degrees,
@@ -65,7 +71,7 @@ impl BipersistenceModule {
             spaces,
             limits,
         };
-        module.populate_covers()?;
+        module.populate_covers(&space_positions)?;
         module.validate_map_terms()?;
         module.check_squares()?;
         Ok(module)
@@ -114,13 +120,13 @@ impl BipersistenceModule {
     /// slice.
     pub fn h1_graph(&self, grade: Bigrade) -> Result<&SparseDistanceMatrix> {
         self.validate_grade(grade)?;
-        Ok(&self.graphs[self.node_index(grade)])
+        Ok(self.graphs[self.node_index(grade)].as_ref())
     }
 
     /// Return the canonical `H¹` space at one grid node.
     pub fn cohomology_space(&self, grade: Bigrade) -> Result<&CohomologySpace> {
         self.validate_grade(grade)?;
-        Ok(&self.spaces[self.node_index(grade)])
+        Ok(self.spaces[self.node_index(grade)].as_ref())
     }
 
     /// Return one checked cover map.
@@ -163,21 +169,37 @@ impl BipersistenceModule {
         Ok(())
     }
 
-    fn push_cover(&mut self, lower: Bigrade, upper: Bigrade) -> Result<()> {
+    fn push_cover(
+        &mut self,
+        lower: Bigrade,
+        upper: Bigrade,
+        space_positions: &[usize],
+        map_cache: &mut BTreeMap<(usize, usize), Arc<LinearMap>>,
+    ) -> Result<()> {
         let lower_position = self.node_index(lower);
         let upper_position = self.node_index(upper);
-        let restriction = cohomology_restriction(
-            &self.graphs[upper_position],
-            &self.spaces[upper_position],
-            &self.graphs[lower_position],
-            &self.spaces[lower_position],
-        )?;
-        let linear = linear_from_restriction(
-            &restriction,
-            &self.spaces[upper_position],
-            &self.spaces[lower_position],
-        )?;
-        let map = self.public_map(lower, upper, &linear);
+        let key = (
+            space_positions[upper_position],
+            space_positions[lower_position],
+        );
+        let linear = if let Some(linear) = map_cache.get(&key) {
+            Arc::clone(linear)
+        } else {
+            let restriction = cohomology_restriction(
+                self.graphs[upper_position].as_ref(),
+                self.spaces[upper_position].as_ref(),
+                self.graphs[lower_position].as_ref(),
+                self.spaces[lower_position].as_ref(),
+            )?;
+            let linear = Arc::new(linear_from_restriction(
+                &restriction,
+                self.spaces[upper_position].as_ref(),
+                self.spaces[lower_position].as_ref(),
+            )?);
+            map_cache.insert(key, Arc::clone(&linear));
+            linear
+        };
+        let map = self.public_map(lower, upper, linear.as_ref());
         let position = self.cover_maps.len();
         self.cover_positions.insert((lower, upper), position);
         self.cover_maps.push(map);
@@ -320,21 +342,42 @@ fn build_nodes(
     modulus: u32,
     limits: BipersistenceLimits,
     node_count: usize,
-) -> Result<(
-    Vec<BipersistenceNode>,
-    Vec<SparseDistanceMatrix>,
-    Vec<CohomologySpace>,
-)> {
+) -> Result<BuiltNodes> {
     let mut nodes = Vec::with_capacity(node_count);
     let mut graphs = Vec::with_capacity(node_count);
     let mut spaces = Vec::with_capacity(node_count);
+    let mut space_positions = Vec::with_capacity(node_count);
+    let mut graph_cache = BTreeMap::new();
     let mut total_rank = 0usize;
     for scale in 0..scales.len() {
         for density in 0..minimum_degrees.len() {
             let grade = Bigrade::new(scale, density);
             let slice = bifiltration.slice(grade)?;
             let graph = slice.h1_graph(bifiltration.vertex_count())?;
-            let space = cohomology_space(&graph, 1, 0.0, modulus, limits.cohomology)?;
+            let key = ActiveGraphKey::from_graph(&graph);
+            let (graph, space, space_position) =
+                if let Some((cached_graph, cached_space, space_position)) = graph_cache.get(&key) {
+                    (
+                        Arc::clone(cached_graph),
+                        Arc::clone(cached_space),
+                        *space_position,
+                    )
+                } else {
+                    let graph = Arc::new(graph);
+                    let space = Arc::new(cohomology_space(
+                        graph.as_ref(),
+                        1,
+                        0.0,
+                        modulus,
+                        limits.cohomology,
+                    )?);
+                    let space_position = graph_cache.len();
+                    graph_cache.insert(
+                        key,
+                        (Arc::clone(&graph), Arc::clone(&space), space_position),
+                    );
+                    (graph, space, space_position)
+                };
             total_rank = total_rank
                 .checked_add(space.rank())
                 .ok_or_else(|| Error::InvalidInput("bipersistence total rank overflows".into()))?;
@@ -351,21 +394,63 @@ fn build_nodes(
             });
             graphs.push(graph);
             spaces.push(space);
+            space_positions.push(space_position);
         }
     }
-    Ok((nodes, graphs, spaces))
+    Ok(BuiltNodes {
+        nodes,
+        graphs,
+        spaces,
+        space_positions,
+    })
+}
+
+struct BuiltNodes {
+    nodes: Vec<BipersistenceNode>,
+    graphs: Vec<Arc<SparseDistanceMatrix>>,
+    spaces: Vec<Arc<CohomologySpace>>,
+    space_positions: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ActiveGraphKey {
+    vertex_count: usize,
+    edges: Vec<(usize, usize, u64)>,
+}
+
+impl ActiveGraphKey {
+    fn from_graph(graph: &SparseDistanceMatrix) -> Self {
+        Self {
+            vertex_count: graph.len(),
+            edges: graph
+                .edges()
+                .map(|(u, v, value)| (u, v, value.to_bits()))
+                .collect(),
+        }
+    }
 }
 
 impl BipersistenceModule {
-    fn populate_covers(&mut self) -> Result<()> {
+    fn populate_covers(&mut self, space_positions: &[usize]) -> Result<()> {
+        let mut map_cache = BTreeMap::new();
         for scale in 0..self.scale_count() {
             for density in 0..self.density_count() {
                 let lower = Bigrade::new(scale, density);
                 if scale + 1 < self.scale_count() {
-                    self.push_cover(lower, Bigrade::new(scale + 1, density))?;
+                    self.push_cover(
+                        lower,
+                        Bigrade::new(scale + 1, density),
+                        space_positions,
+                        &mut map_cache,
+                    )?;
                 }
                 if density + 1 < self.density_count() {
-                    self.push_cover(lower, Bigrade::new(scale, density + 1))?;
+                    self.push_cover(
+                        lower,
+                        Bigrade::new(scale, density + 1),
+                        space_positions,
+                        &mut map_cache,
+                    )?;
                 }
             }
         }

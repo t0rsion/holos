@@ -35,6 +35,9 @@ pub struct ProgramProofLimits {
     /// Largest accepted filtered triangle-column count in one reduction.
     pub max_triangles: usize,
     /// Largest accepted total reduction change-of-basis terms.
+    ///
+    /// H1 replay also applies this bound to incidence entries and to the
+    /// combined working row and change column.
     pub max_terms: usize,
 }
 

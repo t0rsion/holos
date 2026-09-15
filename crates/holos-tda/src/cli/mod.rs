@@ -2,6 +2,7 @@
 
 mod args;
 mod bipersistence;
+mod circular_input;
 mod class_record;
 mod cohomology;
 mod compute;
@@ -10,6 +11,7 @@ mod coverage_geometry;
 mod dispatch;
 mod index;
 mod input;
+mod persistent;
 mod portfolio;
 mod synthesis;
 mod verify;

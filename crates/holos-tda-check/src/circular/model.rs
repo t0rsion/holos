@@ -14,6 +14,9 @@ pub struct CircularProofLimits {
     /// Largest accepted relative normal-equation residual tolerance.
     pub max_tolerance: f64,
     /// Largest absolute integer cocycle coefficient.
+    ///
+    /// The value must be at most `i64::MAX`, because wire coefficients are
+    /// signed 64-bit values and the checker evaluates both edge orientations.
     pub max_integral_coefficient: u64,
 }
 
@@ -134,10 +137,11 @@ pub(super) struct CoordinateCounts {
 }
 
 impl CircularProofLimits {
-    pub(super) fn validate(self) -> Result<(), ProofError> {
+    pub(crate) fn validate(self) -> Result<(), ProofError> {
         if !self.max_tolerance.is_finite()
             || self.max_tolerance <= 0.0
             || self.max_integral_coefficient == 0
+            || self.max_integral_coefficient > i64::MAX as u64
         {
             return Err(ProofError::new("circular checker limits are invalid"));
         }

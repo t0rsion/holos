@@ -11,6 +11,13 @@ use super::super::validation::count_cells;
 use super::encode::check_encoded_size;
 use super::{F64_BITS_CODEC, MAGIC, VERSION};
 
+const WIRE_USIZE_BYTES: usize = 8;
+const CANCELLATION_BYTES: usize = 2 * WIRE_USIZE_BYTES + 4;
+const CELL_BYTES: usize = 3 * WIRE_USIZE_BYTES;
+const BOUNDARY_TERM_BYTES: usize = WIRE_USIZE_BYTES + 4;
+const CHANGE_TERM_BYTES: usize = WIRE_USIZE_BYTES + 4;
+const BAR_BYTES: usize = 3 * WIRE_USIZE_BYTES;
+
 struct InterfaceHeader {
     max_dim: usize,
     modulus: u32,
@@ -122,6 +129,7 @@ fn decode_protected_vertices(
     limits: CertificateLimits,
 ) -> Result<Vec<usize>, CertificateError> {
     let count = reader.bounded_usize("protected vertex count", limits.max_vertices)?;
+    reader.require_bytes(count, WIRE_USIZE_BYTES, "protected vertices")?;
     let mut vertices = Vec::with_capacity(count);
     for _ in 0..count {
         vertices.push(reader.usize()?);
@@ -141,11 +149,18 @@ fn decode_cancellations(
     limits: CertificateLimits,
 ) -> Result<Vec<InterfaceCancellation>, CertificateError> {
     let count = reader.bounded_usize("cancellation count", input_count / 2)?;
+    let upper_len = max_dim
+        .checked_add(2)
+        .ok_or_else(|| CertificateError::new("relative cancellation key length overflows"))?;
+    let lower_len = max_dim
+        .checked_add(1)
+        .ok_or_else(|| CertificateError::new("relative cancellation key length overflows"))?;
+    reader.require_bytes(count, CANCELLATION_BYTES, "cancellations")?;
     let mut cancellations = Vec::with_capacity(count);
     for _ in 0..count {
         cancellations.push(InterfaceCancellation {
-            upper: decode_key(reader, max_dim + 2, limits.max_vertices)?,
-            lower: decode_key(reader, max_dim + 1, limits.max_vertices)?,
+            upper: decode_key(reader, upper_len, limits.max_vertices)?,
+            lower: decode_key(reader, lower_len, limits.max_vertices)?,
             coefficient: reader.u32()?,
         });
     }
@@ -158,7 +173,9 @@ fn decode_diagram(
     limits: CertificateLimits,
 ) -> Result<Diagram, CertificateError> {
     let count = reader.bounded_usize("bar count", limits.max_bars)?;
+    reader.require_bytes(count, BAR_BYTES, "diagram bars")?;
     let mut diagram = Diagram::default();
+    diagram.bars.reserve(count);
     for _ in 0..count {
         diagram.bars.push(Bar {
             dim: reader.bounded_usize("bar dimension", max_dim)?,
@@ -184,10 +201,14 @@ fn decode_cells(
     modulus: u32,
     limits: CertificateLimits,
 ) -> Result<Vec<Vec<InterfaceCell>>, CertificateError> {
-    check_decoded_dimension_count(reader, "cell", max_dim + 2)?;
-    let mut cells = Vec::with_capacity(max_dim + 2);
+    let dimension_count = max_dim
+        .checked_add(2)
+        .ok_or_else(|| CertificateError::new("relative cell dimension count overflows"))?;
+    check_decoded_dimension_count(reader, "cell", dimension_count)?;
+    reader.require_bytes(dimension_count, WIRE_USIZE_BYTES, "cell dimension headers")?;
+    let mut cells = Vec::with_capacity(dimension_count);
     let mut total_terms = 0usize;
-    for dimension in 0..=max_dim + 1 {
+    for dimension in 0..dimension_count {
         cells.push(decode_cell_dimension(
             reader,
             dimension,
@@ -229,6 +250,7 @@ fn decode_cell_dimension(
     total_terms: &mut usize,
 ) -> Result<Vec<InterfaceCell>, CertificateError> {
     let count = reader.bounded_usize("cell count", dimension_cell_limit(dimension, limits))?;
+    reader.require_bytes(count, CELL_BYTES, "cells")?;
     let mut cells = Vec::with_capacity(count);
     for _ in 0..count {
         cells.push(decode_cell(
@@ -249,8 +271,11 @@ fn decode_cell(
     limits: CertificateLimits,
     total_terms: &mut usize,
 ) -> Result<InterfaceCell, CertificateError> {
-    let vertices = decode_key(reader, dimension + 1, limits.max_vertices)?;
-    check_decoded_cell_dimension(vertices.len(), dimension)?;
+    let expected_vertices = dimension
+        .checked_add(1)
+        .ok_or_else(|| CertificateError::new("relative cell vertex count overflows"))?;
+    let vertices = decode_key(reader, expected_vertices, limits.max_vertices)?;
+    check_decoded_cell_dimension(vertices.len(), expected_vertices)?;
     let value = f64::from_bits(reader.u64()?);
     let boundary_count = reader.bounded_usize("boundary term count", limits.max_terms)?;
     add_decoded_terms(total_terms, boundary_count, limits.max_terms, "boundary")?;
@@ -265,9 +290,9 @@ fn decode_cell(
 
 fn check_decoded_cell_dimension(
     vertex_count: usize,
-    dimension: usize,
+    expected_vertices: usize,
 ) -> Result<(), CertificateError> {
-    if vertex_count != dimension + 1 {
+    if vertex_count != expected_vertices {
         return Err(CertificateError::new(
             "relative interface cell has the wrong dimension",
         ));
@@ -298,6 +323,7 @@ fn decode_boundary_terms(
     count: usize,
     max_vertex: usize,
 ) -> Result<Vec<InterfaceChainTerm>, CertificateError> {
+    reader.require_bytes(count, BOUNDARY_TERM_BYTES, "boundary terms")?;
     let mut boundary = Vec::with_capacity(count);
     for _ in 0..count {
         boundary.push(InterfaceChainTerm {
@@ -330,10 +356,18 @@ fn decode_columns(
     modulus: u32,
     limits: CertificateLimits,
 ) -> Result<Vec<Vec<ChangeColumn>>, CertificateError> {
-    check_decoded_dimension_count(reader, "reduction", max_dim + 1)?;
-    let mut columns = Vec::with_capacity(max_dim + 1);
+    let dimension_count = max_dim
+        .checked_add(1)
+        .ok_or_else(|| CertificateError::new("relative reduction dimension count overflows"))?;
+    check_decoded_dimension_count(reader, "reduction", dimension_count)?;
+    reader.require_bytes(
+        dimension_count,
+        WIRE_USIZE_BYTES,
+        "reduction dimension headers",
+    )?;
+    let mut columns = Vec::with_capacity(dimension_count);
     let mut total_terms = 0usize;
-    for dimension in 1..=max_dim + 1 {
+    for dimension in 1..=dimension_count {
         columns.push(decode_column_dimension(
             reader,
             dimension,
@@ -356,6 +390,7 @@ fn decode_column_dimension(
         "reduction column count",
         dimension_cell_limit(dimension, limits),
     )?;
+    reader.require_bytes(count, WIRE_USIZE_BYTES, "reduction column headers")?;
     let mut columns = Vec::with_capacity(count);
     for _ in 0..count {
         columns.push(decode_change_column(
@@ -385,6 +420,7 @@ fn decode_change_terms(
     reader: &mut Reader<'_>,
     count: usize,
 ) -> Result<Vec<CertificateTerm>, CertificateError> {
+    reader.require_bytes(count, CHANGE_TERM_BYTES, "change terms")?;
     let mut terms = Vec::with_capacity(count);
     for _ in 0..count {
         terms.push(CertificateTerm {
@@ -416,6 +452,7 @@ fn decode_key(
     maximum_vertex: usize,
 ) -> Result<Vec<usize>, CertificateError> {
     let count = reader.bounded_usize("cell key length", maximum_len)?;
+    reader.require_bytes(count, WIRE_USIZE_BYTES, "cell key vertices")?;
     let mut key = Vec::with_capacity(count);
     for _ in 0..count {
         key.push(reader.bounded_usize("cell vertex", maximum_vertex)?);
@@ -486,7 +523,43 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
+    fn require_bytes(
+        &self,
+        count: usize,
+        minimum_width: usize,
+        label: &str,
+    ) -> Result<(), CertificateError> {
+        let required = count.checked_mul(minimum_width).ok_or_else(|| {
+            CertificateError::new(format!("{label} minimum byte count overflows"))
+        })?;
+        let remaining = self.remaining();
+        if required > remaining {
+            return Err(CertificateError::new(format!(
+                "{label} requires at least {required} bytes, only {remaining} remain"
+            )));
+        }
+        Ok(())
+    }
+
     fn array32(&mut self) -> Result<[u8; 32], CertificateError> {
         Ok(self.take(32)?.try_into().unwrap())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protected_count_requires_minimum_encoded_bytes() {
+        let bytes = 1u64.to_be_bytes();
+        let mut reader = Reader::new(&bytes);
+        let error =
+            decode_protected_vertices(&mut reader, CertificateLimits::default()).unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("protected vertices requires at least 8 bytes")
+        );
     }
 }

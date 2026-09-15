@@ -1,8 +1,9 @@
 """Finite degree-Rips bipersistence with checked module evidence.
 
 The module stores the complete finite H1 diagram on the degree-Rips grid.
-Queries return dictionaries with explicit grade, map, class, and coordinate
-fields. The underlying ``HOLOSBP`` bytes can be saved as a reproducible claim.
+Queries return dictionaries with explicit grade, map, class, coordinate, and
+computational status fields. The underlying ``HOLOSBP`` bytes can be saved as
+a reproducible claim.
 """
 
 from . import _core
@@ -114,11 +115,12 @@ def _family_record(raw):
             {
                 "grade": tuple(grade),
                 "kind": kind,
+                "status": status,
                 "coordinate": (
                     None if coordinate is None else _coordinate_record(coordinate)
                 ),
             }
-            for grade, kind, coordinate in entries
+            for grade, kind, status, coordinate in entries
         ],
     }
 
@@ -211,7 +213,7 @@ class Bipersistence:
     def circular_family(
         self, base, class_, tolerance=1e-10, max_iterations=10_000
     ):
-        """Return checked circular coordinates for unique class extensions."""
+        """Return checked coordinates and status for every class extension."""
         return _family_record(
             self._inner.circular_family(
                 tuple(base),

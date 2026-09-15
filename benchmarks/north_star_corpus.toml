@@ -1,5 +1,4 @@
-# Corpus for the registered north-star engine study of public 0.6.0
-# (internal v0.7).
+# Corpus for the registered north-star engine study.
 #
 # FROZEN at version 1 on 2026-08-18. The entries, sizes, seeds, thresholds,
 # thread counts, and rules do not change in response to a result. Two arm
@@ -12,10 +11,6 @@
 # amendment. It came before any registered timing. [meta.amendments] carries
 # its text and what it changed.
 #
-# PLAN.md is the maintainer's registration document. It is local and not
-# published; this file quotes every rule it depends on, so the corpus
-# carries its own criterion.
-#
 # This study, and only this study, produces the public performance
 # statements of the release. The engineering harness
 # (benchmarks/engine_bench.sh with benchmarks/engineering_corpus.toml) tunes
@@ -27,10 +22,10 @@ date = "2026-08-18"
 study = "north-star engine study: holos against ripser and giotto-ph"
 runner = "benchmarks/north_star.sh"
 tables = "benchmarks/north_star_tables.py"
-plan = "PLAN.md section 19, the registered north-star study"
+plan = "registered engine study rules included below"
 frozen = """
 FROZEN at version 1 on 2026-08-18, before any run of this corpus. The
-preconditions of PLAN.md section 19 are met in order: the four holos arms
+preconditions of the registered protocol are met in order: the four holos arms
 are defined, the engineering landing matrix has run on a disjoint set, and
 the competitors are built and hashed. The seeds here appear in no other
 corpus, registered or engineering, so no entry of this study has been
@@ -45,7 +40,7 @@ measure, or rule. The runner refuses to start while an arm it would run is
 unset.
 """
 decision_rule = """
-Frozen at registration, quoted from PLAN.md section 19.
+Frozen at registration.
 
 "The internal competitive target requires H3 serial median time at or below
 stock f32 ripser, dense-selected, sparse-selected, maxdim-1, and maxdim-2
@@ -239,7 +234,7 @@ giotto-ph     Version 0.2.4, by version string, through
               refuses another version unless ALLOW_ANY_GPH_VERSION=1, which
               marks the multicore grade void.
 
-Ripser++ is not an arm. PLAN.md section 19 puts it in a separate
+Ripser++ is not an arm. The registered protocol puts it in a separate
 accelerator arena, and it contributes to no CPU grade.
 
 [meta.required_competitors] says which builds a complete study needs: the

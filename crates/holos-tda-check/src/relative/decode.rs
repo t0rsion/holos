@@ -5,6 +5,10 @@ use super::model::{CertificateHeader, Step, VerifiedCertificate};
 use super::verify::verify_certificate;
 use super::{F64_BITS_CODEC, MAGIC, VERSION};
 
+const WIRE_USIZE_BYTES: usize = 8;
+const CANCELLATION_BYTES: usize = 2 * WIRE_USIZE_BYTES + 4;
+const BAR_BYTES: usize = 3 * WIRE_USIZE_BYTES;
+
 pub(crate) fn decode_verified(
     bytes: &[u8],
     limits: ProofLimits,
@@ -96,6 +100,7 @@ pub(super) fn decode_protected_vertices(
     limits: ProofLimits,
 ) -> Result<Vec<usize>, ProofError> {
     let count = reader.bounded_usize("protected vertex count", limits.max_vertices)?;
+    reader.require_bytes(count, WIRE_USIZE_BYTES, "protected vertices")?;
     let vertices = (0..count)
         .map(|_| reader.usize())
         .collect::<Result<Vec<_>, _>>()?;
@@ -115,11 +120,18 @@ pub(super) fn decode_steps(
     limits: ProofLimits,
 ) -> Result<Vec<Step>, ProofError> {
     let count = reader.bounded_usize("relative cancellation count", input_count / 2)?;
+    let upper_len = max_dim
+        .checked_add(2)
+        .ok_or_else(|| ProofError::new("relative cancellation key length overflows"))?;
+    let lower_len = max_dim
+        .checked_add(1)
+        .ok_or_else(|| ProofError::new("relative cancellation key length overflows"))?;
+    reader.require_bytes(count, CANCELLATION_BYTES, "cancellations")?;
     (0..count)
         .map(|_| {
             Ok(Step {
-                upper: decode_key(reader, max_dim + 2, limits.max_vertices)?,
-                lower: decode_key(reader, max_dim + 1, limits.max_vertices)?,
+                upper: decode_key(reader, upper_len, limits.max_vertices)?,
+                lower: decode_key(reader, lower_len, limits.max_vertices)?,
                 coefficient: reader.u32()?,
             })
         })
@@ -132,6 +144,7 @@ pub(super) fn decode_diagram(
     limits: ProofLimits,
 ) -> Result<Vec<ProofBar>, ProofError> {
     let count = reader.bounded_usize("relative bar count", limits.max_bars)?;
+    reader.require_bytes(count, BAR_BYTES, "diagram bars")?;
     (0..count)
         .map(|_| {
             Ok(ProofBar {
@@ -141,4 +154,21 @@ pub(super) fn decode_diagram(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protected_count_requires_minimum_encoded_bytes() {
+        let bytes = 1u64.to_be_bytes();
+        let mut reader = Reader::new(&bytes);
+        let error = decode_protected_vertices(&mut reader, ProofLimits::default()).unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("protected vertices requires at least 8 bytes")
+        );
+    }
 }

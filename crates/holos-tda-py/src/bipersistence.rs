@@ -14,8 +14,7 @@ mod records;
 
 use records::{
     ArtifactSummary, AtlasRecord, CircularFamilyRecord, Grade, MapRecord, Term, artifact_summary,
-    atlas_record, coordinate_record, extension_kind, from_grade, map_record, terms, to_grade,
-    to_terms,
+    atlas_record, family_record, from_grade, map_record, to_grade, to_terms,
 };
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -111,7 +110,7 @@ impl PyBipersistence {
             .map_err(to_error)
     }
 
-    /// Compute checked circular coordinates for unique atlas extensions.
+    /// Compute coordinate outcomes for every atlas extension.
     #[pyo3(signature = (base, class, tolerance=1e-10, max_iterations=10_000))]
     fn circular_family(
         &self,
@@ -131,21 +130,7 @@ impl PyBipersistence {
             .module
             .circular_coordinate_family(&atlas, params)
             .map_err(to_error)?;
-        Ok((
-            from_grade(family.base_grade),
-            terms(&family.base_class),
-            family
-                .entries
-                .iter()
-                .map(|entry| {
-                    (
-                        from_grade(entry.grade),
-                        extension_kind(entry.extension).into(),
-                        entry.coordinate.as_ref().map(coordinate_record),
-                    )
-                })
-                .collect(),
-        ))
+        Ok(family_record(&family))
     }
 
     /// Store one checked rectangle-rank claim in the artifact.
@@ -201,21 +186,7 @@ impl PyBipersistence {
         self.artifact
             .record_circular_family(&self.module, &atlas, params, self.limits)
             .map_err(to_error)?;
-        Ok((
-            from_grade(family.base_grade),
-            terms(&family.base_class),
-            family
-                .entries
-                .iter()
-                .map(|entry| {
-                    (
-                        from_grade(entry.grade),
-                        extension_kind(entry.extension).into(),
-                        entry.coordinate.as_ref().map(coordinate_record),
-                    )
-                })
-                .collect(),
-        ))
+        Ok(family_record(&family))
     }
 
     /// Return canonical `HOLOSBP` bytes for the current artifact.

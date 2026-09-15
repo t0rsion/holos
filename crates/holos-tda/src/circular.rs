@@ -12,10 +12,15 @@ mod model;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use api::{
+    CircularCoordinateFailure, circular_coordinate_with_failure_stage, selected_coordinate,
+    validate_params,
+};
 pub use api::{
     circular_coordinate, circular_coordinate_for_class, circular_coordinate_with_integral_lift,
     cocycle_from_ripser_terms, continue_circular_coordinate,
 };
+pub(crate) use model::SelectedCircularCoordinate;
 pub use model::{
     CircularClassTerm, CircularCoordinate, CircularCoordinateContinuation,
     CircularCoordinateParams, IntegralCocycleTerm,

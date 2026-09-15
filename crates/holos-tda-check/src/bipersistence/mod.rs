@@ -30,6 +30,7 @@ pub fn verify_bipersistence(
     let claim = wire::decode_claim(bytes, limits)?;
     let checked = CheckedModule::build(&claim, limits)?;
     checked.verify_claims(&claim, limits)?;
+    let status_counts = circular_family_status_counts(&claim);
     Ok(VerifiedBipersistence {
         vertices: claim.vertex_count,
         edges: claim.edges.len(),
@@ -41,8 +42,29 @@ pub fn verify_bipersistence(
         regions: claim.rank_regions.len(),
         class_atlases: claim.class_atlases.len(),
         circular_families: claim.circular_families.len(),
+        circular_family_successes: status_counts[0],
+        circular_family_lift_failures: status_counts[1],
+        circular_family_solve_failures: status_counts[2],
+        circular_family_not_attempted: status_counts[3],
         modulus: claim.modulus,
     })
+}
+
+fn circular_family_status_counts(claim: &claims::Claim) -> [usize; 4] {
+    claim
+        .circular_families
+        .iter()
+        .flat_map(|family| family.entries.iter())
+        .fold([0; 4], |mut counts, entry| {
+            let position = match &entry.status {
+                claims::CircularFamilyStatus::Success(_) => 0,
+                claims::CircularFamilyStatus::LiftFailed => 1,
+                claims::CircularFamilyStatus::SolveFailed => 2,
+                claims::CircularFamilyStatus::NotAttempted => 3,
+            };
+            counts[position] += 1;
+            counts
+        })
 }
 
 #[cfg(test)]

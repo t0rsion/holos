@@ -6,8 +6,8 @@
 # The corpus is benchmarks/engineering_corpus.toml. It holds two sets. The
 # tuning set is disclosed: read it, rerun it, and pick constants from it.
 # The landing set is disjoint in seed and in size, and it runs once, after
-# the constants are frozen, to decide landing. PLAN.md section 17 requires
-# that pair, and section 19 requires the strata: every entry names one, and
+# the constants are frozen, to decide landing. The registered protocol requires
+# that pair, and it requires the strata: every entry names one, and
 # the summary reports a median per stratum before any overall median.
 #
 # The primary total is a fresh process. holos and ripser both start, read

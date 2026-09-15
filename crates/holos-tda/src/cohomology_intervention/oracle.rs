@@ -74,7 +74,7 @@ impl<'a> TopologyOracle<'a> {
                 &self.graphs[scenario],
                 &self.spaces[scenario],
             )?;
-            if restriction.image_contains(self.targets[scenario]) {
+            if restriction.image_contains(&self.spaces[scenario], self.targets[scenario])? {
                 return Ok(true);
             }
         }

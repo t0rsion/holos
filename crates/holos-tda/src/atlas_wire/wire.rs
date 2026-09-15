@@ -13,6 +13,9 @@ mod critical;
 
 use critical::{decode_critical_pairs, encode_critical_pairs};
 
+const MIN_CLASS_RECORD_BYTES: usize = 32 + 8 + 8 + 8 + 1;
+const MIN_CRITICAL_PAIR_BYTES: usize = 8 + 2 * 8 + 8 + 1;
+
 pub(crate) fn encode_atlas_header(
     out: &mut Vec<u8>,
     artifact: &AtlasArtifact,
@@ -229,6 +232,7 @@ pub(crate) fn decode_space(
     limits: AtlasDecodeLimits,
 ) -> std::result::Result<PersistentClassSpace, AtlasArtifactError> {
     let header = decode_space_header(reader, totals, limits)?;
+    validate_space_minimum_records(reader, &header, atlas.certificate_bytes)?;
     let critical_pairs = decode_critical_pairs(reader, atlas.vertex_count, header.critical_pairs)?;
     let basis = decode_basis(reader, atlas, &header, totals, limits)?;
     Ok(PersistentClassSpace {
@@ -237,6 +241,34 @@ pub(crate) fn decode_space(
         basis,
         critical_pairs,
     })
+}
+
+fn validate_space_minimum_records(
+    reader: &Reader<'_>,
+    header: &SpaceHeader,
+    certificate_bytes: usize,
+) -> std::result::Result<(), AtlasArtifactError> {
+    let available = reader
+        .remaining()
+        .checked_sub(certificate_bytes)
+        .ok_or_else(|| AtlasArtifactError::new("nested certificate exceeds remaining bytes"))?;
+    let critical_pairs = header
+        .critical_pairs
+        .checked_mul(MIN_CRITICAL_PAIR_BYTES)
+        .ok_or_else(|| AtlasArtifactError::new("critical-pair record bytes overflow usize"))?;
+    let basis = header
+        .basis
+        .checked_mul(MIN_CLASS_RECORD_BYTES)
+        .ok_or_else(|| AtlasArtifactError::new("basis record bytes overflow usize"))?;
+    let minimum = critical_pairs
+        .checked_add(basis)
+        .ok_or_else(|| AtlasArtifactError::new("space record bytes overflow usize"))?;
+    if minimum > available {
+        return Err(AtlasArtifactError::new(format!(
+            "space record counts need at least {minimum} bytes, only {available} remain"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn decode_space_header(

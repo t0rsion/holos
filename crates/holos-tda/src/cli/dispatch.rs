@@ -3,7 +3,8 @@
 use clap::Parser;
 
 use super::{
-    args::*, bipersistence, cohomology, compute, coverage, index, portfolio, synthesis, verify,
+    args::*, bipersistence, cohomology, compute, coverage, index, persistent, portfolio, synthesis,
+    verify,
 };
 
 /// Run the `holos` CLI on `argv` and return the process exit code.
@@ -88,6 +89,18 @@ command_handler!(
     CircularCli,
     cohomology::run_circular,
     "circular"
+);
+command_handler!(
+    persistent_class_command,
+    PersistentClassCli,
+    persistent::run_persistent_class,
+    "persistent-class"
+);
+command_handler!(
+    persistent_circular_command,
+    PersistentCircularCli,
+    persistent::run_persistent_circular,
+    "persistent-circular"
 );
 command_handler!(
     bipersistence_command,
@@ -205,6 +218,8 @@ const SUBCOMMANDS: &[(&str, CommandHandler)] = &[
     ("collapse-portfolio", collapse_portfolio_command),
     ("cohomology", cohomology_command),
     ("circular", circular_command),
+    ("persistent-class", persistent_class_command),
+    ("persistent-circular", persistent_circular_command),
     ("kinetic", kinetic_command),
     ("cover", coverage_command),
     ("cover-affine", affine_coverage_command),

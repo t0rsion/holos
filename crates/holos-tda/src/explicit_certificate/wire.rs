@@ -10,6 +10,9 @@ use super::validation::{certificate_error, simplex_limit};
 const MAGIC: &[u8; 8] = b"HOLOSEXP";
 const VERSION: u16 = 1;
 const F64_BITS_CODEC: u8 = 1;
+const WIRE_USIZE_BYTES: usize = 8;
+const CHANGE_TERM_BYTES: usize = WIRE_USIZE_BYTES + 4;
+const BAR_BYTES: usize = 3 * WIRE_USIZE_BYTES;
 
 pub(super) fn encode_payload(
     certificate: &ExplicitReductionCertificate,
@@ -161,15 +164,24 @@ fn decode_complex(
     limits: CertificateLimits,
 ) -> Result<FilteredSimplicialComplex<ScalarGrade>, CertificateError> {
     let labels = decode_labels(reader, limits.max_vertices)?;
-    let dimension_count = reader.bounded_usize(
-        "simplex dimension count",
-        limits.max_dimension.saturating_add(2),
-    )?;
-    if dimension_count != max_homology_dimension + 2 {
+    let expected_dimensions = max_homology_dimension
+        .checked_add(2)
+        .ok_or_else(|| certificate_error("explicit simplex dimension count overflows"))?;
+    let dimension_limit = limits
+        .max_dimension
+        .checked_add(2)
+        .ok_or_else(|| certificate_error("explicit dimension limit overflows"))?;
+    let dimension_count = reader.bounded_usize("simplex dimension count", dimension_limit)?;
+    if dimension_count != expected_dimensions {
         return Err(certificate_error(
             "explicit simplex dimension count is not canonical",
         ));
     }
+    reader.require_bytes(
+        dimension_count,
+        WIRE_USIZE_BYTES,
+        "simplex dimension headers",
+    )?;
     let mut simplices = Vec::with_capacity(dimension_count);
     for dimension in 0..dimension_count {
         simplices.push(decode_simplex_dimension(reader, dimension, limits)?);
@@ -180,6 +192,7 @@ fn decode_complex(
 
 fn decode_labels(reader: &mut Reader<'_>, maximum: usize) -> Result<Vec<usize>, CertificateError> {
     let count = reader.bounded_usize("vertex label count", maximum)?;
+    reader.require_bytes(count, WIRE_USIZE_BYTES, "vertex labels")?;
     let mut labels = Vec::with_capacity(count);
     for _ in 0..count {
         labels.push(reader.usize()?);
@@ -193,6 +206,11 @@ fn decode_simplex_dimension(
     limits: CertificateLimits,
 ) -> Result<Vec<FilteredSimplex<ScalarGrade>>, CertificateError> {
     let count = reader.bounded_usize("simplex count", simplex_limit(dimension, limits))?;
+    let minimum_width = dimension
+        .checked_add(3)
+        .and_then(|fields| fields.checked_mul(WIRE_USIZE_BYTES))
+        .ok_or_else(|| certificate_error("simplex byte count overflows"))?;
+    reader.require_bytes(count, minimum_width, "simplices")?;
     let mut simplices = Vec::with_capacity(count);
     for _ in 0..count {
         simplices.push(decode_simplex(reader, dimension)?);
@@ -204,12 +222,16 @@ fn decode_simplex(
     reader: &mut Reader<'_>,
     dimension: usize,
 ) -> Result<FilteredSimplex<ScalarGrade>, CertificateError> {
-    let vertex_count = reader.bounded_usize("simplex vertex count", dimension + 1)?;
-    if vertex_count != dimension + 1 {
+    let expected_vertices = dimension
+        .checked_add(1)
+        .ok_or_else(|| certificate_error("simplex vertex count overflows"))?;
+    let vertex_count = reader.bounded_usize("simplex vertex count", expected_vertices)?;
+    if vertex_count != expected_vertices {
         return Err(certificate_error(
             "explicit simplex has the wrong vertex count",
         ));
     }
+    reader.require_bytes(vertex_count, WIRE_USIZE_BYTES, "simplex vertices")?;
     let mut vertices = Vec::with_capacity(vertex_count);
     for _ in 0..vertex_count {
         vertices.push(reader.usize()?);
@@ -226,15 +248,16 @@ fn decode_columns(
     modulus: u32,
     limits: CertificateLimits,
 ) -> Result<Vec<Vec<ChangeColumn>>, CertificateError> {
-    let count = reader.bounded_usize(
-        "boundary dimension count",
-        max_homology_dimension.saturating_add(1),
-    )?;
-    if count != max_homology_dimension + 1 {
+    let expected_dimensions = max_homology_dimension
+        .checked_add(1)
+        .ok_or_else(|| certificate_error("explicit boundary dimension count overflows"))?;
+    let count = reader.bounded_usize("boundary dimension count", expected_dimensions)?;
+    if count != expected_dimensions {
         return Err(certificate_error(
             "explicit boundary dimension count is not canonical",
         ));
     }
+    reader.require_bytes(count, WIRE_USIZE_BYTES, "boundary dimension headers")?;
     let mut total_terms = 0usize;
     let mut dimensions = Vec::with_capacity(count);
     for dimension in 1..=count {
@@ -262,6 +285,7 @@ fn decode_change_dimension(
             "explicit change column count is not canonical",
         ));
     }
+    reader.require_bytes(count, WIRE_USIZE_BYTES, "change column headers")?;
     let mut columns = Vec::with_capacity(count);
     for target in 0..count {
         columns.push(decode_change_column(
@@ -291,6 +315,7 @@ fn decode_change_column(
             "explicit change terms exceed their limit",
         ));
     }
+    reader.require_bytes(count, CHANGE_TERM_BYTES, "change terms")?;
     let mut terms = Vec::with_capacity(count);
     for _ in 0..count {
         terms.push(decode_change_term(reader, target, modulus)?);
@@ -319,6 +344,7 @@ fn decode_diagram(
     limits: CertificateLimits,
 ) -> Result<Diagram, CertificateError> {
     let count = reader.bounded_usize("diagram bar count", limits.max_bars)?;
+    reader.require_bytes(count, BAR_BYTES, "diagram bars")?;
     let mut diagram = Diagram::default();
     diagram.bars.reserve(count);
     for _ in 0..count {
@@ -387,6 +413,10 @@ impl<'a> Reader<'a> {
         Self { bytes, position: 0 }
     }
 
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.position
+    }
+
     fn take(&mut self, count: usize) -> Result<&'a [u8], CertificateError> {
         let end = self
             .position
@@ -437,6 +467,24 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
+    fn require_bytes(
+        &self,
+        count: usize,
+        minimum_width: usize,
+        label: &str,
+    ) -> Result<(), CertificateError> {
+        let required = count
+            .checked_mul(minimum_width)
+            .ok_or_else(|| certificate_error(format!("{label} minimum byte count overflows")))?;
+        let remaining = self.remaining();
+        if required > remaining {
+            return Err(certificate_error(format!(
+                "{label} requires at least {required} bytes, only {remaining} remain"
+            )));
+        }
+        Ok(())
+    }
+
     fn finish(&self) -> Result<(), CertificateError> {
         if self.position != self.bytes.len() {
             return Err(certificate_error(
@@ -444,5 +492,22 @@ impl<'a> Reader<'a> {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn label_count_requires_minimum_encoded_bytes() {
+        let bytes = 1u64.to_be_bytes();
+        let mut reader = Reader::new(&bytes);
+        let error = decode_labels(&mut reader, 1).unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("vertex labels requires at least 8 bytes")
+        );
     }
 }

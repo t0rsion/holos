@@ -12,7 +12,7 @@ pub use model::{
 };
 
 const MAGIC: &[u8; 8] = b"HOLOSBP\0";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const F64_BITS_CODEC: u8 = 1;
 
 #[cfg(all(test, holos_repository_tests))]

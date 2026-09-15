@@ -18,9 +18,13 @@ pub(super) fn encode_payload(artifact: &BipersistenceArtifact) -> Result<Vec<u8>
 }
 
 impl BipersistenceArtifact {
-    /// Encode canonical `HOLOSBP` version 1 bytes.
+    /// Encode canonical `HOLOSBP` version 2 bytes.
     pub fn encode(&self, limits: BipersistenceArtifactLimits) -> Result<Vec<u8>> {
         self.verify(limits)?;
+        self.encode_after_verification(limits)
+    }
+
+    fn encode_after_verification(&self, limits: BipersistenceArtifactLimits) -> Result<Vec<u8>> {
         let mut output = encode_payload(self)?;
         output.extend_from_slice(&self.digest);
         if output.len() > limits.max_bytes {
@@ -31,7 +35,7 @@ impl BipersistenceArtifact {
         Ok(output)
     }
 
-    /// Decode and verify canonical `HOLOSBP` version 1 bytes.
+    /// Decode and verify canonical `HOLOSBP` version 2 bytes.
     pub fn decode(bytes: &[u8], limits: BipersistenceArtifactLimits) -> Result<Self> {
         decode::decode_artifact(bytes, limits)
     }

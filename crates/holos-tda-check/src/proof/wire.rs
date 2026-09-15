@@ -7,6 +7,15 @@ use super::model::{
     AtomProof, ProofBar, ProofColumn, ProofEdge, ProofError, ProofLimits, ProofTerm, SnapshotProof,
 };
 
+const NODE_HEADER_BYTES: usize = 32 + 4 * 8;
+const SNAPSHOT_HEADER_BYTES: usize = 4 * 8;
+const WIRE_USIZE_BYTES: usize = 8;
+const EDGE_KEY_BYTES: usize = 2 * WIRE_USIZE_BYTES;
+const PROOF_EDGE_BYTES: usize = 2 * WIRE_USIZE_BYTES + 8;
+const PROOF_BAR_BYTES: usize = 3 * 8;
+const COLUMN_COUNT_BYTES: usize = WIRE_USIZE_BYTES;
+const PROOF_TERM_BYTES: usize = WIRE_USIZE_BYTES + 4;
+
 pub(crate) fn decode_bundle_prefix(reader: &mut Reader<'_>) -> Result<(), ProofError> {
     if reader.take(8)? != MAGIC {
         return Err(ProofError::new("wrong magic bytes"));
@@ -27,6 +36,7 @@ pub(crate) fn decode_nodes(
     modulus: u32,
     totals: &mut DecodeTotals,
 ) -> Result<Vec<AtomProof>, ProofError> {
+    reader.require_bytes(count, NODE_HEADER_BYTES, "reduction node headers")?;
     (0..count)
         .map(|_| decode_node(reader, limits, modulus, totals))
         .collect()
@@ -38,6 +48,7 @@ pub(crate) fn decode_snapshots(
     limits: ProofLimits,
     totals: &mut DecodeTotals,
 ) -> Result<Vec<SnapshotProof>, ProofError> {
+    reader.require_bytes(count, SNAPSHOT_HEADER_BYTES, "snapshot headers")?;
     (0..count)
         .map(|_| decode_snapshot(reader, limits, totals))
         .collect()
@@ -120,6 +131,7 @@ fn encode_bars(output: &mut Vec<u8>, bars: &[ProofBar]) -> Result<(), ProofError
 pub(crate) struct DecodeTotals {
     vertices: usize,
     edges: usize,
+    edge_columns: usize,
     triangles: usize,
     terms: usize,
     references: usize,
@@ -149,21 +161,25 @@ fn decode_node(
 ) -> Result<AtomProof, ProofError> {
     let header = decode_node_header(reader, limits)?;
     record_node_totals(totals, &header, limits)?;
-    let vertices = decode_usizes(reader, header.vertices)?;
+    let vertices = decode_usizes(reader, header.vertices, "node vertices")?;
     let edges = decode_edge_keys(reader, header.edges)?;
     let edge_columns = decode_columns(
         reader,
         header.edge_columns,
+        limits.max_edges,
         modulus,
         limits.max_terms,
         &mut totals.terms,
+        "edge columns",
     )?;
     let triangle_columns = decode_columns(
         reader,
         header.triangle_columns,
+        limits.max_triangles,
         modulus,
         limits.max_terms,
         &mut totals.terms,
+        "triangle columns",
     )?;
     finish_node(
         header.digest,
@@ -182,9 +198,10 @@ fn decode_node_header(
     Ok(NodeHeader {
         digest: reader.array32()?,
         vertices: reader.bounded_usize("node vertex count", limits.max_vertices)?,
-        edges: reader.usize()?,
-        edge_columns: reader.usize()?,
-        triangle_columns: reader.usize()?,
+        edges: reader.bounded_usize("node edge count", limits.max_edges)?,
+        edge_columns: reader.bounded_usize("node edge-column count", limits.max_edges)?,
+        triangle_columns: reader
+            .bounded_usize("node triangle-column count", limits.max_triangles)?,
     })
 }
 
@@ -200,6 +217,12 @@ fn record_node_totals(
         "node vertices",
     )?;
     totals.edges = bounded_sum(totals.edges, header.edges, limits.max_edges, "node edges")?;
+    totals.edge_columns = bounded_sum(
+        totals.edge_columns,
+        header.edge_columns,
+        limits.max_edges,
+        "edge columns",
+    )?;
     totals.triangles = bounded_sum(
         totals.triangles,
         header.triangle_columns,
@@ -209,11 +232,17 @@ fn record_node_totals(
     Ok(())
 }
 
-fn decode_usizes(reader: &mut Reader<'_>, count: usize) -> Result<Vec<usize>, ProofError> {
+fn decode_usizes(
+    reader: &mut Reader<'_>,
+    count: usize,
+    label: &str,
+) -> Result<Vec<usize>, ProofError> {
+    reader.require_bytes(count, WIRE_USIZE_BYTES, label)?;
     (0..count).map(|_| reader.usize()).collect()
 }
 
 fn decode_edge_keys(reader: &mut Reader<'_>, count: usize) -> Result<Vec<[usize; 2]>, ProofError> {
+    reader.require_bytes(count, EDGE_KEY_BYTES, "node edges")?;
     (0..count)
         .map(|_| Ok([reader.usize()?, reader.usize()?]))
         .collect()
@@ -244,25 +273,56 @@ fn finish_node(
 fn decode_columns(
     reader: &mut Reader<'_>,
     count: usize,
+    column_limit: usize,
     modulus: u32,
     term_limit: usize,
     total_terms: &mut usize,
+    label: &str,
 ) -> Result<Vec<ProofColumn>, ProofError> {
-    let mut columns = Vec::with_capacity(count);
-    for target in 0..count {
-        let term_count = reader.usize()?;
-        *total_terms = bounded_sum(*total_terms, term_count, term_limit, "change terms")?;
-        let mut terms = Vec::with_capacity(term_count);
-        for _ in 0..term_count {
-            terms.push(ProofTerm {
+    check_column_count(reader, count, column_limit, label)?;
+    (0..count)
+        .map(|target| decode_column(reader, target, modulus, term_limit, total_terms))
+        .collect()
+}
+
+fn check_column_count(
+    reader: &Reader<'_>,
+    count: usize,
+    limit: usize,
+    label: &str,
+) -> Result<(), ProofError> {
+    if count > limit {
+        return Err(ProofError::new(format!(
+            "{label} {count} exceed the limit {limit}"
+        )));
+    }
+    reader.require_bytes(count, COLUMN_COUNT_BYTES, label)
+}
+
+fn decode_column(
+    reader: &mut Reader<'_>,
+    target: usize,
+    modulus: u32,
+    term_limit: usize,
+    total_terms: &mut usize,
+) -> Result<ProofColumn, ProofError> {
+    let term_count = reader.bounded_usize("change term count", term_limit)?;
+    *total_terms = bounded_sum(*total_terms, term_count, term_limit, "change terms")?;
+    let terms = decode_terms(reader, term_count)?;
+    check_column(target, &terms, modulus)?;
+    Ok(ProofColumn { terms })
+}
+
+fn decode_terms(reader: &mut Reader<'_>, count: usize) -> Result<Vec<ProofTerm>, ProofError> {
+    reader.require_bytes(count, PROOF_TERM_BYTES, "change terms")?;
+    (0..count)
+        .map(|_| {
+            Ok(ProofTerm {
                 index: reader.usize()?,
                 coefficient: reader.u32()?,
-            });
-        }
-        check_column(target, &terms, modulus)?;
-        columns.push(ProofColumn { terms });
-    }
-    Ok(columns)
+            })
+        })
+        .collect()
 }
 
 fn decode_snapshot(
@@ -273,6 +333,7 @@ fn decode_snapshot(
     let header = decode_snapshot_header(reader, limits)?;
     record_snapshot_totals(totals, &header, limits)?;
     let edges = decode_proof_edges(reader, header.edges)?;
+    reader.require_bytes(header.references, 32, "snapshot references")?;
     let atom_refs = (0..header.references)
         .map(|_| reader.array32())
         .collect::<Result<Vec<_>, _>>()?;
@@ -286,9 +347,9 @@ fn decode_snapshot_header(
 ) -> Result<SnapshotHeader, ProofError> {
     Ok(SnapshotHeader {
         vertices: reader.bounded_usize("snapshot vertex count", limits.max_vertices)?,
-        edges: reader.usize()?,
-        references: reader.usize()?,
-        bars: reader.usize()?,
+        edges: reader.bounded_usize("snapshot edge count", limits.max_edges)?,
+        references: reader.bounded_usize("snapshot reference count", limits.max_references)?,
+        bars: reader.bounded_usize("snapshot bar count", limits.max_bars)?,
     })
 }
 
@@ -314,6 +375,7 @@ fn record_snapshot_totals(
 }
 
 fn decode_proof_edges(reader: &mut Reader<'_>, count: usize) -> Result<Vec<ProofEdge>, ProofError> {
+    reader.require_bytes(count, PROOF_EDGE_BYTES, "snapshot edges")?;
     (0..count)
         .map(|_| {
             Ok(ProofEdge {
@@ -326,6 +388,7 @@ fn decode_proof_edges(reader: &mut Reader<'_>, count: usize) -> Result<Vec<Proof
 }
 
 fn decode_bars(reader: &mut Reader<'_>, count: usize) -> Result<Vec<ProofBar>, ProofError> {
+    reader.require_bytes(count, PROOF_BAR_BYTES, "diagram bars")?;
     (0..count)
         .map(|_| {
             Ok(ProofBar {
@@ -406,6 +469,24 @@ impl<'a> Reader<'a> {
 
     pub(crate) fn remaining(&self) -> usize {
         self.bytes.len() - self.position
+    }
+
+    pub(crate) fn require_bytes(
+        &self,
+        count: usize,
+        minimum_width: usize,
+        label: &str,
+    ) -> Result<(), ProofError> {
+        let required = count.checked_mul(minimum_width).ok_or_else(|| {
+            ProofError::new(format!("{label} minimum byte count overflows usize"))
+        })?;
+        if required > self.remaining() {
+            return Err(ProofError::new(format!(
+                "{label} requires at least {required} bytes, only {} remain",
+                self.remaining()
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) fn take(&mut self, count: usize) -> Result<&'a [u8], ProofError> {

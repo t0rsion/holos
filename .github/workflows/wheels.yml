@@ -72,11 +72,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # Release order: merge the release branch into main, let CI go green,
-      # then tag the merged commit and push the tag. A tag off main fails
-      # here, and the fix is the order, not this step. It is the only check
-      # that the published tag carries the history CI tested, so do not
-      # relax it because a release branch is not merged yet.
+      # Published tags must belong to the history tested on main.
       - name: On tags, require the tag to lie on the tested main history
         run: |
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
@@ -231,6 +227,17 @@ jobs:
       - run: python crates/holos-tda-py/tests/checked_workflows.py
         env:
           HOLOS_CHECK_BIN: ${{ github.workspace }}/target/debug/holos-check
+      - run: |
+          mkdir -p "$RUNNER_TEMP/holos-sdist"
+          tar xzf dist/*.tar.gz -C "$RUNNER_TEMP/holos-sdist"
+          persistent=$(find "$RUNNER_TEMP/holos-sdist" -path '*/tests/persistent.py' -print -quit)
+          test -n "$persistent"
+          python -m pytest "$persistent"
+          advanced=$(find "$RUNNER_TEMP/holos-sdist" -name checked_advanced_workflows.py -print -quit)
+          test -n "$advanced"
+          python "$advanced"
+        env:
+          HOLOS_CHECK_BIN: ${{ github.workspace }}/target/debug/holos-check
 
   # Install the built linux x86_64 wheel and run the smoke tests (license
   # texts present, pdist ordering, sparse, moduli, threads, console script).
@@ -273,9 +280,16 @@ jobs:
         with:
           name: wheels-linux-x86_64
           path: dist
+      - run: pip install pytest
       - run: pip install --no-deps dist/*.whl
       - run: cargo build -p holos-tda-check --locked
       - run: python crates/holos-tda-py/tests/checked_workflows.py
+        env:
+          HOLOS_CHECK_BIN: ${{ github.workspace }}/target/debug/holos-check
+      - run: python -m pytest crates/holos-tda-py/tests/persistent.py
+        env:
+          HOLOS_CHECK_BIN: ${{ github.workspace }}/target/debug/holos-check
+      - run: python crates/holos-tda-py/tests/checked_advanced_workflows.py
         env:
           HOLOS_CHECK_BIN: ${{ github.workspace }}/target/debug/holos-check
 

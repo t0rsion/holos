@@ -1,11 +1,11 @@
 use crate::proof::{Graph, ProofBar, ProofError};
 
-use super::super::claim::{AtlasClaim, CriticalPairClaim, SpaceClaim};
+use super::super::claim::{AtlasClaim, CocycleTermClaim, CriticalPairClaim, SpaceClaim};
 use super::super::model::ProgramProofLimits;
 use super::super::reduction::H1Pair;
-use super::basis::canonical_basis;
+use super::super::{ReplayCocycleTerm, ReplayGroup, ReplayPair, ReplayResult, replay_h1};
 use super::identity::{
-    basis_class_id, declared_pair_order, group_id, pair_order, previous_float, terminal_level,
+    bar_bits_equal, declared_pair_order, pair_order, previous_float, terminal_level,
 };
 use super::validation::{check_bar, check_cocycle_shape, check_provenance, check_simplex};
 
@@ -52,7 +52,143 @@ pub(crate) fn check_spaces(
     }
     interval_records.sort_unstable();
     check_space_intervals(atlas, &interval_records)?;
-    check_declared_pairs(checked_pairs, &mut declared_pairs)
+    check_declared_pairs(checked_pairs, &mut declared_pairs)?;
+    let replay = replay_h1(graph, atlas.threshold, atlas.modulus, limits)?;
+    check_replay_linkage(atlas, &replay)
+}
+
+fn check_replay_linkage(atlas: &AtlasClaim, replay: &ReplayResult) -> Result<(), ProofError> {
+    if replay.groups.len() != atlas.spaces.len() {
+        return Err(ProofError::new(
+            "atlas class-space count differs from independent replay",
+        ));
+    }
+    let mut used = vec![false; replay.groups.len()];
+    for (space_index, space) in atlas.spaces.iter().enumerate() {
+        let Some((group_index, group)) =
+            replay
+                .groups
+                .iter()
+                .enumerate()
+                .find(|(group_index, group)| {
+                    !used[*group_index] && bar_bits_equal(space.interval, group.interval)
+                })
+        else {
+            return Err(ProofError::new(format!(
+                "atlas class space {space_index} has no independent replay group"
+            )));
+        };
+        used[group_index] = true;
+        check_replay_group(space_index, space, group)?;
+    }
+    Ok(())
+}
+
+fn check_replay_group(
+    space_index: usize,
+    space: &SpaceClaim,
+    group: &ReplayGroup,
+) -> Result<(), ProofError> {
+    check_replay_identity(space_index, space, group)?;
+    check_replay_multiplicity(space_index, space, group)?;
+    check_replay_pairs(space_index, space, group)?;
+    check_replay_basis(space_index, space, group)?;
+    Ok(())
+}
+
+fn check_replay_identity(
+    space_index: usize,
+    space: &SpaceClaim,
+    group: &ReplayGroup,
+) -> Result<(), ProofError> {
+    if space.id != group.id {
+        return Err(ProofError::new(format!(
+            "atlas space {space_index} identifier differs from independent replay"
+        )));
+    }
+    Ok(())
+}
+
+fn check_replay_multiplicity(
+    space_index: usize,
+    space: &SpaceClaim,
+    group: &ReplayGroup,
+) -> Result<(), ProofError> {
+    if space.critical_pairs.len() != group.pairs.len()
+        || space.basis.len() != group.basis.len()
+        || group.basis.len() != group.class_ids.len()
+    {
+        return Err(ProofError::new(format!(
+            "atlas space {space_index} multiplicity differs from independent replay"
+        )));
+    }
+    Ok(())
+}
+
+fn check_replay_pairs(
+    space_index: usize,
+    space: &SpaceClaim,
+    group: &ReplayGroup,
+) -> Result<(), ProofError> {
+    for (pair_index, (declared, expected)) in
+        space.critical_pairs.iter().zip(&group.pairs).enumerate()
+    {
+        if !replay_pair_matches(declared, expected, group.interval) {
+            return Err(ProofError::new(format!(
+                "atlas space {space_index} critical pair {pair_index} differs from independent replay"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn check_replay_basis(
+    space_index: usize,
+    space: &SpaceClaim,
+    group: &ReplayGroup,
+) -> Result<(), ProofError> {
+    for (basis_index, (class, expected_terms)) in space.basis.iter().zip(&group.basis).enumerate() {
+        if class.scale.to_bits() != group.scale.to_bits()
+            || class.basis_index != basis_index
+            || class.id != group.class_ids[basis_index]
+            || !replay_terms_match(&class.terms, expected_terms)
+        {
+            return Err(ProofError::new(format!(
+                "atlas space {space_index} basis class {basis_index} differs from independent replay"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn replay_pair_matches(
+    declared: &CriticalPairClaim,
+    expected: &ReplayPair,
+    interval: ProofBar,
+) -> bool {
+    if !bar_bits_equal(expected.interval, interval)
+        || declared.birth.vertices.as_slice() != expected.birth
+        || declared.birth.value.to_bits() != expected.interval.birth.to_bits()
+    {
+        return false;
+    }
+    match (&declared.death, &expected.death) {
+        (None, None) => true,
+        (Some(declared), Some(expected)) => {
+            declared.vertices.as_slice() == expected
+                && declared.value.to_bits() == interval.death.to_bits()
+        }
+        _ => false,
+    }
+}
+
+fn replay_terms_match(declared: &[CocycleTermClaim], expected: &[ReplayCocycleTerm]) -> bool {
+    declared.len() == expected.len()
+        && declared.iter().zip(expected).all(|(declared, expected)| {
+            declared.u == expected.u
+                && declared.v == expected.v
+                && declared.coefficient == expected.coefficient
+        })
 }
 
 fn check_space(
@@ -181,20 +317,7 @@ fn check_space_basis(
     } else {
         terminal_level(graph, threshold)
     };
-    let cocycles = check_basis_classes(space_index, space, graph, modulus, limits, expected_scale)?;
-    let canonical = canonical_basis(graph, modulus, expected_scale, &cocycles)?;
-    if canonical != cocycles {
-        return Err(ProofError::new(format!(
-            "atlas space {space_index} basis is not canonical"
-        )));
-    }
-    let group_id = group_id(space.interval, modulus, expected_scale, &cocycles);
-    if space.id != group_id {
-        return Err(ProofError::new(format!(
-            "atlas space {space_index} identifier does not match its basis"
-        )));
-    }
-    check_basis_ids(space_index, space, group_id)
+    check_basis_classes(space_index, space, graph, modulus, limits, expected_scale)
 }
 
 fn check_basis_classes(
@@ -204,8 +327,7 @@ fn check_basis_classes(
     modulus: u32,
     limits: ProgramProofLimits,
     expected_scale: f64,
-) -> Result<Vec<Vec<super::super::claim::CocycleTermClaim>>, ProofError> {
-    let mut cocycles = Vec::with_capacity(space.basis.len());
+) -> Result<(), ProofError> {
     for (basis_index, class) in space.basis.iter().enumerate() {
         if class.basis_index != basis_index || class.scale.to_bits() != expected_scale.to_bits() {
             return Err(ProofError::new(format!(
@@ -216,22 +338,157 @@ fn check_basis_classes(
         if let Some(provenance) = class.provenance.as_ref() {
             check_provenance(provenance, class, graph, space.interval, modulus)?;
         }
-        cocycles.push(class.terms.clone());
-    }
-    Ok(cocycles)
-}
-
-fn check_basis_ids(
-    space_index: usize,
-    space: &SpaceClaim,
-    group_id: [u8; 32],
-) -> Result<(), ProofError> {
-    for (basis_index, class) in space.basis.iter().enumerate() {
-        if class.id != basis_class_id(group_id, basis_index, class.scale, &class.terms) {
-            return Err(ProofError::new(format!(
-                "atlas space {space_index} basis identifier is not canonical"
-            )));
-        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::super::identity::basis_class_id;
+    use super::check_replay_linkage;
+    use crate::program::claim::{
+        AtlasClaim, ClassClaim, CocycleTermClaim, CriticalPairClaim, ReductionClaim, SimplexClaim,
+        SpaceClaim,
+    };
+    use crate::program::{ProgramProofLimits, ReplayCocycleTerm, ReplayGroup, replay_h1};
+    use crate::proof::{Graph, ProofEdge};
+
+    fn graph(vertex_count: usize, edges: &[(usize, usize)]) -> Graph {
+        let edges = edges
+            .iter()
+            .map(|&(u, v)| ProofEdge { u, v, value: 1.0 })
+            .collect::<Vec<_>>();
+        Graph::new(vertex_count, &edges).unwrap()
+    }
+
+    fn atlas_for_group(group: &ReplayGroup, modulus: u32, vertex_count: usize) -> AtlasClaim {
+        let critical_pairs = group
+            .pairs
+            .iter()
+            .map(|pair| CriticalPairClaim {
+                birth: SimplexClaim {
+                    vertices: pair.birth.to_vec(),
+                    value: pair.interval.birth,
+                },
+                death: pair.death.map(|vertices| SimplexClaim {
+                    vertices: vertices.to_vec(),
+                    value: pair.interval.death,
+                }),
+            })
+            .collect();
+        let basis = group
+            .basis
+            .iter()
+            .enumerate()
+            .map(|(basis_index, terms)| ClassClaim {
+                id: group.class_ids[basis_index],
+                basis_index,
+                scale: group.scale,
+                terms: terms
+                    .iter()
+                    .map(|term| CocycleTermClaim {
+                        u: term.u,
+                        v: term.v,
+                        coefficient: term.coefficient,
+                    })
+                    .collect(),
+                provenance: None,
+            })
+            .collect();
+        AtlasClaim {
+            modulus,
+            vertex_count,
+            threshold: None,
+            input_digest: [0; 32],
+            diagram: vec![group.interval],
+            spaces: vec![SpaceClaim {
+                id: group.id,
+                interval: group.interval,
+                critical_pairs,
+                basis,
+            }],
+            reduction: ReductionClaim {
+                modulus,
+                vertex_count,
+                threshold: None,
+                graph_digest: [0; 32],
+                edge_columns: Vec::new(),
+                triangle_columns: Vec::new(),
+                diagram: Vec::new(),
+            },
+        }
+    }
+
+    fn mixed_terms(
+        left: &[ReplayCocycleTerm],
+        right: &[ReplayCocycleTerm],
+        modulus: u32,
+    ) -> Vec<CocycleTermClaim> {
+        let mut coefficients = BTreeMap::new();
+        for term in left.iter().chain(right) {
+            let entry = coefficients.entry((term.u, term.v)).or_insert(0u64);
+            *entry = (*entry + u64::from(term.coefficient)) % u64::from(modulus);
+        }
+        let mut terms: Vec<_> = coefficients
+            .into_iter()
+            .filter_map(|((u, v), coefficient)| {
+                (coefficient != 0).then_some(CocycleTermClaim {
+                    u,
+                    v,
+                    coefficient: coefficient as u32,
+                })
+            })
+            .collect();
+        let inverse = crate::inverse_mod(u64::from(terms[0].coefficient), u64::from(modulus));
+        for term in &mut terms {
+            term.coefficient = (u64::from(term.coefficient) * inverse % u64::from(modulus)) as u32;
+        }
+        terms
+    }
+
+    #[test]
+    fn replay_linkage_rejects_a_mixed_cocycle() {
+        let graph = graph(4, &[(0, 1), (0, 3), (1, 2), (2, 3)]);
+        let replay = replay_h1(&graph, None, 2, ProgramProofLimits::default()).unwrap();
+        let atlas = atlas_for_group(&replay.groups[0], 2, 4);
+        check_replay_linkage(&atlas, &replay).unwrap();
+
+        let mut mixed = atlas;
+        mixed.spaces[0].basis[0].terms[0].u = 0;
+        assert!(check_replay_linkage(&mixed, &replay).is_err());
+    }
+
+    #[test]
+    fn replay_linkage_rejects_a_rehashed_sum_of_two_classes() {
+        let graph = graph(
+            7,
+            &[
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (0, 3),
+                (0, 4),
+                (4, 5),
+                (5, 6),
+                (0, 6),
+            ],
+        );
+        let replay = replay_h1(&graph, None, 3, ProgramProofLimits::default()).unwrap();
+        assert_eq!(replay.groups[0].basis.len(), 2);
+        let atlas = atlas_for_group(&replay.groups[0], 3, 7);
+        check_replay_linkage(&atlas, &replay).unwrap();
+
+        let mut mixed = atlas;
+        let terms = mixed_terms(&replay.groups[0].basis[0], &replay.groups[0].basis[1], 3);
+        mixed.spaces[0].basis[0].terms = terms;
+        mixed.spaces[0].basis[0].id = basis_class_id(
+            mixed.spaces[0].id,
+            0,
+            mixed.spaces[0].basis[0].scale,
+            &mixed.spaces[0].basis[0].terms,
+        );
+        assert!(check_replay_linkage(&mixed, &replay).is_err());
+    }
 }

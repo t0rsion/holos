@@ -14,7 +14,7 @@ use super::lift::{
 };
 use super::model::{
     CircularClassTerm, CircularCoordinate, CircularCoordinateContinuation,
-    CircularCoordinateParams, IntegralCocycleTerm,
+    CircularCoordinateParams, IntegralCocycleTerm, SelectedCircularCoordinate,
 };
 
 /// Normalize Ripser-shaped H1 terms into a canonical holos cocycle.
@@ -109,13 +109,53 @@ fn circular_coordinate_from_checked_cocycle(
     cocycle: &Cocycle,
     params: CircularCoordinateParams,
 ) -> Result<CircularCoordinate> {
+    automatic_coordinate(graph, cocycle, params).map_err(CircularCoordinateFailure::into_error)
+}
+
+#[derive(Debug)]
+pub(crate) enum CircularCoordinateFailure {
+    Lift(Error),
+    Solve(Error),
+    Other(Error),
+}
+
+impl CircularCoordinateFailure {
+    pub(crate) fn into_error(self) -> Error {
+        match self {
+            Self::Lift(error) | Self::Solve(error) | Self::Other(error) => error,
+        }
+    }
+}
+
+impl From<Error> for CircularCoordinateFailure {
+    fn from(error: Error) -> Self {
+        Self::Other(error)
+    }
+}
+
+pub(crate) fn circular_coordinate_with_failure_stage(
+    graph: &SparseDistanceMatrix,
+    cocycle: &Cocycle,
+    params: CircularCoordinateParams,
+) -> std::result::Result<CircularCoordinate, CircularCoordinateFailure> {
+    validate_params(params)?;
+    validate_h1_cocycle(graph, cocycle)?;
+    automatic_coordinate(graph, cocycle, params)
+}
+
+fn automatic_coordinate(
+    graph: &SparseDistanceMatrix,
+    cocycle: &Cocycle,
+    params: CircularCoordinateParams,
+) -> std::result::Result<CircularCoordinate, CircularCoordinateFailure> {
     if cocycle.modulus == 2 {
         return Err(Error::InvalidInput(
             "automatic circular lifting requires an odd prime; use modulus 47 or supply an integral lift"
                 .into(),
-        ));
+        ).into());
     }
-    let (field_multiplier, integral) = centered_integral_lift(graph, cocycle)?;
+    let (field_multiplier, integral) =
+        centered_integral_lift(graph, cocycle).map_err(CircularCoordinateFailure::Lift)?;
     build_coordinate(graph, cocycle, field_multiplier, integral, params)
 }
 
@@ -145,8 +185,39 @@ pub fn circular_coordinate_with_integral_lift(
     validate_params(params)?;
     validate_h1_cocycle(graph, cocycle)?;
     let field_multiplier = infer_field_multiplier(cocycle, integral)?;
-    check_integral_lift(graph, cocycle, field_multiplier, integral)?;
     build_coordinate(graph, cocycle, field_multiplier, integral.to_vec(), params)
+        .map_err(CircularCoordinateFailure::into_error)
+}
+
+/// Compute the harmonic part of a selected source without constructing a
+/// canonical fixed-scale cohomology space.
+pub(crate) fn selected_coordinate(
+    graph: &SparseDistanceMatrix,
+    cocycle: &Cocycle,
+    integral: Option<&[IntegralCocycleTerm]>,
+    params: CircularCoordinateParams,
+) -> std::result::Result<SelectedCircularCoordinate, CircularCoordinateFailure> {
+    validate_params(params)?;
+    validate_h1_cocycle(graph, cocycle)?;
+    let (field_multiplier, integral) = match integral {
+        Some(integral) => {
+            let multiplier = infer_field_multiplier(cocycle, integral)?;
+            (multiplier, integral.to_vec())
+        }
+        None => {
+            if cocycle.modulus == 2 {
+                return Err(Error::InvalidInput(
+                    "automatic selected circular lifting requires an odd prime; supply an integral lift"
+                        .into(),
+                )
+                .into());
+            }
+            let (multiplier, integral) =
+                centered_integral_lift(graph, cocycle).map_err(CircularCoordinateFailure::Lift)?;
+            (multiplier, integral)
+        }
+    };
+    build_selected_coordinate(graph, cocycle, field_multiplier, integral, params)
 }
 
 /// Continue a coordinate through the exact common-subcomplex relation.
@@ -241,7 +312,7 @@ pub(super) fn build_coordinate(
     field_multiplier: u32,
     integral: Vec<IntegralCocycleTerm>,
     params: CircularCoordinateParams,
-) -> Result<CircularCoordinate> {
+) -> std::result::Result<CircularCoordinate, CircularCoordinateFailure> {
     check_integral_lift(graph, cocycle, field_multiplier, &integral)?;
     let space = cohomology_space(graph, 1, cocycle.scale, cocycle.modulus, params.cohomology)?;
     let source_terms = cocycle
@@ -256,25 +327,10 @@ pub(super) fn build_coordinate(
     if class.is_empty() {
         return Err(Error::InvalidInput(
             "circular coordinate needs a nonzero cohomology class".into(),
-        ));
+        )
+        .into());
     }
-    let active = active_edges(graph, cocycle.scale);
-    let integral_map = integral
-        .iter()
-        .map(|term| ((term.u, term.v), term.coefficient))
-        .collect::<BTreeMap<_, _>>();
-    let solve = harmonic_potential(
-        graph.len(),
-        &active,
-        &integral_map,
-        params.tolerance,
-        params.max_iterations,
-    )?;
-    let phase = solve
-        .potential
-        .iter()
-        .map(|&value| canonical_phase(value))
-        .collect();
+    let selected = solve_selected_coordinate(graph, cocycle, field_multiplier, integral, params)?;
     Ok(CircularCoordinate {
         space: space.id(),
         modulus: cocycle.modulus,
@@ -288,8 +344,61 @@ pub(super) fn build_coordinate(
             })
             .collect(),
         source: cocycle.terms.clone(),
+        integral: selected.integral,
+        divisibility: selected.divisibility,
+        potential: selected.potential,
+        phase: selected.phase,
+        energy: selected.energy,
+        max_residual: selected.max_residual,
+        relative_residual: selected.relative_residual,
+        iterations: selected.iterations,
+        tolerance: params.tolerance,
+    })
+}
+
+pub(crate) fn build_selected_coordinate(
+    graph: &SparseDistanceMatrix,
+    cocycle: &Cocycle,
+    field_multiplier: u32,
+    integral: Vec<IntegralCocycleTerm>,
+    params: CircularCoordinateParams,
+) -> std::result::Result<SelectedCircularCoordinate, CircularCoordinateFailure> {
+    check_integral_lift(graph, cocycle, field_multiplier, &integral)?;
+    solve_selected_coordinate(graph, cocycle, field_multiplier, integral, params)
+}
+
+fn solve_selected_coordinate(
+    graph: &SparseDistanceMatrix,
+    cocycle: &Cocycle,
+    field_multiplier: u32,
+    integral: Vec<IntegralCocycleTerm>,
+    params: CircularCoordinateParams,
+) -> std::result::Result<SelectedCircularCoordinate, CircularCoordinateFailure> {
+    let active = active_edges(graph, cocycle.scale);
+    let integral_map = integral
+        .iter()
+        .map(|term| ((term.u, term.v), term.coefficient))
+        .collect::<BTreeMap<_, _>>();
+    let divisibility = integral_divisibility(graph.len(), &active, &integral_map)?;
+    let solve = harmonic_potential(
+        graph.len(),
+        &active,
+        &integral_map,
+        params.tolerance,
+        params.max_iterations,
+    )
+    .map_err(CircularCoordinateFailure::Solve)?;
+    let phase = solve
+        .potential
+        .iter()
+        .map(|&value| canonical_phase(value))
+        .collect();
+    Ok(SelectedCircularCoordinate {
+        modulus: cocycle.modulus,
+        scale: cocycle.scale,
+        field_multiplier,
         integral,
-        divisibility: integral_divisibility(graph.len(), &active, &integral_map)?,
+        divisibility,
         potential: solve.potential,
         phase,
         energy: solve.energy,
@@ -300,7 +409,7 @@ pub(super) fn build_coordinate(
     })
 }
 
-fn validate_params(params: CircularCoordinateParams) -> Result<()> {
+pub(crate) fn validate_params(params: CircularCoordinateParams) -> Result<()> {
     if !params.tolerance.is_finite() || params.tolerance <= 0.0 {
         return Err(Error::InvalidInput(
             "circular residual tolerance must be finite and positive".into(),

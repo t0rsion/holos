@@ -17,6 +17,7 @@ pub(super) fn verify_certificate(
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
+    verify_protected_scope(&certificate.input, &protected)?;
     let replayed = replay(
         certificate.input.clone(),
         &certificate.steps,
@@ -26,6 +27,26 @@ pub(super) fn verify_certificate(
     verify_replay(certificate, replayed, &protected)?;
     verify_certificate_reduction(certificate, limits)?;
     verify_certificate_digest(certificate)
+}
+
+fn verify_protected_scope(
+    input: &[Vec<Cell>],
+    protected: &BTreeSet<usize>,
+) -> Result<(), ProofError> {
+    let input_vertices = input
+        .first()
+        .ok_or_else(|| ProofError::new("relative interface has no input vertex dimension"))?;
+    let labels = input_vertices
+        .iter()
+        .map(|cell| cell.vertices.first().copied())
+        .collect::<Option<BTreeSet<_>>>()
+        .ok_or_else(|| ProofError::new("relative input vertex cell has no label"))?;
+    if protected.iter().any(|vertex| !labels.contains(vertex)) {
+        return Err(ProofError::new(
+            "relative protected vertex is outside the input complex",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn verify_replay(
@@ -76,5 +97,36 @@ pub(super) fn verify_certificate_digest(
         ))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vertex(label: usize) -> Cell {
+        Cell {
+            vertices: vec![label],
+            value: 0.0,
+            boundary: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn protected_scope_rejects_vertex_absent_from_input() {
+        let input = vec![vec![vertex(3)], Vec::new()];
+        let protected = BTreeSet::from([4]);
+        let error = verify_protected_scope(&input, &protected).unwrap_err();
+        assert_eq!(
+            error.message(),
+            "relative protected vertex is outside the input complex"
+        );
+    }
+
+    #[test]
+    fn protected_scope_accepts_input_vertex_label() {
+        let input = vec![vec![vertex(3)], Vec::new()];
+        let protected = BTreeSet::from([3]);
+        verify_protected_scope(&input, &protected).unwrap();
     }
 }

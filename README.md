@@ -10,11 +10,11 @@ It accepts point clouds, dense distance matrices, and sparse weighted graphs.
 The scalar engine uses implicit cohomology with clearing, emergent pairs,
 apparent pairs, and sparse cofacet enumeration.
 
-Selected H1 classes can produce checked circular coordinates. Finite
-degree-Rips modules describe classes across scale and minimum degree. Sparse
-persistence programs reuse checked reductions and repair them after supported
-weight changes. Each path states its input binding and the mathematical claim
-its artifact covers.
+Selected H1 classes can produce source-bound persistent-class and
+circular-coordinate artifacts. Finite degree-Rips modules describe classes
+across scale and minimum degree. Sparse persistence programs reuse checked
+reductions and repair them after supported weight changes. Each path states
+its input binding and the mathematical claim its artifact covers.
 
 The separate `holos-tda-check` crate checks supported artifacts without
 depending on the producer crate. It reconstructs reductions, class relations,
@@ -46,7 +46,8 @@ cargo install --path crates/holos-tda-check
 | Task | Result | Interface |
 |---|---|---|
 | [Compute a diagram](#compute-a-diagram) | Exact scalar persistence | Rust, Python, CLI |
-| [Explain a class](#circular-coordinates) | Source-bound class and checked circular coordinate | Rust, Python, CLI |
+| [Bind a persistent class](#persistent-class-and-circular-coordinate-artifacts) | Source-bound H1 class, witnesses, and circular coordinate | Rust, Python, CLI |
+| [Explain a fixed-scale class](#circular-coordinates) | Fixed-scale class and checked circular coordinate | Rust, Python, CLI |
 | [Explore scale and density](#finite-degree-rips-bipersistence) | Finite H1 module, class extensions, and checked phases | Rust, Python, CLI |
 | [Update edge weights](#result-sensitive-persistence-programs) | Exact H0 and H1 updates with checked program and trace artifacts | Rust and Python; CLI compiles programs and checks artifacts |
 
@@ -147,8 +148,12 @@ A class atlas starts with a nonzero H1 class at one grade. At every grade in
 its upper parameter cone, it records whether the affine extension fiber is
 unique, ambiguous, or empty. It also partitions the cone into connected
 regions with the same classification and ambiguity dimension. With
-`--circular`, Holos computes a phase only at unique extensions. It leaves an
-ambiguous or empty fiber without a phase.
+`--circular`, Holos classifies each extension before attempting a coordinate.
+Ambiguous and empty fibers are `not_attempted`. Unique extensions report
+`success`, `lift_failed`, or `solve_failed`. Only a success carries a phase.
+Lift and solve failures are computational outcomes. They do not prove a
+mathematical obstruction. Automatic family construction requires an odd
+prime. The family API has no supplied-lift parameter for modulus two.
 
 Python exposes the same finite module:
 
@@ -180,6 +185,87 @@ degree-Rips slices and linear maps. It then checks squares, generalized ranks,
 class atlases, and circular families. The format certifies the declared finite
 grid. It does not certify a continuous module between grid values.
 
+During construction, the module reuses equal active graphs, cohomology
+spaces, and cover maps across grid nodes. The artifact still stores each node
+and map explicitly for checking.
+
+## Persistent class and circular-coordinate artifacts
+
+The source-bound workflow starts with one complete, labeled weighted graph. It
+runs the canonical H1 persistence profile at the declared threshold and prime
+field. `space_index` selects an interval-ordered class space. `basis_index`
+selects its canonical basis vector.
+
+The `HOLOSPC` artifact records the complete source graph, threshold, field,
+selected interval and representative scale, canonical cocycle, class identity,
+critical pair, and birth cycle. The birth cycle is closed in the birth complex
+and pairs to the selected class with value one in the field. A finite death
+also records a bounding 2-chain. An essential class has no death in the
+thresholded complex, so its artifact has no death chain. Essentiality is
+relative to the declared threshold.
+
+The selected class belongs to the canonical basis of its equal-interval group.
+A group can contain several critical pairs. The artifact records and checks
+one critical pair from that group as endpoint evidence. The pair does not
+define the class basis vector.
+
+The source binding includes vertex labels, every listed source edge weight,
+the threshold, the field, and the witness data. The separate checker rebuilds
+the bounded H1 profile, then checks the class identity, critical pair, cycle
+closure and pairing, and finite death chain. The active graph at the
+representative scale does not replace the weighted source binding. The checker
+certifies this embedded graph. Compare it with an expected source graph, or
+compare the payload digest, to associate an artifact with an external dataset.
+That association does not authenticate the producer.
+
+`HOLOSPH` nests the class artifact. Its coordinate stores an integer lift, a
+nonzero `field_multiplier`, `divisibility`, a gauge-fixed potential, and a
+residual tolerance. The multiplier relates the integer lift modulo the field
+to the selected cocycle. `divisibility` is the positive gcd of the integer
+periods and can exceed one. Omit the lift for the bounded centered search on
+odd primes. Supply integer edge rows to support a mod-two class. A failed
+automatic search is a computational result. It does not prove that no lift
+exists.
+
+If a primitive integer class is required, check `divisibility == 1`. The
+checker recomputes the relative harmonic residual and checks it against the
+declared residual tolerance. For `HOLOSCC` and `HOLOSPH`, its default maximum
+tolerance is `1e-8`. Pass `--max-tolerance R` to override that bound. The
+tolerance describes the harmonic solve; it does not state angular phase
+precision. APIs derive the phase from the potential, and
+`persistent-circular` can write it as a `--phases` sidecar.
+
+Rust exposes `PersistentClassArtifact` and `PersistentCoordinateArtifact`.
+Their builders accept a `SparseDistanceMatrix`. Python exposes
+`persistent_class_sparse`, `persistent_class_condensed`,
+`persistent_class_points`, and `persistent_class_square`, with matching
+`persistent_circular_*` functions. Use the square variants for symmetric
+square matrices. Python results include artifact bytes, class witnesses, and
+coordinate diagnostics. The CLI exposes `persistent-class` and
+`persistent-circular`, with `--space` and `--basis` selection.
+
+```sh
+holos persistent-class graph.spr class.hspc --format sparse \
+    --space 0 --basis 0 --modulus 47
+holos-check class.hspc
+
+holos persistent-circular graph.spr coordinate.hsph --format sparse \
+    --space 0 --basis 0 --modulus 47 --phases phase.csv
+holos-check coordinate.hsph
+```
+
+`persistent-circular` also accepts `--integral-lift FILE`. The persistent CLI
+binds every finite source edge from point-cloud and lower-distance input before
+applying the threshold to class selection.
+
+[`benchmarks/persistent_demo.py`](benchmarks/persistent_demo.py) runs a small
+producer-to-checker workflow. It writes selected class and coordinate
+artifacts, invokes `holos-check` as a separate process, and checks mutations.
+
+```sh
+HOLOS_CHECK_BIN=holos-check python benchmarks/persistent_demo.py
+```
+
 ## Circular coordinates
 
 `holos circular` accepts the cocycle-row format produced by Ripser.py. It
@@ -192,9 +278,11 @@ holos circular graph.spr class.cocycle coordinate.hcc \
 holos-check coordinate.hcc
 ```
 
-Each cocycle row is `u v coefficient`. The coordinate command uses an odd
-prime and defaults to 47. The Rust API also accepts a caller-supplied integral
-lift, including a lift for a mod-two class.
+Each cocycle row is `u v coefficient`. Automatic lifting requires an odd prime.
+The coordinate command defaults to 47. The Rust API,
+`holos circular --integral-lift FILE`, and matching Python functions accept
+checked supplied lifts. A supplied lift supports modulus two when continuation
+is not requested.
 
 Holos can carry a class from persistence into the coordinate command without
 a Ripser-shaped intermediate file:
@@ -236,9 +324,10 @@ artifact = coordinate["artifact"]
 other input paths. Their `_class` variants accept records from the matching
 `rips_*_classes` function. Each record binds the active labeled graph,
 persistence interval, field, representative scale, and canonical class
-identity. `circular_coordinates_class` is the square-matrix variant. Class
-bindings require an odd prime, such as 47. Pass `other` or `other_triplets` to
-compare a changed graph on the same labeled vertices. The continuation result
+identity. `circular_coordinates_class` is the square-matrix variant. Automatic
+lifting requires an odd prime, such as 47. A supplied lift supports modulus two
+when continuation is not requested. Pass `other` or `other_triplets` to compare
+a changed graph on the same labeled vertices. The continuation result
 is `unique`, `ambiguous`, `no_extension`, or `no_nonzero_continuation`.
 Holos computes a
 new phase only for a unique nonzero target. An ambiguous result reports the
@@ -250,10 +339,12 @@ divisibility, gauge-fixed potential, phase, energy, and relative residual.
 check. `holos-tda-check` rebuilds the active flag complexes, class
 coordinates, lift, divisibility, residual, and continuation from the bytes.
 
-The circular artifact covers one fixed scale. Class records additionally bind
-one named persistence interval and its active source graph. The circular
-checker does not verify that interval's endpoints. The artifact records
-active edge endpoints, not their original weights below that scale.
+`HOLOSCC` covers one fixed scale. Class records additionally bind one named
+persistence interval and its active source graph. The circular checker does
+not verify that interval's endpoints. The artifact records active edge
+endpoints, not their original weights below that scale. Use `HOLOSPC` and
+`HOLOSPH` when the source weights, interval witnesses, and finite death chain
+must be checked.
 Automatic lifting is a
 deterministic sufficient search, not a complete lift solver. Harmonic smoothing
 uses an unweighted edge objective. Exact fixed-scale H1 construction enumerates
@@ -273,6 +364,11 @@ a checked local reduction. When topology, threshold membership, and every
 touched guard remain valid, `evaluate_diagram` returns exact updated H0 and H1
 bars without another boundary reduction. The accepted path still scans active
 edges to recompute global H0 death-edge provenance.
+
+Rust's `ProgramDiagramState` keeps an exact diagram while deferring refreshed
+canonical class spaces after an accepted update. `materialize` checks the
+diagram and rebuilds the explained class spaces when a caller requests them.
+Topology and threshold changes still use the exact recompile path.
 
 `advance` updates only touched atoms. When a guard fails, it repairs a
 retained reduction suffix when possible, then rebuilds the atom when no
@@ -507,6 +603,8 @@ Atlas, collapse, and portfolio verification use the producer crate.
 | Format | Meaning | Checker boundary |
 |---|---|---|
 | `HOLOSBP` | Finite degree-Rips H1 module and selected claims | Independent |
+| `HOLOSPC` | Source-bound selected persistent H1 class, cycle, and death witnesses | Independent |
+| `HOLOSPH` | Source-bound persistent circular coordinate nested over `HOLOSPC` | Independent |
 | `HOLOSATL` | Source-bound scalar H1 atlas | Producer verifier; nested atlases are independently checked in programs |
 | `HOLOSPRG` | Source-bound compositional H0 and H1 persistence program | Independent |
 | `HOLOSDLT` | Source-bound persistence program update trace | Independent |
@@ -522,6 +620,11 @@ Atlas, collapse, and portfolio verification use the producer crate.
 | `HOLOSDM` | Distributed interface manifest | Independent with object callback |
 | `HOLOSIP`, `HOLOSDP` | Index snapshot and delta | Independent |
 | `HOLOSCOL`, `HOLOSPOR` | Collapse and portfolio | Linked collapse verifier |
+
+`HOLOSBP` is version 2. Its circular-family entries preserve extension kind
+and carry `not_attempted`, `lift_failed`, `solve_failed`, or `success` status.
+Only a success carries a nested `HOLOSCC` coordinate. Version 1 bytes are
+rejected by the current decoder.
 
 Independent means that `holos-tda-check` does not depend on `holos-tda`.
 The two crates still share the mathematical specification and byte formats.

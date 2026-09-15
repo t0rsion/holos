@@ -7,6 +7,7 @@ mod common;
 mod coverage;
 mod index;
 mod persistence;
+mod persistent;
 mod point;
 mod program;
 mod proof;

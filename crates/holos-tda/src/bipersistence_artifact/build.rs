@@ -1,9 +1,9 @@
 use crate::{
     BipersistenceModule, BipersistenceRectangle, BipersistenceRegion, CircularCoordinateArtifact,
-    CircularCoordinateParams, CohomologyClassAtlas, Error, Result,
+    CircularCoordinateFamilyStatus, CircularCoordinateParams, CohomologyClassAtlas, Error, Result,
 };
 
-use super::model::{ArtifactCircularEntry, ArtifactCircularFamily};
+use super::model::{ArtifactCircularEntry, ArtifactCircularFamily, ArtifactCircularStatus};
 use super::{BipersistenceArtifact, BipersistenceArtifactLimits};
 
 impl BipersistenceArtifact {
@@ -145,8 +145,9 @@ impl BipersistenceArtifact {
 
     /// Add or replace checked circular coordinates for one stored class atlas.
     ///
-    /// A unique extension carries one nested `HOLOSCC` proof. An ambiguous or
-    /// absent extension carries no coordinate.
+    /// A successful unique extension carries one nested `HOLOSCC` proof.
+    /// Ambiguous and absent extensions are not attempted. A failed unique
+    /// computation carries its stage status without a coordinate.
     pub fn record_circular_family(
         &mut self,
         module: &BipersistenceModule,
@@ -194,36 +195,38 @@ pub(super) fn circular_family_claim(
     params: CircularCoordinateParams,
     limits: BipersistenceArtifactLimits,
 ) -> Result<ArtifactCircularFamily> {
+    validate_circular_iteration_limit(params.max_iterations, limits)?;
     let family = module.circular_coordinate_family(atlas, params)?;
     let entries = family
         .entries
         .into_iter()
         .map(|entry| {
-            let coordinate = entry
-                .coordinate
-                .as_ref()
-                .map(|coordinate| {
-                    CircularCoordinateArtifact::from_coordinate(
+            let status = match entry.status {
+                CircularCoordinateFamilyStatus::NotAttempted => {
+                    ArtifactCircularStatus::NotAttempted
+                }
+                CircularCoordinateFamilyStatus::LiftFailed => ArtifactCircularStatus::LiftFailed,
+                CircularCoordinateFamilyStatus::SolveFailed => ArtifactCircularStatus::SolveFailed,
+                CircularCoordinateFamilyStatus::Success(coordinate) => {
+                    let coordinate = CircularCoordinateArtifact::from_coordinate(
                         module.h1_graph(entry.grade)?,
-                        coordinate,
+                        &coordinate,
                     )?
                     .encode()
-                    .map_err(|error| Error::InvalidInput(error.to_string()))
-                })
-                .transpose()?;
-            if coordinate
-                .as_ref()
-                .is_some_and(|bytes| bytes.len() > limits.max_coordinate_bytes)
-            {
-                return Err(Error::InvalidInput(format!(
-                    "nested circular coordinate exceeds the limit {}",
-                    limits.max_coordinate_bytes
-                )));
-            }
+                    .map_err(|error| Error::InvalidInput(error.to_string()))?;
+                    if coordinate.len() > limits.max_coordinate_bytes {
+                        return Err(Error::InvalidInput(format!(
+                            "nested circular coordinate exceeds the limit {}",
+                            limits.max_coordinate_bytes
+                        )));
+                    }
+                    ArtifactCircularStatus::Success(coordinate)
+                }
+            };
             Ok(ArtifactCircularEntry {
                 grade: entry.grade,
                 extension: entry.extension,
-                coordinate,
+                status,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -234,4 +237,22 @@ pub(super) fn circular_family_claim(
         max_iterations: params.max_iterations,
         entries,
     })
+}
+
+pub(super) fn validate_circular_iteration_limit(
+    max_iterations: usize,
+    limits: BipersistenceArtifactLimits,
+) -> Result<()> {
+    if max_iterations == 0 {
+        return Err(Error::InvalidInput(
+            "circular maximum iteration count must be positive".into(),
+        ));
+    }
+    if max_iterations > limits.max_circular_iterations {
+        return Err(Error::InvalidInput(format!(
+            "circular maximum iteration count exceeds the artifact limit {}",
+            limits.max_circular_iterations
+        )));
+    }
+    Ok(())
 }

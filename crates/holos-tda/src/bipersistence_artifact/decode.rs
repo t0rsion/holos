@@ -5,7 +5,8 @@ use crate::{
 };
 
 use super::super::model::{
-    ArtifactCircularEntry, ArtifactCircularFamily, ArtifactEdge, BipersistenceArtifact,
+    ArtifactCircularEntry, ArtifactCircularFamily, ArtifactCircularStatus, ArtifactEdge,
+    BipersistenceArtifact,
 };
 use super::super::{
     BipersistenceArtifactLimits, BipersistenceRectangleClaim, BipersistenceRegionClaim,
@@ -62,7 +63,7 @@ pub(super) fn decode_artifact(
         digest,
     };
     artifact.verify(limits)?;
-    if artifact.encode(limits)? != bytes {
+    if artifact.encode_after_verification(limits)? != bytes {
         return Err(Error::InvalidInput(
             "bipersistence artifact encoding is not canonical".into(),
         ));
@@ -284,48 +285,86 @@ fn decode_circular_families(
 ) -> Result<Vec<ArtifactCircularFamily>> {
     let count = reader.bounded_usize("circular-family count", limits.max_circular_families)?;
     (0..count)
-        .map(|_| {
-            let base_grade = decode_grade(reader)?;
-            let base_class = decode_terms(reader, limits.module.max_total_rank)?;
-            let tolerance_bits = reader.u64()?;
-            let max_iterations = reader.usize()?;
-            let entry_count =
-                reader.bounded_usize("circular-family entry count", limits.module.max_nodes)?;
-            let entries = (0..entry_count)
-                .map(|_| {
-                    let grade = decode_grade(reader)?;
-                    let extension = decode_kind(reader.u8()?)?;
-                    let coordinate = match reader.u8()? {
-                        0 => None,
-                        1 => {
-                            let count = reader.bounded_usize(
-                                "nested circular coordinate byte count",
-                                limits.max_coordinate_bytes,
-                            )?;
-                            Some(reader.take(count)?.to_vec())
-                        }
-                        _ => {
-                            return Err(Error::InvalidInput(
-                                "invalid nested circular coordinate flag".into(),
-                            ));
-                        }
-                    };
-                    Ok(ArtifactCircularEntry {
-                        grade,
-                        extension,
-                        coordinate,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            Ok(ArtifactCircularFamily {
-                base_grade,
-                base_class,
-                tolerance_bits,
-                max_iterations,
-                entries,
-            })
-        })
+        .map(|_| decode_circular_family(reader, limits))
         .collect()
+}
+
+fn decode_circular_family(
+    reader: &mut Reader<'_>,
+    limits: BipersistenceArtifactLimits,
+) -> Result<ArtifactCircularFamily> {
+    let base_grade = decode_grade(reader)?;
+    let base_class = decode_terms(reader, limits.module.max_total_rank)?;
+    let tolerance_bits = reader.u64()?;
+    let max_iterations = reader.bounded_usize(
+        "circular-family iteration count",
+        limits.max_circular_iterations,
+    )?;
+    if max_iterations == 0 {
+        return Err(Error::InvalidInput(
+            "circular-family iteration count is zero".into(),
+        ));
+    }
+    let entries = decode_circular_entries(reader, limits)?;
+    Ok(ArtifactCircularFamily {
+        base_grade,
+        base_class,
+        tolerance_bits,
+        max_iterations,
+        entries,
+    })
+}
+
+fn decode_circular_entries(
+    reader: &mut Reader<'_>,
+    limits: BipersistenceArtifactLimits,
+) -> Result<Vec<ArtifactCircularEntry>> {
+    let count = reader.bounded_usize("circular-family entry count", limits.module.max_nodes)?;
+    (0..count)
+        .map(|_| decode_circular_entry(reader, limits))
+        .collect()
+}
+
+fn decode_circular_entry(
+    reader: &mut Reader<'_>,
+    limits: BipersistenceArtifactLimits,
+) -> Result<ArtifactCircularEntry> {
+    Ok(ArtifactCircularEntry {
+        grade: decode_grade(reader)?,
+        extension: decode_kind(reader.u8()?)?,
+        status: decode_circular_status(reader, limits)?,
+    })
+}
+
+fn decode_circular_status(
+    reader: &mut Reader<'_>,
+    limits: BipersistenceArtifactLimits,
+) -> Result<ArtifactCircularStatus> {
+    match reader.u8()? {
+        0 => Ok(ArtifactCircularStatus::NotAttempted),
+        1 => Ok(ArtifactCircularStatus::LiftFailed),
+        2 => Ok(ArtifactCircularStatus::SolveFailed),
+        3 => decode_successful_circular_status(reader, limits),
+        _ => Err(Error::InvalidInput("invalid circular-family status".into())),
+    }
+}
+
+fn decode_successful_circular_status(
+    reader: &mut Reader<'_>,
+    limits: BipersistenceArtifactLimits,
+) -> Result<ArtifactCircularStatus> {
+    let count = reader.bounded_usize(
+        "nested circular coordinate byte count",
+        limits.max_coordinate_bytes,
+    )?;
+    if count == 0 {
+        return Err(Error::InvalidInput(
+            "successful circular status has no coordinate".into(),
+        ));
+    }
+    Ok(ArtifactCircularStatus::Success(
+        reader.take(count)?.to_vec(),
+    ))
 }
 
 fn decode_extension(

@@ -177,6 +177,28 @@ pub struct ProgramEvaluation {
     pub work: ProgramWork,
 }
 
+/// How a diagram-only state produced an updated diagram.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramDiagramUpdateMode {
+    /// Existing checked regions produced the updated diagram.
+    Reused,
+    /// A complete compositional program was compiled as the exact fallback.
+    Recompiled,
+}
+
+/// Result of advancing a diagram-only program state.
+#[derive(Debug, Clone)]
+pub struct ProgramDiagramUpdate {
+    /// Exact H0 and H1 diagram at the new input.
+    pub diagram: Diagram,
+    /// How the diagram was produced.
+    pub mode: ProgramDiagramUpdateMode,
+    /// Topology or region events encountered during the update.
+    pub events: Vec<ProgramEvent>,
+    /// Exact work charged to the update.
+    pub work: ProgramWork,
+}
+
 /// Result of advancing a persistence program.
 #[derive(Debug, Clone)]
 pub struct ProgramUpdate {
@@ -229,6 +251,15 @@ pub struct ProgramBranch {
     /// Exact update from the shared branch point.
     pub update: ProgramUpdate,
     pub(super) program: PersistenceProgram,
+}
+
+/// Stateful diagram evaluation with lazy materialization of class spaces.
+#[derive(Debug, Clone)]
+pub struct ProgramDiagramState {
+    pub(super) program: PersistenceProgram,
+    pub(super) graph: SparseDistanceMatrix,
+    pub(super) diagram: Diagram,
+    pub(super) dirty: bool,
 }
 
 impl ProgramBranch {

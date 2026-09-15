@@ -94,28 +94,24 @@ struct SeparatorSearch<'a> {
 
 impl SeparatorSearch<'_> {
     fn refine(&mut self, block: ProgramBlock, output: &mut Vec<ProgramBlock>) {
-        if !self.complete || block.edges.len() < block.vertices.len() {
-            output.push(block);
-            return;
-        }
-        let Some((separator, components)) = self.find(&block) else {
-            output.push(block);
-            return;
-        };
-        self.separators += 1;
-        self.widest = self.widest.max(separator.len());
-        for component in components {
-            let mut vertices = separator.clone();
-            vertices.extend(component);
-            vertices.sort_unstable();
-            let members: BTreeSet<_> = vertices.iter().copied().collect();
-            let edges = block
-                .edges
-                .iter()
-                .copied()
-                .filter(|[u, v]| members.contains(u) && members.contains(v))
-                .collect();
-            self.refine(ProgramBlock { vertices, edges }, output);
+        let mut pending = vec![block];
+        while let Some(block) = pending.pop() {
+            if !self.complete || block.edges.len() < block.vertices.len() {
+                output.push(block);
+                continue;
+            }
+            let Some((separator, components)) = self.find(&block) else {
+                output.push(block);
+                continue;
+            };
+            self.separators += 1;
+            self.widest = self.widest.max(separator.len());
+            pending.extend(
+                components
+                    .into_iter()
+                    .rev()
+                    .map(|component| child_block(&block, &separator, component)),
+            );
         }
     }
 
@@ -157,6 +153,20 @@ impl SeparatorSearch<'_> {
         }
         true
     }
+}
+
+fn child_block(block: &ProgramBlock, separator: &[usize], component: Vec<usize>) -> ProgramBlock {
+    let mut vertices = separator.to_vec();
+    vertices.extend(component);
+    vertices.sort_unstable();
+    let members: BTreeSet<_> = vertices.iter().copied().collect();
+    let edges = block
+        .edges
+        .iter()
+        .copied()
+        .filter(|[u, v]| members.contains(u) && members.contains(v))
+        .collect();
+    ProgramBlock { vertices, edges }
 }
 
 fn components_without(block: &ProgramBlock, separator: &[usize]) -> Vec<Vec<usize>> {

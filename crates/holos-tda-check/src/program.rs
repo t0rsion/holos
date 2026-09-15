@@ -2,6 +2,7 @@
 
 mod atlas_wire;
 mod claim;
+mod class_replay;
 mod class_verify;
 mod graph;
 mod model;
@@ -21,6 +22,11 @@ mod trace_wire;
 mod trace_wire_records;
 mod verify;
 mod wire;
+
+#[allow(unused_imports)]
+pub(crate) use class_replay::{
+    RawPairSeed, ReplayCocycleTerm, ReplayGroup, ReplayPair, ReplayResult, replay_h1,
+};
 
 #[cfg(test)]
 mod tests;

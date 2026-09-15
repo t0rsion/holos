@@ -3,12 +3,13 @@
 use pyo3::prelude::*;
 
 use super::{
-    atlas, bipersistence, circular, coverage, index, persistence, point, program, proof,
-    proof_checks, synthesis, topology,
+    atlas, bipersistence, circular, coverage, index, persistence, persistent, point, program,
+    proof, proof_checks, synthesis, topology,
 };
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     register_persistence(module)?;
+    persistent::register(module)?;
     bipersistence::register(module)?;
     register_programs(module)?;
     register_proofs(module)?;

@@ -5,6 +5,7 @@ use crate::{Error, Result};
 
 use super::algebra::{nullspace, reduce_by_basis, rref};
 use super::digest::{class_id, space_id};
+use super::forest::forest_cocycles;
 use super::model::*;
 
 pub(crate) fn validate(
@@ -26,6 +27,7 @@ pub(crate) fn validate(
             limits.max_dimension
         )));
     }
+    checked_dimension_slots(dimension)?;
     if !scale.is_finite() || scale < 0.0 {
         return Err(Error::InvalidInput(
             "cohomology scale must be finite and non-negative".into(),
@@ -50,6 +52,14 @@ impl ActiveComplex {
         edges: &[(usize, usize)],
         limits: CohomologyLimits,
     ) -> Result<Self> {
+        let dimension_slots = checked_dimension_slots(max_dimension)?;
+        let dimension_count = dimension_slots - 1;
+        // Keep one slot for every dimension through the requested cofacet
+        // dimension before allocating the graph adjacency.
+        let mut dimensions = Vec::new();
+        dimensions.try_reserve_exact(dimension_slots).map_err(|_| {
+            Error::InvalidInput("cohomology dimension storage cannot be allocated".into())
+        })?;
         let mut adjacency = vec![Vec::new(); vertex_count];
         for &(u, v) in edges {
             adjacency[u].push(v);
@@ -64,33 +74,68 @@ impl ActiveComplex {
                 "cohomology vertex simplex count exceeds its limit".into(),
             ));
         }
-        let mut dimensions = vec![vertices];
-        for dimension in 1..=max_dimension + 1 {
-            let mut next = Vec::new();
-            for simplex in &dimensions[dimension - 1] {
-                let last = simplex.last().copied().unwrap_or(0);
-                let start = adjacency[last].partition_point(|&vertex| vertex <= last);
-                for &vertex in &adjacency[last][start..] {
-                    if simplex[..simplex.len() - 1]
-                        .iter()
-                        .all(|&member| adjacency[member].binary_search(&vertex).is_ok())
-                    {
-                        let mut cofacet = simplex.clone();
-                        cofacet.push(vertex);
-                        next.push(cofacet);
-                        if next.len() > limits.max_simplices_per_dimension {
-                            return Err(Error::InvalidInput(format!(
-                                "dimension {dimension} cohomology simplex count exceeds the limit {}",
-                                limits.max_simplices_per_dimension
-                            )));
-                        }
-                    }
-                }
-            }
-            dimensions.push(next);
-        }
+        dimensions.push(vertices);
+        extend_dimensions(
+            &mut dimensions,
+            dimension_count,
+            &adjacency,
+            limits.max_simplices_per_dimension,
+        )?;
         Ok(Self { dimensions })
     }
+}
+
+fn checked_dimension_slots(dimension: usize) -> Result<usize> {
+    dimension
+        .checked_add(2)
+        .ok_or_else(|| Error::InvalidInput("cohomology dimension metadata overflows".into()))
+}
+
+fn extend_dimensions(
+    dimensions: &mut Vec<Vec<Vec<usize>>>,
+    dimension_count: usize,
+    adjacency: &[Vec<usize>],
+    simplex_limit: usize,
+) -> Result<()> {
+    for dimension in 1..=dimension_count {
+        let next = extend_dimension(
+            &dimensions[dimension - 1],
+            adjacency,
+            dimension,
+            simplex_limit,
+        )?;
+        dimensions.push(next);
+    }
+    Ok(())
+}
+
+fn extend_dimension(
+    simplices: &[Vec<usize>],
+    adjacency: &[Vec<usize>],
+    dimension: usize,
+    simplex_limit: usize,
+) -> Result<Vec<Vec<usize>>> {
+    let mut next = Vec::new();
+    for simplex in simplices {
+        let last = simplex.last().copied().unwrap_or(0);
+        let start = adjacency[last].partition_point(|&vertex| vertex <= last);
+        for &vertex in &adjacency[last][start..] {
+            if simplex[..simplex.len() - 1]
+                .iter()
+                .all(|&member| adjacency[member].binary_search(&vertex).is_ok())
+            {
+                let mut cofacet = simplex.clone();
+                cofacet.push(vertex);
+                next.push(cofacet);
+                if next.len() > simplex_limit {
+                    return Err(Error::InvalidInput(format!(
+                        "dimension {dimension} cohomology simplex count exceeds the limit {simplex_limit}"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(next)
 }
 
 pub(crate) fn space_from_complex(
@@ -102,47 +147,59 @@ pub(crate) fn space_from_complex(
     active_graph_digest: [u8; 32],
     limits: CohomologyLimits,
 ) -> Result<CohomologySpace> {
-    let incidence_count = complex.dimensions[dimension]
-        .len()
-        .checked_mul(dimension + 1)
-        .and_then(|count| {
-            complex.dimensions[dimension + 1]
-                .len()
-                .checked_mul(dimension + 2)
-                .and_then(|next| count.checked_add(next))
-        })
-        .ok_or_else(|| Error::InvalidInput("cohomology incidence count overflows".into()))?;
-    if incidence_count > limits.max_boundary_terms {
-        return Err(Error::InvalidInput(format!(
-            "cohomology incidence count exceeds the limit {}",
-            limits.max_boundary_terms
-        )));
-    }
+    space_from_complex_with_method::<true>(
+        complex,
+        vertex_count,
+        dimension,
+        scale,
+        modulus,
+        active_graph_digest,
+        limits,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn space_from_complex_nullspace(
+    complex: ActiveComplex,
+    vertex_count: usize,
+    dimension: usize,
+    scale: f64,
+    modulus: u32,
+    active_graph_digest: [u8; 32],
+    limits: CohomologyLimits,
+) -> Result<CohomologySpace> {
+    space_from_complex_with_method::<false>(
+        complex,
+        vertex_count,
+        dimension,
+        scale,
+        modulus,
+        active_graph_digest,
+        limits,
+    )
+}
+
+fn space_from_complex_with_method<const FOREST_GAUGE: bool>(
+    complex: ActiveComplex,
+    vertex_count: usize,
+    dimension: usize,
+    scale: f64,
+    modulus: u32,
+    active_graph_digest: [u8; 32],
+    limits: CohomologyLimits,
+) -> Result<CohomologySpace> {
+    check_incidence_budget(&complex, dimension, limits.max_boundary_terms)?;
     let modulus64 = modulus as u64;
     let q_simplices = &complex.dimensions[dimension];
-    let q_positions: BTreeMap<_, _> = q_simplices
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(position, simplex)| (simplex, position))
-        .collect();
-    let cocycle_equations =
-        coboundary_equations(&complex.dimensions[dimension + 1], &q_positions, modulus64)?;
-    let cocycles = nullspace(cocycle_equations, q_simplices.len(), modulus64);
+    let cocycles =
+        cocycle_vectors::<FOREST_GAUGE>(&complex, vertex_count, dimension, q_simplices, modulus64)?;
     let coboundaries = if dimension == 0 {
         Vec::new()
     } else {
         coboundary_image(&complex.dimensions[dimension - 1], q_simplices, modulus64)?
     };
     let coboundaries = rref(coboundaries, modulus64);
-    let mut quotient = Vec::new();
-    for mut cocycle in cocycles {
-        reduce_by_basis(&mut cocycle, &coboundaries, modulus64);
-        if !cocycle.is_zero() {
-            quotient.push(cocycle);
-        }
-    }
-    let basis_vectors = rref(quotient, modulus64);
+    let basis_vectors = quotient_basis(cocycles, &coboundaries, modulus64);
     let simplex_counts = complex.dimensions.iter().map(Vec::len).collect::<Vec<_>>();
     let id = space_id(
         vertex_count,
@@ -153,7 +210,92 @@ pub(crate) fn space_from_complex(
         q_simplices,
         &basis_vectors,
     );
-    let basis = basis_vectors
+    let basis = canonical_classes(id, q_simplices, &basis_vectors);
+    Ok(CohomologySpace {
+        id,
+        vertex_count,
+        dimension,
+        scale,
+        modulus,
+        active_graph_digest,
+        simplex_counts,
+        simplices: q_simplices.clone(),
+        coboundaries,
+        basis_vectors,
+        basis,
+    })
+}
+
+fn check_incidence_budget(
+    complex: &ActiveComplex,
+    dimension: usize,
+    max_boundary_terms: usize,
+) -> Result<()> {
+    let incidence_count = complex.dimensions[dimension]
+        .len()
+        .checked_mul(dimension + 1)
+        .and_then(|count| {
+            complex.dimensions[dimension + 1]
+                .len()
+                .checked_mul(dimension + 2)
+                .and_then(|next| count.checked_add(next))
+        })
+        .ok_or_else(|| Error::InvalidInput("cohomology incidence count overflows".into()))?;
+    if incidence_count > max_boundary_terms {
+        return Err(Error::InvalidInput(format!(
+            "cohomology incidence count exceeds the limit {max_boundary_terms}"
+        )));
+    }
+    Ok(())
+}
+
+fn cocycle_vectors<const FOREST_GAUGE: bool>(
+    complex: &ActiveComplex,
+    vertex_count: usize,
+    dimension: usize,
+    q_simplices: &[Vec<usize>],
+    modulus: u64,
+) -> Result<Vec<SparseVector>> {
+    if FOREST_GAUGE && dimension == 1 {
+        return forest_cocycles(
+            vertex_count,
+            q_simplices,
+            &complex.dimensions[dimension + 1],
+            modulus,
+        );
+    }
+    let q_positions: BTreeMap<_, _> = q_simplices
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(position, simplex)| (simplex, position))
+        .collect();
+    let cocycle_equations =
+        coboundary_equations(&complex.dimensions[dimension + 1], &q_positions, modulus)?;
+    Ok(nullspace(cocycle_equations, q_simplices.len(), modulus))
+}
+
+fn quotient_basis(
+    cocycles: Vec<SparseVector>,
+    coboundaries: &[SparseVector],
+    modulus: u64,
+) -> Vec<SparseVector> {
+    let mut quotient = Vec::new();
+    for mut cocycle in cocycles {
+        reduce_by_basis(&mut cocycle, coboundaries, modulus);
+        if !cocycle.is_zero() {
+            quotient.push(cocycle);
+        }
+    }
+    rref(quotient, modulus)
+}
+
+fn canonical_classes(
+    id: CohomologySpaceId,
+    q_simplices: &[Vec<usize>],
+    basis_vectors: &[SparseVector],
+) -> Vec<CohomologyClass> {
+    basis_vectors
         .iter()
         .enumerate()
         .map(|(basis_index, vector)| CohomologyClass {
@@ -168,20 +310,7 @@ pub(crate) fn space_from_complex(
                 })
                 .collect(),
         })
-        .collect();
-    Ok(CohomologySpace {
-        id,
-        vertex_count,
-        dimension,
-        scale,
-        modulus,
-        active_graph_digest,
-        simplex_counts,
-        simplices: q_simplices.clone(),
-        coboundaries,
-        basis_vectors,
-        basis,
-    })
+        .collect()
 }
 
 pub(crate) fn coboundary_equations(

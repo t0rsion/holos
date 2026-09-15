@@ -178,26 +178,22 @@ struct SeparatorSearch<'a> {
 
 impl SeparatorSearch<'_> {
     fn refine(&mut self, block: Block, output: &mut Vec<Block>) {
-        if !self.complete || block.edges.len() < block.vertices.len() {
-            output.push(block);
-            return;
-        }
-        let Some((separator, components)) = self.find(&block) else {
-            output.push(block);
-            return;
-        };
-        for component in components {
-            let mut vertices = separator.clone();
-            vertices.extend(component);
-            vertices.sort_unstable();
-            let members: BTreeSet<_> = vertices.iter().copied().collect();
-            let edges = block
-                .edges
-                .iter()
-                .copied()
-                .filter(|[u, v]| members.contains(u) && members.contains(v))
-                .collect();
-            self.refine(Block { vertices, edges }, output);
+        let mut pending = vec![block];
+        while let Some(block) = pending.pop() {
+            if !self.complete || block.edges.len() < block.vertices.len() {
+                output.push(block);
+                continue;
+            }
+            let Some((separator, components)) = self.find(&block) else {
+                output.push(block);
+                continue;
+            };
+            pending.extend(
+                components
+                    .into_iter()
+                    .rev()
+                    .map(|component| child_block(&block, &separator, component)),
+            );
         }
     }
 
@@ -228,6 +224,20 @@ impl SeparatorSearch<'_> {
         }
         None
     }
+}
+
+fn child_block(block: &Block, separator: &[usize], component: Vec<usize>) -> Block {
+    let mut vertices = separator.to_vec();
+    vertices.extend(component);
+    vertices.sort_unstable();
+    let members: BTreeSet<_> = vertices.iter().copied().collect();
+    let edges = block
+        .edges
+        .iter()
+        .copied()
+        .filter(|[u, v]| members.contains(u) && members.contains(v))
+        .collect();
+    Block { vertices, edges }
 }
 
 fn zero_simplex(graph: &Graph, vertices: &[usize]) -> bool {
@@ -293,4 +303,76 @@ fn next_combination(positions: &mut [usize], universe: usize) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Graph, program_blocks};
+    use crate::ProofEdge;
+
+    fn nested_graph(depth: usize) -> Graph {
+        let last = depth + 2;
+        let mut edges = Vec::with_capacity(2 * depth + 3);
+        edges.push(ProofEdge {
+            u: 0,
+            v: 1,
+            value: 0.0,
+        });
+        for index in 0..depth {
+            let vertex = index + 2;
+            let previous = if index == 0 { 1 } else { vertex - 1 };
+            edges.push(ProofEdge {
+                u: 0,
+                v: vertex,
+                value: 0.0,
+            });
+            edges.push(ProofEdge {
+                u: previous,
+                v: vertex,
+                value: 1.0,
+            });
+        }
+        edges.push(ProofEdge {
+            u: 0,
+            v: last,
+            value: 0.0,
+        });
+        edges.push(ProofEdge {
+            u: 1,
+            v: last,
+            value: 1.0,
+        });
+        Graph::new(last + 1, &edges).unwrap()
+    }
+
+    #[test]
+    fn nested_separator_refinement_matches_exact_blocks() {
+        let blocks = program_blocks(&nested_graph(3), None).unwrap();
+        let blocks: Vec<_> = blocks
+            .into_iter()
+            .map(|block| (block.vertices, block.edges))
+            .collect();
+        assert_eq!(
+            blocks,
+            vec![
+                (vec![0, 1, 2], vec![[0, 1], [0, 2], [1, 2]],),
+                (vec![0, 1, 5], vec![[0, 1], [0, 5], [1, 5]],),
+                (vec![0, 2, 3], vec![[0, 2], [0, 3], [2, 3]],),
+                (vec![0, 3, 4], vec![[0, 3], [0, 4], [3, 4]],),
+            ]
+        );
+    }
+
+    #[test]
+    fn deeply_nested_separator_refinement_uses_heap_stack() {
+        const DEPTH: usize = 1024;
+        let blocks = program_blocks(&nested_graph(DEPTH), None).unwrap();
+
+        assert_eq!(blocks.len(), DEPTH + 1);
+        assert!(
+            blocks
+                .iter()
+                .all(|block| block.vertices.len() == 3 && block.edges.len() == 3)
+        );
+    }
 }

@@ -20,6 +20,8 @@ pub struct BipersistenceArtifactLimits {
     pub max_class_atlases: usize,
     /// Largest stored circular-family count.
     pub max_circular_families: usize,
+    /// Largest producer iteration bound carried by a circular family.
+    pub max_circular_iterations: usize,
     /// Largest nested `HOLOSCC` coordinate byte count.
     pub max_coordinate_bytes: usize,
     /// Limits for degree-Rips reconstruction.
@@ -37,6 +39,7 @@ impl Default for BipersistenceArtifactLimits {
             max_regions: 1_000_000,
             max_class_atlases: 1_000_000,
             max_circular_families: 1_000_000,
+            max_circular_iterations: 10_000_000,
             max_coordinate_bytes: 1 << 30,
             bifiltration: BifiltrationLimits::default(),
             module: BipersistenceLimits::default(),
@@ -94,7 +97,15 @@ pub(super) struct ArtifactEdge {
 pub(super) struct ArtifactCircularEntry {
     pub(super) grade: Bigrade,
     pub(super) extension: ClassExtensionKind,
-    pub(super) coordinate: Option<Vec<u8>>,
+    pub(super) status: ArtifactCircularStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ArtifactCircularStatus {
+    NotAttempted,
+    LiftFailed,
+    SolveFailed,
+    Success(Vec<u8>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -4,8 +4,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rustc_hash::FxHashMap;
 
-use crate::{Diagram, RipsParams, SparseDistanceMatrix, rips_persistence_sparse};
+use crate::{
+    Cocycle, CriticalPair, Diagram, RipsParams, SparseDistanceMatrix, rips_persistence_sparse,
+};
 
+use super::cycles::{CheckedWitnessParts, CycleWitness};
 use super::model::{
     CertificateError, CertificateLimits, CertificateResult, CertifiedReductionRegion, ChangeColumn,
     FiltrationSimplex, ReductionCertificate, ReductionRepair, ReductionRepairMode,
@@ -17,8 +20,8 @@ use super::reduction::{
 };
 use super::region::{region_value_formula, simplex_rank};
 use super::verify::{
-    add_change_guards, add_pivot_guards, check_reductions, checked_threshold, diagram_bits_equal,
-    graph_digest, minimize_guards, validate_header,
+    CheckedReductions, add_change_guards, add_pivot_guards, check_reductions, checked_threshold,
+    diagram_bits_equal, graph_digest, minimize_guards, validate_header,
 };
 
 fn build_checked_reductions(
@@ -26,13 +29,18 @@ fn build_checked_reductions(
     modulus: u32,
     threshold: f64,
     limits: CertificateLimits,
-) -> CertificateResult<(Vec<ChangeColumn>, Vec<ChangeColumn>, Diagram)> {
+) -> CertificateResult<(
+    FilteredComplex,
+    Vec<ChangeColumn>,
+    Vec<ChangeColumn>,
+    CheckedReductions,
+)> {
     let complex = FilteredComplex::build(input, threshold, limits)?;
     let edge_columns = reduce_with_basis(&complex.edge_boundaries(modulus), modulus, limits)?;
     let triangle_columns =
         reduce_with_basis(&complex.triangle_boundaries(modulus), modulus, limits)?;
     let checked = check_reductions(&complex, modulus, &edge_columns, &triangle_columns, limits)?;
-    Ok((edge_columns, triangle_columns, checked.diagram))
+    Ok((complex, edge_columns, triangle_columns, checked))
 }
 
 fn check_compute_diagram(
@@ -138,6 +146,28 @@ fn repair_mode(work: ReductionRepairWork) -> ReductionRepairMode {
     }
 }
 impl ReductionCertificate {
+    fn build_parts(
+        input: &SparseDistanceMatrix,
+        params: &RipsParams,
+        limits: CertificateLimits,
+    ) -> CertificateResult<(Self, FilteredComplex, CheckedReductions)> {
+        validate_header(input, params.max_dim, params.modulus, limits)?;
+        let threshold = checked_threshold(params.threshold)?;
+        let (complex, edge_columns, triangle_columns, checked) =
+            build_checked_reductions(input, params.modulus, threshold, limits)?;
+        check_compute_diagram(input, params, &checked.diagram)?;
+        let certificate = Self {
+            vertex_count: input.len(),
+            threshold: params.threshold,
+            modulus: params.modulus,
+            graph_digest: graph_digest(input, threshold),
+            edge_columns,
+            triangle_columns,
+            diagram: checked.diagram.clone(),
+        };
+        Ok((certificate, complex, checked))
+    }
+
     /// Produce an exact H0 and H1 reduction certificate.
     ///
     /// The producer uses an explicit reference reduction. It is separate
@@ -148,20 +178,28 @@ impl ReductionCertificate {
         params: &RipsParams,
         limits: CertificateLimits,
     ) -> std::result::Result<Self, CertificateError> {
-        validate_header(input, params.max_dim, params.modulus, limits)?;
-        let threshold = checked_threshold(params.threshold)?;
-        let (edge_columns, triangle_columns, diagram) =
-            build_checked_reductions(input, params.modulus, threshold, limits)?;
-        check_compute_diagram(input, params, &diagram)?;
-        Ok(Self {
-            vertex_count: input.len(),
-            threshold: params.threshold,
-            modulus: params.modulus,
-            graph_digest: graph_digest(input, threshold),
-            edge_columns,
-            triangle_columns,
-            diagram,
-        })
+        let (certificate, _, _) = Self::build_parts(input, params, limits)?;
+        Ok(certificate)
+    }
+
+    pub(crate) fn build_cycle_witness(
+        input: &SparseDistanceMatrix,
+        params: &RipsParams,
+        critical_pairs: &[CriticalPair],
+        selected: &Cocycle,
+        limits: CertificateLimits,
+    ) -> CertificateResult<CycleWitness> {
+        let (certificate, complex, checked) = Self::build_parts(input, params, limits)?;
+        let parts = CheckedWitnessParts::new(&certificate, &complex, &checked);
+        super::cycles::cycle_witness_from_checked(
+            parts,
+            input,
+            params.threshold.unwrap_or(f64::INFINITY),
+            params.modulus,
+            critical_pairs,
+            selected,
+            limits,
+        )
     }
 
     /// Adapt this checked reduction to new weights on the same listed graph.

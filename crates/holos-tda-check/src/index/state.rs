@@ -28,11 +28,7 @@ impl IndexProofState {
         limits: ProofLimits,
     ) -> Result<(Self, VerifiedIndexSnapshot), ProofError> {
         let snapshot = decode_snapshot(bytes, limits)?;
-        let nodes: BTreeMap<_, _> = snapshot
-            .nodes
-            .into_iter()
-            .map(|node| (node.digest, node))
-            .collect();
+        let nodes = index_nodes(snapshot.nodes)?;
         let state = Self {
             max_dim: snapshot.max_dim,
             modulus: snapshot.modulus,
@@ -150,11 +146,22 @@ impl IndexProofState {
         limits: ProofLimits,
         counts: &mut CheckCounts,
     ) -> Result<(), ProofError> {
-        let node = self.enter_subtree(digest, checked, visiting, parent)?;
-        for &child in &node.children {
-            self.verify_subtree(child, checked, visiting, Some(digest), limits, counts)?;
+        let mut stack = vec![(digest, parent, false)];
+        while let Some((digest, parent, finishing)) = stack.pop() {
+            if finishing {
+                let node = self.nodes.get(&digest).ok_or_else(|| {
+                    ProofError::new("snapshot references an unknown interface node")
+                })?;
+                self.finish_subtree(digest, node, checked, visiting, limits, counts)?;
+                continue;
+            }
+            let node = self.enter_subtree(digest, checked, visiting, parent)?;
+            stack.push((digest, parent, true));
+            for &child in node.children.iter().rev() {
+                stack.push((child, Some(digest), false));
+            }
         }
-        self.finish_subtree(digest, node, checked, visiting, limits, counts)
+        Ok(())
     }
 
     fn enter_subtree<'a>(
@@ -417,15 +424,31 @@ impl IndexProofState {
         supplied: &BTreeSet<[u8; 32]>,
         reached: &mut BTreeSet<[u8; 32]>,
     ) -> Result<(), ProofError> {
-        if !supplied.contains(&digest) || !reached.insert(digest) {
-            return Ok(());
-        }
-        let node = self
-            .nodes
-            .get(&digest)
-            .ok_or_else(|| ProofError::new("delta references an unknown interface node"))?;
-        for &child in &node.children {
-            self.collect_new_reachable(child, supplied, reached)?;
+        let mut stack = vec![(digest, false)];
+        let mut visiting = BTreeSet::new();
+        while let Some((digest, finishing)) = stack.pop() {
+            if !supplied.contains(&digest) {
+                continue;
+            }
+            if finishing {
+                visiting.remove(&digest);
+                continue;
+            }
+            if !visiting.insert(digest) {
+                return Err(ProofError::new("delta interface paths contain a cycle"));
+            }
+            if !reached.insert(digest) {
+                visiting.remove(&digest);
+                continue;
+            }
+            let node = self
+                .nodes
+                .get(&digest)
+                .ok_or_else(|| ProofError::new("delta references an unknown interface node"))?;
+            stack.push((digest, true));
+            for &child in node.children.iter().rev() {
+                stack.push((child, false));
+            }
         }
         Ok(())
     }
@@ -436,18 +459,129 @@ impl IndexProofState {
         edge_position: usize,
         supplied: &BTreeSet<[u8; 32]>,
     ) -> Result<(), ProofError> {
-        let node = &self.nodes[&digest];
-        if node.edge_positions.binary_search(&edge_position).is_err() {
-            return Ok(());
-        }
-        if !supplied.contains(&digest) {
-            return Err(ProofError::new(
-                "delta reuses an interface whose edge value changed",
-            ));
-        }
-        for &child in &node.children {
-            self.require_changed_path(child, edge_position, supplied)?;
+        let mut stack = vec![(digest, false)];
+        let mut visiting = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        while let Some((digest, finishing)) = stack.pop() {
+            if finishing {
+                visiting.remove(&digest);
+                visited.insert(digest);
+                continue;
+            }
+            if visited.contains(&digest) {
+                continue;
+            }
+            if !visiting.insert(digest) {
+                return Err(ProofError::new("delta changed paths contain a cycle"));
+            }
+            let node = self
+                .nodes
+                .get(&digest)
+                .ok_or_else(|| ProofError::new("delta references an unknown interface node"))?;
+            if node.edge_positions.binary_search(&edge_position).is_err() {
+                visiting.remove(&digest);
+                continue;
+            }
+            if !supplied.contains(&digest) {
+                return Err(ProofError::new(
+                    "delta reuses an interface whose edge value changed",
+                ));
+            }
+            stack.push((digest, true));
+            for &child in node.children.iter().rev() {
+                stack.push((child, false));
+            }
         }
         Ok(())
+    }
+}
+
+fn index_nodes(
+    nodes: Vec<InterfaceProof>,
+) -> Result<BTreeMap<[u8; 32], InterfaceProof>, ProofError> {
+    let count = nodes.len();
+    let indexed: BTreeMap<_, _> = nodes.into_iter().map(|node| (node.digest, node)).collect();
+    if indexed.len() != count {
+        return Err(ProofError::new("snapshot repeats an interface-node digest"));
+    }
+    Ok(indexed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Graph;
+
+    fn node(
+        digest: [u8; 32],
+        children: Vec<[u8; 32]>,
+        edge_positions: Vec<usize>,
+    ) -> InterfaceProof {
+        InterfaceProof {
+            digest,
+            vertices: vec![0],
+            edge_positions,
+            separator: Vec::new(),
+            protected_vertices: Vec::new(),
+            children,
+            mode: InterfaceMode::Materialized,
+            graded_columns: vec![Vec::new()],
+            relative_artifact: Vec::new(),
+            diagram: Vec::new(),
+        }
+    }
+
+    fn state(nodes: Vec<InterfaceProof>) -> IndexProofState {
+        IndexProofState {
+            max_dim: 0,
+            modulus: 2,
+            threshold: None,
+            graph: Graph::new(1, &[]).unwrap(),
+            nodes: nodes.into_iter().map(|node| (node.digest, node)).collect(),
+            root: [0; 32],
+            diagram: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn duplicate_snapshot_digests_are_rejected_before_indexing() {
+        let first = node([1; 32], Vec::new(), Vec::new());
+        let error = index_nodes(vec![first.clone(), first]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("repeats an interface-node digest")
+        );
+    }
+
+    #[test]
+    fn delta_reachability_rejects_cycles_without_recursion() {
+        let a = [1; 32];
+        let b = [2; 32];
+        let state = state(vec![node(a, vec![b], vec![0]), node(b, vec![a], vec![0])]);
+        let supplied = BTreeSet::from([a, b]);
+        let mut reached = BTreeSet::new();
+        let error = state
+            .collect_new_reachable(a, &supplied, &mut reached)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("delta interface paths contain a cycle")
+        );
+    }
+
+    #[test]
+    fn changed_path_rejects_cycles_without_recursion() {
+        let a = [1; 32];
+        let b = [2; 32];
+        let state = state(vec![node(a, vec![b], vec![0]), node(b, vec![a], vec![0])]);
+        let supplied = BTreeSet::from([a, b]);
+        let error = state.require_changed_path(a, 0, &supplied).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("delta changed paths contain a cycle")
+        );
     }
 }

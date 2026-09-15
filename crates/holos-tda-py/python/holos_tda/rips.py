@@ -135,7 +135,8 @@ def rips_points_classes(
     ``id``, ``basis_index``, ``birth``, ``death``, ``essential``, ``modulus``,
     ``scale``, ``terms``, and source ``provenance``. Equal intervals share one
     ``group_id``. A finite class is represented immediately below its death.
-    Circular class bindings require an odd-prime ``modulus``, such as 47.
+    Automatic circular lifting requires an odd-prime ``modulus``, such as 47.
+    A supplied lift supports modulus two when continuation is not requested.
     """
     raw = _core.rips_points_classes(
         _points(points),
@@ -166,7 +167,8 @@ def rips_condensed_classes(
 ):
     """Compute source-bound H1 cocycles from condensed distances.
 
-    Circular class bindings require an odd-prime ``modulus``, such as 47.
+    Automatic circular lifting requires an odd-prime ``modulus``, such as 47.
+    A supplied lift supports modulus two when continuation is not requested.
     """
     raw = _core.rips_condensed_classes(
         _float_values(data),
@@ -198,7 +200,8 @@ def rips_sparse_classes(
 ):
     """Compute source-bound H1 cocycles from sparse distances.
 
-    Circular class bindings require an odd-prime ``modulus``, such as 47.
+    Automatic circular lifting requires an odd-prime ``modulus``, such as 47.
+    A supplied lift supports modulus two when continuation is not requested.
     """
     raw = _core.rips_sparse_classes(
         n,

@@ -3,6 +3,11 @@ mod model;
 mod verify;
 mod wire;
 
+pub(crate) use linear::{
+    check_integer_triangle_closure, check_reduction, component_roots, integral_divisibility,
+    relative_residual,
+};
+
 pub use model::{
     CircularProofLimits, VerifiedCircularContinuationKind, VerifiedCircularCoordinate,
 };
@@ -57,6 +62,11 @@ pub fn verify_circular_coordinate(
     })
 }
 
+/// Verify one fixed-scale coordinate and expose the fields used by a family.
+///
+/// `HOLOSCC` version 1 does not encode the producer's harmonic iteration
+/// count. Family verification therefore bounds the outer producer parameter,
+/// while this binding checks the nested coordinate's mathematical fields.
 pub(crate) fn verify_single_binding(
     bytes: &[u8],
     limits: CircularProofLimits,

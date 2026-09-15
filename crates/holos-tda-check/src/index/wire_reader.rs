@@ -58,7 +58,7 @@ impl<'a> Reader<'a> {
         }
         let threshold = self.optional_f64()?;
         checked_threshold(threshold)?;
-        let vertex_count = self.usize()?;
+        let vertex_count = self.bounded_usize("index vertex count", limits.max_vertices)?;
         if vertex_count == 0 {
             return Err(ProofError::new("index proof has no vertices"));
         }
@@ -73,6 +73,32 @@ impl<'a> Reader<'a> {
             )));
         }
         Ok(())
+    }
+
+    pub(super) fn require_remaining(&self, bytes: usize, label: &str) -> Result<(), ProofError> {
+        if bytes > self.remaining() {
+            return Err(ProofError::new(format!(
+                "{label} require {bytes} bytes, but only {} remain",
+                self.remaining()
+            )));
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_records(
+        &self,
+        count: usize,
+        record_bytes: usize,
+        label: &str,
+    ) -> Result<(), ProofError> {
+        let bytes = count
+            .checked_mul(record_bytes)
+            .ok_or_else(|| ProofError::new(format!("{label} byte count overflows usize")))?;
+        self.require_remaining(bytes, label)
+    }
+
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.position
     }
 
     pub(super) fn take(&mut self, count: usize) -> Result<&'a [u8], ProofError> {

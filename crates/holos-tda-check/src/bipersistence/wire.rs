@@ -4,7 +4,7 @@ use super::claims::*;
 use crate::{MODULUS_LIMIT, ProofError, Reader, is_prime};
 
 pub(super) const MAGIC: &[u8; 8] = b"HOLOSBP\0";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const F64_BITS_CODEC: u8 = 1;
 
 struct ClaimHeader {
@@ -148,7 +148,7 @@ fn verify_digest(bytes: &[u8], maximum: usize) -> Result<(), ProofError> {
     }
     let split = bytes.len() - 32;
     let mut hash = Sha256::new();
-    hash.update(b"holos-bipersistence-v1");
+    hash.update(b"holos-bipersistence-v2");
     hash.update(&bytes[..split]);
     let expected: [u8; 32] = hash.finalize().into();
     if bytes[split..] != expected {
@@ -419,25 +419,32 @@ fn decode_circular_entry(
     Ok(CircularEntryClaim {
         grade: decode_grade(reader)?,
         extension: decode_kind(reader.u8()?)?,
-        coordinate: decode_coordinate(reader, limits)?,
+        status: decode_status(reader, limits)?,
     })
 }
 
-fn decode_coordinate(
+fn decode_status(
     reader: &mut Reader<'_>,
     limits: BipersistenceProofLimits,
-) -> Result<Option<Vec<u8>>, ProofError> {
+) -> Result<CircularFamilyStatus, ProofError> {
     match reader.u8()? {
-        0 => Ok(None),
-        1 => {
+        0 => Ok(CircularFamilyStatus::NotAttempted),
+        1 => Ok(CircularFamilyStatus::LiftFailed),
+        2 => Ok(CircularFamilyStatus::SolveFailed),
+        3 => {
             let count = reader.bounded_usize(
                 "nested circular coordinate byte count",
                 limits.circular.proof.max_bytes,
             )?;
-            Ok(Some(reader.take(count)?.to_vec()))
+            if count == 0 {
+                return Err(ProofError::new(
+                    "successful circular status has no coordinate",
+                ));
+            }
+            Ok(CircularFamilyStatus::Success(reader.take(count)?.to_vec()))
         }
         _ => Err(ProofError::new(
-            "nested circular coordinate flag is invalid",
+            "bipersistence circular-family status is invalid",
         )),
     }
 }

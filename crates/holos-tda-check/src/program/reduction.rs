@@ -96,6 +96,10 @@ impl Complex {
             })
             .collect()
     }
+
+    pub(super) fn edge_position(&self, edge: (usize, usize)) -> Option<usize> {
+        self.edge_rows.get(&edge).copied()
+    }
 }
 
 fn build_edges(

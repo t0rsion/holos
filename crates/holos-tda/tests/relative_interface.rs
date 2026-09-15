@@ -68,6 +68,24 @@ fn independent_checker_rejects_mutations_and_truncations() {
 }
 
 #[test]
+fn independent_checker_rejects_protected_vertex_outside_input() {
+    let input = graph(4, &[(0, 1, 0.0), (1, 2, 1.0), (2, 3, 1.0), (0, 3, 1.0)]);
+    let certificate = RelativeInterfaceCertificate::build(
+        &input,
+        &RipsParams::new(1),
+        &[0, 1],
+        CertificateLimits::default(),
+    )
+    .unwrap();
+    let mut bytes = certificate.encode(CertificateLimits::default()).unwrap();
+    let second_protected_vertex = 8 + 2 + 1 + 8 + 4 + 8 + 8;
+    bytes[second_protected_vertex..second_protected_vertex + 8]
+        .copy_from_slice(&999u64.to_be_bytes());
+    let error = verify_relative_interface(&bytes, ProofLimits::default()).unwrap_err();
+    assert!(error.message().contains("outside the input complex"));
+}
+
+#[test]
 fn composes_h3_through_a_flag_sphere_separator() {
     let separator_edges: Vec<_> = (0..6)
         .flat_map(|u| (u + 1..6).map(move |v| (u, v)))

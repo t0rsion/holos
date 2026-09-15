@@ -70,7 +70,9 @@ impl PointPersistenceAtlas {
     }
 
     /// Conservative per-point Euclidean radius. Within it, pairwise distance
-    /// relations and threshold memberships stay fixed.
+    /// relations and threshold memberships stay fixed. A zero radius forces a
+    /// rebuild for every changed cloud. Pairwise distance overflow sets it to
+    /// zero.
     pub fn coordinate_radius(&self) -> f64 {
         self.coordinate_radius
     }
@@ -175,6 +177,9 @@ fn coordinate_radius(points: &[Vec<f64>], threshold: f64) -> Result<f64> {
     for v in 1..points.len() {
         for u in 0..v {
             let distance = dense.get(u, v);
+            if !distance.is_finite() {
+                return Ok(0.0);
+            }
             distances.push(distance);
             threshold_gap = threshold_gap.min((distance - threshold).abs());
         }
